@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code agentic-dev session store (machine-local; see architecture-docs §5)
+dev/devlog.sqlite
+dev/devlog.sqlite-wal
+dev/devlog.sqlite-shm
+.claude/settings.local.json

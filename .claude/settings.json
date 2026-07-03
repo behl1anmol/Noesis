@@ -1,0 +1,89 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Bash(uv run *:*)",
+      "Bash(uv add *:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(pytest *:*)",
+      "Bash(docker compose *:*)",
+      "Bash(python .claude/scripts/devlog.py *:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf *:*)",
+      "Edit(.env*)",
+      "Edit(dev/devlog.sqlite)",
+      "Edit(CLAUDE.md)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/session_start.py" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/session_end.py" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/guard_bash.py" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "uv run ruff format --quiet $CLAUDE_FILE_PATH || true" }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/checkpoint.py --trigger-hint precompact_manual" }
+        ]
+      },
+      {
+        "matcher": "auto",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/checkpoint.py --trigger-hint precompact_auto" }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/checkpoint.py --trigger-hint stopfailure_rate_limit" }
+        ]
+      },
+      {
+        "matcher": "billing_error",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/checkpoint.py --trigger-hint stopfailure_billing_error" }
+        ]
+      },
+      {
+        "matcher": "overloaded",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/checkpoint.py --trigger-hint stopfailure_overloaded" }
+        ]
+      }
+    ]
+  }
+}
