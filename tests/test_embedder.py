@@ -1,6 +1,6 @@
 """M1 tests for the Embedder Protocol boundary and FakeEmbedder."""
 
-from code_index.core.embedder import Embedder, FakeEmbedder
+from noesis.core.embedder import Embedder, FakeEmbedder
 
 
 async def takes(e: Embedder) -> int:

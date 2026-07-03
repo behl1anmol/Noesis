@@ -1,5 +1,5 @@
 [project]
-name = "code-index"
+name = "noesis"
 version = "0.1.0"
 description = "Noesis — local hybrid code-retrieval service for AI agents (MCP primary, REST secondary)"
 readme = "README.md"

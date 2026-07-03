@@ -1,7 +1,7 @@
 import hashlib
 from pathlib import Path
 
-from code_index.core.hashdiff import DiffResult, hash_file, partition
+from noesis.core.hashdiff import DiffResult, hash_file, partition
 
 
 def write(root: Path, rel: str, content: str) -> str:

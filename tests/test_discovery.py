@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from code_index.core.discovery import (
+from noesis.core.discovery import (
     DiscoveryConfig,
     discover_files,
     is_secret_path,
 )
-from code_index.core.languages import detect_language
+from noesis.core.languages import detect_language
 
 
 def make_tree(root: Path, files: dict[str, bytes | str]) -> None:

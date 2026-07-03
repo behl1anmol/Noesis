@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from code_index.core import state
+from noesis.core import state
 
 
 @pytest.fixture()

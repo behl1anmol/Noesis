@@ -6,10 +6,10 @@ Full loop: register -> discover -> partition -> persist state -> mutate repo
 
 from pathlib import Path
 
-from code_index.core import state
-from code_index.core.discovery import discover_files
-from code_index.core.hashdiff import partition
-from code_index.core.languages import detect_language
+from noesis.core import state
+from noesis.core.discovery import discover_files
+from noesis.core.hashdiff import partition
+from noesis.core.languages import detect_language
 
 
 def build_repo(root: Path) -> None:
