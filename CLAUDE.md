@@ -8,7 +8,7 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
 - architecture-docs/code-indexer-initial-idea.md            (approved baseline)
 
 ## Commands
-- `uv run uvicorn code_index.app:app --host 127.0.0.1 --port 8000`
+- `uv run uvicorn noesis.app:app --host 127.0.0.1 --port 8000`
 - `uv run pytest` | `uv run pytest tests/eval/ -m golden` (harness)
 - `docker compose up -d` (Qdrant)
 - `python .claude/scripts/devlog.py latest` (session state)
@@ -41,4 +41,4 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
    directly — go through devlog.py.
 
 ## Layout
-src/code_index/{core,api,mcp,app.py} — api/ and mcp/ are thin over core/.
+src/noesis/{core,api,mcp,app.py} — api/ and mcp/ are thin over core/.
