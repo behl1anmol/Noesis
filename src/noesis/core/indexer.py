@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from . import hashdiff, state
+from . import gitfast, hashdiff, state
 from .chunker import chunk_file
 from .discovery import DiscoveryConfig, discover_files
 from .embedder import Embedder
@@ -28,6 +28,8 @@ class IndexResult:
     files_indexed: int
     files_deleted: int
     chunks_written: int
+    fast_path_used: bool = False
+    candidate_count: int | None = None
 
 
 def prepare_run(
@@ -51,6 +53,7 @@ async def index_project(
     *,
     batch_size: int = 32,
     discovery_config: DiscoveryConfig | None = None,
+    git_fast_path: bool = True,
 ) -> IndexResult:
     """Register, open a run, and index in one call (tests / CLI use)."""
     project_id, run_id = prepare_run(conn, embedder, root_path)
@@ -63,6 +66,7 @@ async def index_project(
         run_id,
         batch_size=batch_size,
         discovery_config=discovery_config,
+        git_fast_path=git_fast_path,
     )
 
 
@@ -76,6 +80,7 @@ async def execute_run(
     *,
     batch_size: int = 32,
     discovery_config: DiscoveryConfig | None = None,
+    git_fast_path: bool = True,
 ) -> IndexResult:
     """Index changes for an already-registered project under an open run.
 
@@ -84,9 +89,31 @@ async def execute_run(
     re-processes only what is still out of date (Overview §5).
     """
     try:
+        # Git fast-path (§3.2): capture HEAD and the candidate set BEFORE
+        # discovery/hashing — anything committed after this point is simply
+        # re-examined next run (the safe direction). Every fallback is
+        # silent here and logged in gitfast; hash stays the truth.
+        head: str | None = None
+        candidates: gitfast.CandidatePathSet | None = None
+        if git_fast_path:
+            anchor = None
+            project = state.get_project(conn, project_id)
+            if project is not None:
+                anchor = project["last_indexed_commit"]
+            git_info = (
+                gitfast.compute_candidates(root_path, anchor) if anchor else None
+            )
+            if git_info is not None:
+                head = git_info.head_commit
+                candidates = git_info.candidates
+            else:
+                # Full walk this run, but still record HEAD (on success) so
+                # the next run has an anchor to fast-path from (rule 4).
+                head = gitfast.resolve_head(root_path)
+
         discovered = discover_files(root_path, discovery_config)
         stored = state.get_file_states(conn, project_id)
-        diff = hashdiff.partition(root_path, discovered, stored)
+        diff = hashdiff.partition(root_path, discovered, stored, candidates=candidates)
 
         chunks_written = 0
         to_index = [*diff.new, *diff.changed]
@@ -134,7 +161,11 @@ async def execute_run(
             files_total=len(discovered),
             files_changed=len(to_index),
             chunks_written=chunks_written,
+            fast_path_used=candidates is not None,
+            candidate_count=None if candidates is None else len(candidates),
         )
+        if head is not None:
+            state.set_last_indexed_commit(conn, project_id, head)
         return IndexResult(
             project_id=project_id,
             run_id=run_id,
@@ -142,6 +173,8 @@ async def execute_run(
             files_indexed=len(to_index),
             files_deleted=len(diff.deleted),
             chunks_written=chunks_written,
+            fast_path_used=candidates is not None,
+            candidate_count=None if candidates is None else len(candidates),
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

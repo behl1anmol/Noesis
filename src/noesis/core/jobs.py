@@ -29,6 +29,7 @@ class _ContextLike(Protocol):
     store: Any
     embedder: Any
     jobs: dict[str, asyncio.Task]
+    git_fast_path: bool
 
 
 def launch_index_run(ctx: _ContextLike, root_path: str) -> dict[str, str]:
@@ -57,7 +58,13 @@ def launch_index_run(ctx: _ContextLike, root_path: str) -> dict[str, str]:
     async def _run() -> None:
         try:
             await execute_run(
-                ctx.conn, ctx.store, ctx.embedder, root_path, project_id, run_id
+                ctx.conn,
+                ctx.store,
+                ctx.embedder,
+                root_path,
+                project_id,
+                run_id,
+                git_fast_path=ctx.git_fast_path,
             )
         except Exception:
             # execute_run already marked the run failed; log for the operator.

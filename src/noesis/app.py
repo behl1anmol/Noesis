@@ -43,6 +43,7 @@ class AppContext:
     reranker: Reranker | None = None
     rerank_candidates: int = 50
     structural: StructuralSettings = field(default_factory=StructuralSettings)
+    git_fast_path: bool = True
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
 
 
@@ -86,6 +87,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         reranker=reranker,
         rerank_candidates=cfg.reranker.candidates,
         structural=cfg.structural,
+        git_fast_path=cfg.git.fast_path,
     )
 
 
