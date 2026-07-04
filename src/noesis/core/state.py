@@ -35,17 +35,27 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE TABLE IF NOT EXISTS index_runs (
-  id             TEXT PRIMARY KEY,
-  project_id     TEXT NOT NULL REFERENCES projects(id),
-  status         TEXT NOT NULL CHECK(status IN ('queued','running','done','failed')),
-  files_total    INTEGER,
-  files_changed  INTEGER,
-  chunks_written INTEGER,
-  started_at     TEXT,
-  finished_at    TEXT,
-  error          TEXT
+  id              TEXT PRIMARY KEY,
+  project_id      TEXT NOT NULL REFERENCES projects(id),
+  status          TEXT NOT NULL CHECK(status IN ('queued','running','done','failed')),
+  files_total     INTEGER,
+  files_changed   INTEGER,
+  chunks_written  INTEGER,
+  fast_path_used  INTEGER,
+  candidate_count INTEGER,
+  started_at      TEXT,
+  finished_at     TEXT,
+  error           TEXT
 );
 """
+
+# Additive column migrations for DBs created by earlier milestones —
+# CREATE TABLE IF NOT EXISTS never alters an existing table.
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("projects", "last_indexed_commit", "TEXT"),
+    ("index_runs", "fast_path_used", "INTEGER"),
+    ("index_runs", "candidate_count", "INTEGER"),
+)
 
 
 def _now() -> str:
@@ -66,6 +76,10 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
+    for table, column, ddl_type in _MIGRATIONS:
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
     conn.commit()
 
 
@@ -103,6 +117,20 @@ def get_project(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row | None
 
 def list_projects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
+
+
+def set_last_indexed_commit(
+    conn: sqlite3.Connection, project_id: str, commit: str
+) -> None:
+    """Record the git fast-path anchor. Callers must invoke this only after
+    a run completes successfully (§3.2 rule 4) — an anchor from a failed
+    run would let the next fast path skip files the failed run never
+    finished indexing."""
+    conn.execute(
+        "UPDATE projects SET last_indexed_commit = ?, updated_at = ? WHERE id = ?",
+        (commit, _now(), project_id),
+    )
+    conn.commit()
 
 
 def get_file_states(conn: sqlite3.Connection, project_id: str) -> dict[str, str]:
@@ -177,15 +205,27 @@ def finish_run(
     files_total: int | None = None,
     files_changed: int | None = None,
     chunks_written: int | None = None,
+    fast_path_used: bool | None = None,
+    candidate_count: int | None = None,
     error: str | None = None,
 ) -> None:
     conn.execute(
         """
         UPDATE index_runs SET
           status = ?, files_total = ?, files_changed = ?, chunks_written = ?,
-          finished_at = ?, error = ?
+          fast_path_used = ?, candidate_count = ?, finished_at = ?, error = ?
         WHERE id = ?
         """,
-        (status, files_total, files_changed, chunks_written, _now(), error, run_id),
+        (
+            status,
+            files_total,
+            files_changed,
+            chunks_written,
+            None if fast_path_used is None else int(fast_path_used),
+            candidate_count,
+            _now(),
+            error,
+            run_id,
+        ),
     )
     conn.commit()

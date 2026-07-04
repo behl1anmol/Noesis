@@ -55,6 +55,15 @@ class StructuralSettings:
 
 
 @dataclass(frozen=True)
+class GitSettings:
+    """§3.7 ``[git]``. ``fast_path=false`` disables candidate narrowing
+    entirely — every run full hash-walks (the correctness baseline the
+    fast path must match, §3.2 rule 1)."""
+
+    fast_path: bool = True
+
+
+@dataclass(frozen=True)
 class QdrantSettings:
     url: str = DEFAULT_QUERY_URL
     collection: str = "noesis_chunks"
@@ -66,6 +75,7 @@ class Settings:
     embedder: EmbedderSettings = field(default_factory=EmbedderSettings)
     reranker: RerankerSettings = field(default_factory=RerankerSettings)
     structural: StructuralSettings = field(default_factory=StructuralSettings)
+    git: GitSettings = field(default_factory=GitSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
 
 
@@ -79,6 +89,7 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
     emb = raw.get("embedder", {})
     rrk = raw.get("reranker", {})
     stru = raw.get("structural", {})
+    git = raw.get("git", {})
     qdr = raw.get("qdrant", {})
     return Settings(
         db_path=Path(raw.get("db_path", Settings.db_path)),
@@ -99,6 +110,9 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
         structural=StructuralSettings(
             max_results=int(stru.get("max_results", StructuralSettings.max_results)),
             timeout_s=float(stru.get("timeout_s", StructuralSettings.timeout_s)),
+        ),
+        git=GitSettings(
+            fast_path=bool(git.get("fast_path", GitSettings.fast_path)),
         ),
         qdrant=QdrantSettings(
             url=qdr.get("url", QdrantSettings.url),

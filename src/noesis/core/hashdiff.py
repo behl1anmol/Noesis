@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import AbstractSet, Iterable, Mapping
 
 _READ_CHUNK = 1 << 20  # 1 MiB
 
@@ -40,12 +40,21 @@ def partition(
     root: str | Path,
     discovered: Iterable[str],
     stored: Mapping[str, str],
+    *,
+    candidates: AbstractSet[str] | None = None,
 ) -> DiffResult:
     """Partition `discovered` (relative POSIX paths under `root`) against
     `stored` (path -> content_hash from the files table).
 
     Files that vanish between discovery and hashing are treated as deleted —
     the filesystem is ground truth at the moment it is read.
+
+    When `candidates` is given (git fast-path, §3.2), only discovered files
+    that are candidates — or unknown to `stored` — get hashed; the rest
+    carry their stored hash forward as unchanged. Candidacy only shrinks
+    the hashing work, never decides changed/unchanged by itself (rule 1):
+    every hashed file is still compared against `stored`, and deletions
+    fall out of discovery exactly as in the full walk.
     """
     root = Path(root)
     new: list[str] = []
@@ -55,6 +64,16 @@ def partition(
     seen: set[str] = set()
 
     for rel in discovered:
+        prior_hash = stored.get(rel)
+        if (
+            candidates is not None
+            and prior_hash is not None
+            and rel not in candidates
+        ):
+            seen.add(rel)
+            hashes[rel] = prior_hash
+            unchanged.append(rel)
+            continue
         try:
             current = hash_file(root / rel)
         except OSError:
