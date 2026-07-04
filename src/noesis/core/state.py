@@ -156,6 +156,19 @@ def start_run(conn: sqlite3.Connection, project_id: str) -> str:
     return run_id
 
 
+def get_latest_run(
+    conn: sqlite3.Connection, project_id: str
+) -> sqlite3.Row | None:
+    """Most recent index run for a project — the M6 ``get_index_status``
+    surface. Ordered by started_at (ISO-8601 UTC, lexicographically
+    sortable); ties broken by rowid (insertion order)."""
+    return conn.execute(
+        "SELECT * FROM index_runs WHERE project_id = ?"
+        " ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+
+
 def finish_run(
     conn: sqlite3.Connection,
     run_id: str,

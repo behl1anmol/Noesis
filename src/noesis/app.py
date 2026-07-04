@@ -1,9 +1,12 @@
 """FastAPI application factory (Overview §4.2, expanded §3.1).
 
 One process, localhost-only (CLAUDE.md rule 2 — run with
-``uvicorn noesis.app:app --host 127.0.0.1``; never a wildcard bind). The lifespan
-owns every core resource: SQLite connection, Qdrant client, the Embedder.
-FastMCP mounts into this same app with a shared lifespan in M6.
+``uvicorn noesis.app:app --host 127.0.0.1``; never a wildcard bind). The
+lifespan owns every core resource: SQLite connection, Qdrant client, the
+Embedder. The FastMCP server (M6) mounts at ``/mcp`` via the Draft's
+verified pattern — ``mcp.http_app(path="/")`` combined into this app's
+lifespan with ``combine_lifespans`` so the MCP session manager's task
+group is initialized alongside our resources.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from sqlite3 import Connection
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastmcp.utilities.lifespan import combine_lifespans
 from qdrant_client import QdrantClient
 
 from noesis.api.routes import router
@@ -23,6 +27,7 @@ from noesis.core.config import Settings, StructuralSettings, load_settings
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
 from noesis.core.vectorstore import VectorStore
+from noesis.mcp import build_mcp
 
 
 @dataclass
@@ -41,6 +46,61 @@ class AppContext:
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
 
 
+async def build_runtime_context(cfg: Settings) -> AppContext:
+    """Construct production core resources from settings. Shared by the
+    FastAPI lifespan and the stdio MCP entry point (noesis.mcp.__main__) —
+    one build path, so the two transports cannot diverge on wiring."""
+    # Same persistent fastembed cache default as noesis.prefetch —
+    # without it, the BM25 assets land in the system tmp dir and
+    # get re-fetched after a reboot (runtime network, ADR-25-adjacent).
+    import os
+
+    from noesis.prefetch import FASTEMBED_CACHE_DEFAULT, FASTEMBED_CACHE_ENV
+
+    os.environ.setdefault(FASTEMBED_CACHE_ENV, FASTEMBED_CACHE_DEFAULT)
+    conn = state.connect(cfg.db_path)
+    state.init_db(conn)
+    embedder = LocalSTEmbedder(
+        model_id=cfg.embedder.model,
+        dim=cfg.embedder.dim,
+        batch_size=cfg.embedder.batch_size,
+        device=cfg.embedder.device,
+    )
+    store = VectorStore(
+        QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
+    )
+    store.ensure_collection(embedder)
+    reranker: LocalCrossEncoderReranker | None = None
+    if cfg.reranker.enabled:
+        reranker = LocalCrossEncoderReranker(
+            model_id=cfg.reranker.model,
+            batch_size=cfg.reranker.batch_size,
+            device=cfg.reranker.device,
+        )
+        if cfg.reranker.preload:
+            await reranker.preload()
+    return AppContext(
+        conn=conn,
+        store=store,
+        embedder=embedder,
+        reranker=reranker,
+        rerank_candidates=cfg.reranker.candidates,
+        structural=cfg.structural,
+    )
+
+
+def close_runtime_context(ctx: AppContext) -> None:
+    """Tear down what build_runtime_context created: cancel orphan index
+    jobs, stop model worker threads, close SQLite."""
+    for task in list(ctx.jobs.values()):
+        task.cancel()
+    for resource in (ctx.embedder, ctx.reranker):
+        close = getattr(resource, "close", None)
+        if close is not None:
+            close()
+    ctx.conn.close()
+
+
 def create_app(settings: Settings | None = None, ctx: AppContext | None = None) -> FastAPI:
     """Build the app. Tests pass a pre-built *ctx* (fake embedder,
     in-memory Qdrant); production builds one from settings."""
@@ -51,57 +111,27 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
         if ctx is not None:
             app.state.ctx = ctx
         else:
-            # Same persistent fastembed cache default as noesis.prefetch —
-            # without it, the BM25 assets land in the system tmp dir and
-            # get re-fetched after a reboot (runtime network, ADR-25-adjacent).
-            import os
-
-            from noesis.prefetch import FASTEMBED_CACHE_DEFAULT, FASTEMBED_CACHE_ENV
-
-            os.environ.setdefault(FASTEMBED_CACHE_ENV, FASTEMBED_CACHE_DEFAULT)
-            conn = state.connect(cfg.db_path)
-            state.init_db(conn)
-            embedder = LocalSTEmbedder(
-                model_id=cfg.embedder.model,
-                dim=cfg.embedder.dim,
-                batch_size=cfg.embedder.batch_size,
-                device=cfg.embedder.device,
-            )
-            store = VectorStore(
-                QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
-            )
-            store.ensure_collection(embedder)
-            reranker: LocalCrossEncoderReranker | None = None
-            if cfg.reranker.enabled:
-                reranker = LocalCrossEncoderReranker(
-                    model_id=cfg.reranker.model,
-                    batch_size=cfg.reranker.batch_size,
-                    device=cfg.reranker.device,
-                )
-                if cfg.reranker.preload:
-                    await reranker.preload()
-            app.state.ctx = AppContext(
-                conn=conn,
-                store=store,
-                embedder=embedder,
-                reranker=reranker,
-                rerank_candidates=cfg.reranker.candidates,
-                structural=cfg.structural,
-            )
+            app.state.ctx = await build_runtime_context(cfg)
         try:
             yield
         finally:
-            for task in list(app.state.ctx.jobs.values()):
-                task.cancel()
             if ctx is None:
-                for resource in (app.state.ctx.embedder, app.state.ctx.reranker):
-                    close = getattr(resource, "close", None)
-                    if close is not None:
-                        close()
-                app.state.ctx.conn.close()
+                close_runtime_context(app.state.ctx)
+            else:
+                for task in list(app.state.ctx.jobs.values()):
+                    task.cancel()
 
-    app = FastAPI(title="noesis", lifespan=lifespan)
+    # MCP tools resolve the context lazily (per call) from this app's
+    # state — the closure is late-bound, and tools can only run after the
+    # combined lifespan has set app.state.ctx.
+    mcp = build_mcp(lambda: app.state.ctx)
+    mcp_app = mcp.http_app(path="/")
+
+    app = FastAPI(
+        title="noesis", lifespan=combine_lifespans(lifespan, mcp_app.lifespan)
+    )
     app.include_router(router)
+    app.mount("/mcp", mcp_app)
     return app
 
 

@@ -40,6 +40,7 @@ import uuid
 from typing import Any, Iterable, Literal, Protocol
 
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 # Fixed namespace for deterministic chunk point ids. Never change this:
 # it would orphan every existing point on the next re-index.
@@ -328,6 +329,7 @@ class VectorStore:
         for point in response.points:
             payload = point.payload or {}
             result = {
+                "chunk_id": str(point.id),
                 "file_path": payload.get("file_path"),
                 "start_line": payload.get("start_line"),
                 "end_line": payload.get("end_line"),
@@ -340,3 +342,39 @@ class VectorStore:
                 result["text"] = payload.get("text") or ""
             results.append(result)
         return results
+
+    def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
+        """Fetch one stored chunk by its point id (M6 ``get_chunk`` tool).
+
+        ``chunk_id`` values come from search hits — the deterministic
+        UUIDv5 point ids. Returns the exact stored span with full chunk
+        ``content`` (the payload ``text``), or None for an unknown id.
+        Content is the *indexed* snapshot, not ground truth — callers read
+        the live file before acting (§3.3)."""
+        try:
+            points = self._client.retrieve(
+                collection_name=self._collection,
+                ids=[chunk_id],
+                with_payload=True,
+            )
+        except UnexpectedResponse as exc:
+            # A remote server rejects malformed point ids (non-UUID strings)
+            # with 400 — same meaning as unknown. Local mode just returns
+            # nothing. Anything else (connection down, 5xx) must propagate,
+            # not masquerade as "unknown chunk_id".
+            if exc.status_code == 400:
+                return None
+            raise
+        if not points:
+            return None
+        payload = points[0].payload or {}
+        return {
+            "chunk_id": str(points[0].id),
+            "project_id": payload.get("project_id"),
+            "file_path": payload.get("file_path"),
+            "start_line": payload.get("start_line"),
+            "end_line": payload.get("end_line"),
+            "language": payload.get("language"),
+            "symbol_name": payload.get("symbol_name"),
+            "content": payload.get("text") or "",
+        }

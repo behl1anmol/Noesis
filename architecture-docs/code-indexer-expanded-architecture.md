@@ -208,7 +208,7 @@ sequenceDiagram
     else
         Ret-->>Ret: truncate fused list to top_k
     end
-    Ret-->>Agent: spans {file_path, start_line, end_line, language, symbol_name, score, rerank_score?, snippet}
+    Ret-->>Agent: spans {chunk_id, file_path, start_line, end_line, language, symbol_name, score, rerank_score?, snippet}
     Agent->>Agent: read live file (candidates, not ground truth)
 ```
 
@@ -218,6 +218,7 @@ sequenceDiagram
 - **Contract.** `rerank` defaults to the config value; the response always states whether reranking was applied. Candidate depth (default 50) and rerank batch size are config, not constants.
 - **Gate.** Default-on only if the M4 evaluation shows NDCG@10 improvement over the M3 hybrid baseline on the golden set. If it doesn't win, it ships default-off with the measurement recorded in the decision log. (Per Finding 2 — we don't ship a latency tax on faith.)
 - **Input truncation.** bge-reranker-v2-m3 pairs are truncated to the model's max length; chunks already target 300–800 tokens, so truncation is rare — log when it happens.
+- **`chunk_id` in hits (M6, ADR-36).** Every hit carries the deterministic Qdrant point id, because the approved `get_chunk(chunk_id)` tool is unusable if agents can never learn a chunk id — search hits are the only discovery surface. Additive field; the rest of the span shape is unchanged.
 
 ## 3.4 The `Embedder` plug-in boundary (local-only)
 
@@ -639,6 +640,7 @@ ADR numbers are stable across revisions; ADR-25 is rewritten, not renumbered.
 | 33 | Reranker model-loading boundary (M4, 2026-07-04, stakeholder-approved) | New `core/reranker.py` behind a tiny `Reranker` Protocol; CLAUDE.md rule 1 + CI grep amended to allow `sentence_transformers` in exactly two modules — `core/embedder.py` and `core/reranker.py`, the model-loading boundaries | §2 always planned sentence-transformers to load both CodeRankEmbed *and* the CrossEncoder; rule 1's wording predates M4. The amendment keeps the rule's intent (one module per model class, Protocol-only calls, CI-grepped) and mirrors ADR-20's worker separation at module level | House the CrossEncoder inside `core/embedder.py` (satisfies the rule's letter, muddies the boundary it protects) |
 | 34 | Rerank request-flag default (M4, 2026-07-04, stakeholder-approved) | `rerank` defaults to `reranker.enabled`: `enabled=true` → rerank on by default with per-request opt-out; `enabled=false` (shipped pre-gate default, Finding 2) → model never loads and `rerank=true` returns `reranked:false` stated in the response, not an error | §3.3 says "`rerank` defaults to the config value" and §3.7 lists only enabled/preload/candidates/batch_size — `enabled` doing double duty (availability + default) implements the contract with no new config key and no doc deviation | Separate `default_on` key (more flexible, but a config surface the doc doesn't list) |
 | 35 | **M4 gate decision: reranker ships default-off / opt-in** (2026-07-04, from measured data) | Quality gate **passed** (overall NDCG@10 +0.106, Recall@10 +0.088, every category up, zero regressions, 40-query golden set); latency gate **failed** (12.2 s p50 / 13.4 s p95 per reranked query, T4 GPU fp32 — ~27× the proposed 500 ms p95 budget; CPU strictly worse). Ships `reranker.enabled=false`, per-request `rerank:true` opt-in. Full data + verification: `m4-reranker-benchmarks.md` | The 12 s is intrinsic model cost, not a defect — device logged `cuda`, tokenization measured at 215 ms, and the FLOP estimate (568M × 512 tok × 50 pairs ≈ 582 GFLOP/pair → 7–14 s on T4 fp32) brackets the observation. No realistic lever (fp16 ~3–5×) reaches budget. Finding 2 / ADR-19 discharged with numbers | Default-on (ships a ~200× latency multiplier interactive users can't opt out of); dropping the feature (forfeits a measured +0.106 NDCG win that opt-in callers can buy) |
+| 36 | `chunk_id` exposed in search hits (M6, 2026-07-04, stakeholder-approved) | Every search hit carries its deterministic Qdrant point id; `get_chunk(chunk_id)` (MCP-only, per the approved tool list) fetches the exact stored span | The approved `get_chunk` tool is dead surface unless agents can discover ids, and search hits are the only discovery path; the id is already deterministic (UUIDv5, Overview §6) so this exposes existing state, adds none | Ship `get_chunk` without surfacing ids (tool uncallable in practice); key `get_chunk` by `file_path:start_line` (ambiguous across hash versions, bypasses the point-id contract) |
 
 ## B. Risk register — additions/updates
 
