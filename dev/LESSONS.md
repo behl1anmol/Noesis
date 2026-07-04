@@ -11,6 +11,11 @@ lesson may never weaken those. See `architecture-docs/code-indexer-expanded-arch
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
+## [5] testing (occurrences: 1)
+**Mistake:** An M4 rerank latency of ~12s/query looked anomalously high, so I attributed it to a device fallback — first a CPU-only torch build, then sentence-transformers placing the model on CPU despite a T4. Both were wrong: device logging confirmed cuda, a tokenizer micro-benchmark ruled out my code (215ms), and a FLOP estimate (568M params x 512 tokens x 50 pairs at fp32 on a T4 = 7-14s) showed 12s was simply the honest model cost. I nearly wrote each wrong root cause into the docs.
+**Lesson:** Before attributing an anomalous latency to a bug or misconfig, verify the cause by measurement: log the actual device, micro-benchmark the suspected hot path, and sanity-check against a first-principles FLOP/throughput estimate. A large number is often the genuine cost of a large model over many items, not a defect — confirm which before acting or documenting.
+**Rationale:** Guessing a root cause from a number's magnitude alone produced two successive wrong hypotheses and almost put fabricated causes in the architecture doc (violates constraint A). A 30-minute measurement pass (device log + tokenizer timing + FLOP math) settled it definitively. Recording the compute device remains good practice — it is what let us rule out a fallback — but the binding lesson is measure-before-attributing.
+
 ## [3] process (occurrences: 1)
 **Mistake:** The eval harness's write-baseline-if-missing convenience let a subagent's early background run (contaminated corpus: golden.yaml indexed, pre-fix labels) silently become the stored M2 baseline; the clean gate run then loaded it instead of writing its own, and the mismatch only surfaced because live-dense and stored-dense NDCG disagreed in the third decimal
 **Lesson:** Before trusting any auto-written-on-absence artifact (baselines, caches, snapshots), verify its provenance matches the current methodology - after changing corpus, labels, or scoring, delete and regenerate such artifacts rather than letting stale ones be silently consumed

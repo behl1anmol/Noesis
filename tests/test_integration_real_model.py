@@ -51,9 +51,15 @@ async def test_nl_query_returns_sane_spans(tmp_path, embedder):
     result = await index_project(conn, store, embedder, str(repo))
     assert result.chunks_written > 0
 
-    hits = await search_code(
-        store, embedder, "where do we validate JWT expiry", result.project_id, top_k=2
-    )
+    hits = (
+        await search_code(
+            store,
+            embedder,
+            "where do we validate JWT expiry",
+            result.project_id,
+            top_k=2,
+        )
+    )["hits"]
     assert hits
     assert hits[0]["file_path"] == "auth.py", (
         f"expected the JWT chunk first, got {hits[0]}"

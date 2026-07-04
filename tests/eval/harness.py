@@ -1,10 +1,16 @@
-"""M3 evaluation harness (doc §6.2, M3 gate).
+"""Evaluation harness (doc §6.2; M3 gate, extended for the M4 gate).
 
 Loads the human-labeled golden set (``tests/eval/golden.yaml``), runs a
 search function per query, and reports Recall@5, Recall@10 and NDCG@10 per
 query category (nl / symbol / structural) plus overall. The M3 gate compares
 the hybrid channel against the stored M2 dense-only baseline
 (``tests/eval/baselines/m2_dense.json``) — numbers or it didn't happen.
+
+M4 (§3.8): every row also carries search latency p50/p95 in milliseconds —
+wall time of the full search call per query, nearest-rank percentiles — so
+the reranker's cost is visible next to its NDCG gain. Latency is measured,
+never compared by the quality-delta view: quality gates and latency budgets
+are separate stakeholder decisions.
 
 Scoring rules (deliberate, stated so the numbers are reproducible):
 
@@ -24,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -32,6 +39,7 @@ import yaml
 
 CATEGORIES = ("nl", "symbol", "structural")
 NDCG_K = 10
+LATENCY_KEYS = ("latency_p50_ms", "latency_p95_ms")
 
 SearchFn = Callable[[str], Awaitable[list[dict[str, Any]]]]
 
@@ -148,12 +156,26 @@ def score_query(
     return scores
 
 
+def percentile(values: list[float], pct: float) -> float:
+    """Nearest-rank percentile (no interpolation): the smallest value with at
+    least ``pct`` percent of the sample at or below it. Deterministic and
+    honest at eval-set sizes (~40 queries)."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = math.ceil(pct / 100.0 * len(ordered))
+    return ordered[max(rank, 1) - 1]
+
+
 def _mean_rows(per_query: list[dict[str, Any]], metric_keys: list[str]) -> dict:
     row: dict[str, Any] = {"n_queries": len(per_query)}
     for key in metric_keys:
         row[key] = (
             sum(q[key] for q in per_query) / len(per_query) if per_query else 0.0
         )
+    latencies = [q["latency_ms"] for q in per_query if "latency_ms" in q]
+    row["latency_p50_ms"] = percentile(latencies, 50)
+    row["latency_p95_ms"] = percentile(latencies, 95)
     return row
 
 
@@ -167,9 +189,18 @@ async def evaluate(
     metric_keys = [f"recall@{k}" for k in ks] + [f"ndcg@{NDCG_K}"]
     per_query: list[dict[str, Any]] = []
     for gq in golden:
+        started = time.perf_counter()
         results = await search_fn(gq.query)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         scores = score_query(results, gq.relevant, ks=ks)
-        per_query.append({"id": gq.id, "category": gq.category, **scores})
+        per_query.append(
+            {
+                "id": gq.id,
+                "category": gq.category,
+                **scores,
+                "latency_ms": elapsed_ms,
+            }
+        )
 
     report: dict[str, Any] = {
         "overall": _mean_rows(per_query, metric_keys),
@@ -207,11 +238,17 @@ _METRICS = ("recall@5", "recall@10", f"ndcg@{NDCG_K}")
 
 
 def format_table(reports: dict[str, dict[str, Any]]) -> str:
-    """Markdown table: one row per (category, channel), overall last."""
+    """Markdown table: one row per (category, channel), overall last.
+    Latency columns appear when the rows carry them (fresh runs do; stored
+    pre-M4 baselines may not)."""
     channels = list(reports)
+    columns = list(_METRICS)
+    sample = next(iter(reports.values()))["overall"]
+    if all(key in sample for key in LATENCY_KEYS):
+        columns += list(LATENCY_KEYS)
     lines = [
-        "| category | n | channel | " + " | ".join(_METRICS) + " |",
-        "|---|---|---|" + "---|" * len(_METRICS),
+        "| category | n | channel | " + " | ".join(columns) + " |",
+        "|---|---|---|" + "---|" * len(columns),
     ]
     for cat in (*CATEGORIES, "overall"):
         for channel in channels:
@@ -219,7 +256,10 @@ def format_table(reports: dict[str, dict[str, Any]]) -> str:
             row = (
                 report["overall"] if cat == "overall" else report["categories"][cat]
             )
-            cells = " | ".join(f"{row[m]:.3f}" for m in _METRICS)
+            cells = " | ".join(
+                f"{row[c]:.1f}" if c in LATENCY_KEYS else f"{row[c]:.3f}"
+                for c in columns
+            )
             lines.append(
                 f"| {cat} | {row['n_queries']} | {channel} | {cells} |"
             )
@@ -227,22 +267,29 @@ def format_table(reports: dict[str, dict[str, Any]]) -> str:
 
 
 def format_delta(
-    hybrid: dict[str, Any], baseline: dict[str, Any]
+    challenger: dict[str, Any],
+    baseline: dict[str, Any],
+    challenger_label: str = "hybrid",
+    baseline_label: str = "m2 dense (stored)",
 ) -> str:
-    """Hybrid-vs-stored-baseline delta per category (the M3 gate view)."""
+    """Challenger-vs-baseline quality delta per category (gate view: M3 used
+    hybrid vs stored M2 dense; M4 uses hybrid+rerank vs same-run hybrid).
+    Quality metrics only — latency is reported, not gated, by this table."""
     lines = [
-        "| category | metric | m2 dense (stored) | hybrid | delta |",
+        f"| category | metric | {baseline_label} | {challenger_label} | delta |",
         "|---|---|---|---|---|",
     ]
     for cat in (*CATEGORIES, "overall"):
-        hyb = hybrid["overall"] if cat == "overall" else hybrid["categories"][cat]
+        cha = (
+            challenger["overall"] if cat == "overall" else challenger["categories"][cat]
+        )
         base = (
             baseline["overall"] if cat == "overall" else baseline["categories"][cat]
         )
         for metric in _METRICS:
-            delta = hyb[metric] - base[metric]
+            delta = cha[metric] - base[metric]
             lines.append(
-                f"| {cat} | {metric} | {base[metric]:.3f} | {hyb[metric]:.3f} "
+                f"| {cat} | {metric} | {base[metric]:.3f} | {cha[metric]:.3f} "
                 f"| {delta:+.3f} |"
             )
     return "\n".join(lines)

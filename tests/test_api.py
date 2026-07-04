@@ -16,6 +16,7 @@ from qdrant_client import QdrantClient
 from noesis.app import AppContext, create_app
 from noesis.core import state
 from noesis.core.embedder import FakeEmbedder
+from noesis.core.reranker import FakeReranker
 from noesis.core.vectorstore import VectorStore
 
 
@@ -35,16 +36,26 @@ def project_dir(tmp_path):
     return src
 
 
-@pytest.fixture()
-def client(tmp_path):
+def make_client(tmp_path, reranker=None):
     conn = state.connect(tmp_path / "state.sqlite")
     state.init_db(conn)
     embedder = FakeEmbedder(dim=8)
     store = VectorStore(QdrantClient(":memory:"))
     store.ensure_collection(embedder)
-    ctx = AppContext(conn=conn, store=store, embedder=embedder)
+    ctx = AppContext(conn=conn, store=store, embedder=embedder, reranker=reranker)
     app = create_app(ctx=ctx)
-    with TestClient(app) as tc:
+    return TestClient(app)
+
+
+@pytest.fixture()
+def client(tmp_path):
+    with make_client(tmp_path) as tc:
+        yield tc
+
+
+@pytest.fixture()
+def client_with_reranker(tmp_path):
+    with make_client(tmp_path, reranker=FakeReranker()) as tc:
         yield tc
 
 
@@ -126,3 +137,52 @@ def test_search_channel_param(client, project_dir):
         json={"query": "x", "project_id": body["project_id"], "channel": "psychic"},
     )
     assert resp.status_code == 422
+
+
+def test_search_without_reranker_states_not_reranked(client, project_dir):
+    body = client.post("/projects", json={"root_path": str(project_dir)}).json()
+    assert asyncio.run(_wait_done(client, body["run_id"]))["status"] == "done"
+
+    # No reranker wired: default off, and rerank=true is not an error —
+    # the response just states reranking was not applied (§3.3 contract).
+    for payload in ({}, {"rerank": True}):
+        resp = client.post(
+            "/search",
+            json={"query": "validate token", "project_id": body["project_id"], **payload},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["reranked"] is False
+        assert all("rerank_score" not in h for h in resp.json()["hits"])
+
+
+def test_search_with_reranker_defaults_on_and_opts_out(
+    client_with_reranker, project_dir
+):
+    client = client_with_reranker
+    body = client.post("/projects", json={"root_path": str(project_dir)}).json()
+    assert asyncio.run(_wait_done(client, body["run_id"]))["status"] == "done"
+
+    # rerank omitted → defaults to reranker availability (config enabled).
+    resp = client.post(
+        "/search",
+        json={"query": "validate token expiry", "project_id": body["project_id"]},
+    )
+    assert resp.status_code == 200
+    out = resp.json()
+    assert out["reranked"] is True
+    assert out["hits"]
+    assert all("rerank_score" in h and "text" not in h for h in out["hits"])
+    # FakeReranker is lexical-overlap: the token-validating chunk wins.
+    assert out["hits"][0]["file_path"] == "auth.py"
+
+    # Per-request opt-out.
+    resp = client.post(
+        "/search",
+        json={
+            "query": "validate token expiry",
+            "project_id": body["project_id"],
+            "rerank": False,
+        },
+    )
+    assert resp.json()["reranked"] is False
+    assert all("rerank_score" not in h for h in resp.json()["hits"])

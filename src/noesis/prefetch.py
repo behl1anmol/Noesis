@@ -3,12 +3,14 @@
 Downloads every network-fetched asset the service needs (decision rows 30
 and 32, doc §3.8): tree-sitter grammars for all canonical languages (the
 1.12.x language pack fetches each grammar over HTTP on first
-``get_parser``), the embedding model weights, and the BM25 tokenizer
-assets fastembed fetches on first sparse encode (~100 KB of stopwords and
-stemmer config — same asset class as the model weights, no code or query
-leaves the machine). Run once after ``uv sync``; afterwards the service
-makes zero outbound calls at runtime. Deliberately lives outside
-``core/`` — this is the only module whose job is to trigger downloads.
+``get_parser``), the embedding model weights, the M4 reranker weights
+(skippable — the reranker is optional, config ``reranker.enabled``), and
+the BM25 tokenizer assets fastembed fetches on first sparse encode
+(~100 KB of stopwords and stemmer config — same asset class as the model
+weights, no code or query leaves the machine). Run once after ``uv sync``;
+afterwards the service makes zero outbound calls at runtime. Deliberately
+lives outside ``core/`` — this is the only module whose job is to trigger
+downloads.
 """
 
 from __future__ import annotations
@@ -55,6 +57,20 @@ def prefetch_model(model_id: str) -> None:
     print(f"model ok: {model_id} (dim {len(vector)})")
 
 
+def prefetch_reranker(model_id: str) -> None:
+    # Through the Reranker boundary — rule 1 (as amended by ADR-33) allows
+    # sentence_transformers only in the two model-loading modules; a preload
+    # forces the weight download inside the reranker's worker.
+    import asyncio
+
+    from noesis.core.reranker import LocalCrossEncoderReranker
+
+    reranker = LocalCrossEncoderReranker(model_id=model_id)
+    asyncio.run(reranker.preload())
+    reranker.close()
+    print(f"reranker ok: {model_id}")
+
+
 def prefetch_bm25() -> None:
     # Through the same client-side inference path the vector store uses at
     # runtime, so exactly the assets qdrant-client will look for get cached.
@@ -89,12 +105,20 @@ def main() -> int:
         "--skip-model", action="store_true", help="grammars only, no model weights"
     )
     parser.add_argument("--model", default="nomic-ai/CodeRankEmbed")
+    parser.add_argument(
+        "--skip-reranker",
+        action="store_true",
+        help="skip the ~2.3 GB reranker weights (only needed if reranker.enabled)",
+    )
+    parser.add_argument("--reranker-model", default="BAAI/bge-reranker-v2-m3")
     args = parser.parse_args()
 
     failed = prefetch_grammars()
     prefetch_bm25()
     if not args.skip_model:
         prefetch_model(args.model)
+    if not (args.skip_model or args.skip_reranker):
+        prefetch_reranker(args.reranker_model)
     if failed:
         print(f"{len(failed)} grammar(s) failed: {', '.join(failed)}", file=sys.stderr)
         return 1

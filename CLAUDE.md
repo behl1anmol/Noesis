@@ -15,8 +15,10 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
 - `python .claude/scripts/devlog.py checkpoint latest` (most recent checkpoint)
 
 ## Hard rules
-1. All embedding calls go through core/embedder.py's Embedder Protocol. Never
-   import sentence_transformers outside that module. CI greps for this.
+1.  All embedding calls go through core/embedder.py's Embedder Protocol; all
+    rerank calls go through core/reranker.py's Reranker Protocol (ADR-33).
+    Never import sentence_transformers outside those two model-loading
+    boundaries. CI greps for this.
 2. bind 127.0.0.1 only. Never 0.0.0.0. No outbound HTTP anywhere in core/ —
    remote embedding was rejected (ADR-25); do not reintroduce it.
 3. No new runtime deps without a decision row (use /adr). astchunk is

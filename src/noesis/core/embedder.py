@@ -124,6 +124,7 @@ class LocalSTEmbedder:
         self._model_id = model_id
         self._dim = dim
         self._device = device
+        self._resolved_device: str | None = None  # set at model load
         self._batch_size = batch_size
         self._load_model = _load_model or self._default_load
         self._queue: queue.PriorityQueue[
@@ -142,14 +143,26 @@ class LocalSTEmbedder:
     def dim(self) -> int:
         return self._dim
 
+    @property
+    def resolved_device(self) -> str | None:
+        """The device the model loaded on, or None before the first embed
+        (the worker loads lazily on its first job)."""
+        return self._resolved_device
+
     def _default_load(self) -> Any:
-        # Lazy import: the only sentence_transformers import in the codebase
-        # (CLAUDE.md hard rule 1; CI greps for this). Local model, no network
-        # service — ADR-25.
+        # Lazy import: one of the two sentence_transformers import sites in the
+        # codebase (CLAUDE.md hard rule 1, ADR-33; CI greps for this). Local
+        # model, no network service — ADR-25.
         from sentence_transformers import SentenceTransformer
 
+        from .compute import resolve_device
+
+        # Resolve the device explicitly rather than passing None and trusting
+        # ST's auto-detect, which was seen returning CPU on a cuda box
+        # (lesson 4). The resolved value is recorded for benchmark provenance.
+        self._resolved_device = resolve_device(self._device)
         return SentenceTransformer(
-            self._model_id, trust_remote_code=True, device=self._device
+            self._model_id, trust_remote_code=True, device=self._resolved_device
         )
 
     def _worker_loop(self) -> None:

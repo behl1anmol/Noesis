@@ -21,16 +21,22 @@ from noesis.api.routes import router
 from noesis.core import state
 from noesis.core.config import Settings, load_settings
 from noesis.core.embedder import Embedder, LocalSTEmbedder
+from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
 from noesis.core.vectorstore import VectorStore
 
 
 @dataclass
 class AppContext:
-    """Core resources shared by all adapters."""
+    """Core resources shared by all adapters. ``reranker`` is None when
+    ``reranker.enabled=false`` — the kill switch (§3.3) removes the model
+    entirely; ``rerank_candidates`` is the fused-candidate depth reranked
+    per request (config ``reranker.candidates``)."""
 
     conn: Connection
     store: VectorStore
     embedder: Embedder
+    reranker: Reranker | None = None
+    rerank_candidates: int = 50
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
 
 
@@ -58,21 +64,38 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
                 model_id=cfg.embedder.model,
                 dim=cfg.embedder.dim,
                 batch_size=cfg.embedder.batch_size,
+                device=cfg.embedder.device,
             )
             store = VectorStore(
                 QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
             )
             store.ensure_collection(embedder)
-            app.state.ctx = AppContext(conn=conn, store=store, embedder=embedder)
+            reranker: LocalCrossEncoderReranker | None = None
+            if cfg.reranker.enabled:
+                reranker = LocalCrossEncoderReranker(
+                    model_id=cfg.reranker.model,
+                    batch_size=cfg.reranker.batch_size,
+                    device=cfg.reranker.device,
+                )
+                if cfg.reranker.preload:
+                    await reranker.preload()
+            app.state.ctx = AppContext(
+                conn=conn,
+                store=store,
+                embedder=embedder,
+                reranker=reranker,
+                rerank_candidates=cfg.reranker.candidates,
+            )
         try:
             yield
         finally:
             for task in list(app.state.ctx.jobs.values()):
                 task.cancel()
             if ctx is None:
-                close = getattr(app.state.ctx.embedder, "close", None)
-                if close is not None:
-                    close()
+                for resource in (app.state.ctx.embedder, app.state.ctx.reranker):
+                    close = getattr(resource, "close", None)
+                    if close is not None:
+                        close()
                 app.state.ctx.conn.close()
 
     app = FastAPI(title="noesis", lifespan=lifespan)
