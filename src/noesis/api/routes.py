@@ -1,8 +1,9 @@
 """REST routes (Overview §8) — every handler is a thin call into core/.
 
-M2 surface: register+index a project (202 + run_id, status polled), dense
-``POST /search``, health. The MCP adapter (M6) wraps the same core
-functions; the two surfaces must not drift.
+M3 surface: register+index a project (202 + run_id, status polled), hybrid
+``POST /search`` (``channel`` selects hybrid/dense/sparse), health. The MCP
+adapter (M6) wraps the same core functions; the two surfaces must not
+drift.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 from noesis.core import state
 from noesis.core.indexer import execute_run, prepare_run
 from noesis.core.retriever import search_code
+from noesis.core.vectorstore import SearchChannel
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class SearchRequest(BaseModel):
     project_id: str
     top_k: int = Field(default=10, ge=1, le=100)
     language: str | None = None
+    channel: SearchChannel = "hybrid"
 
 
 @router.get("/healthz")
@@ -91,5 +94,6 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
         req.project_id,
         top_k=req.top_k,
         language=req.language,
+        channel=req.channel,
     )
-    return {"query": req.query, "hits": hits}
+    return {"query": req.query, "channel": req.channel, "hits": hits}

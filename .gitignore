@@ -225,3 +225,6 @@ dev/devlog.sqlite-shm
 
 # noesis runtime state (service-created, machine-local)
 data/
+
+# eval harness scratch output (baselines/ IS committed; the latest run is not)
+tests/eval/report_latest.json

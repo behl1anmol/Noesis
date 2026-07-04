@@ -1,0 +1,318 @@
+# M3 golden query set (expanded architecture doc §6.2, M3 gate).
+#
+# Corpus: this repository (noesis), self-indexed from the repo root — the
+# same corpus the M2 live verification used. All `path` values are relative
+# to the repo root.
+#
+# Labeling rules used by the drafting pass:
+#   - Every `path` was verified to exist; every symbol query term was
+#     verified present in its labeled file via grep, definition site first.
+#   - `lines` is optional and generous (whole function/class); a result hit
+#     counts on file match, plus span overlap when `lines` is present.
+#   - 1-3 relevant items per query; code files only, never docs.
+#   - Categories: nl (natural-language intent, no identifiers), symbol
+#     (verbatim identifier lookups — the BM25 channel's reason to exist),
+#     structural (structure-phrased, retrieval-evaluated in M3; exact-match
+#     evaluation of structural_search arrives with M5).
+#
+# STAKEHOLDER REVIEW: this set is a draft labeled by the build agent and is
+# reviewed/corrected in PR review — the stakeholder's labels are
+# authoritative (M3 prompt: "I will label 40 queries").
+#
+# 40 queries: 14 nl, 14 symbol, 12 structural.
+
+queries:
+  # ---------------------------------------------------------------- nl (14)
+  - id: nl-01
+    category: nl
+    query: "how are files discovered and gitignore filtering applied"
+    relevant:
+      - path: src/noesis/core/discovery.py
+        lines: [143, 193]
+
+  - id: nl-02
+    category: nl
+    query: "where is the sqlite schema for projects files and index runs defined"
+    relevant:
+      - path: src/noesis/core/state.py
+        lines: [16, 48]
+
+  - id: nl-03
+    category: nl
+    query: "how does indexing avoid re-embedding files that did not change"
+    relevant:
+      - path: src/noesis/core/hashdiff.py
+        lines: [39, 79]
+      - path: src/noesis/core/indexer.py
+        lines: [86, 99]
+
+  - id: nl-04
+    category: nl
+    query: "how is a source file split into chunks within a token budget"
+    relevant:
+      - path: src/noesis/core/chunker.py
+        lines: [66, 95]
+
+  - id: nl-05
+    category: nl
+    query: "where does the query instruction prefix get added before embedding a search"
+    relevant:
+      - path: src/noesis/core/embedder.py
+        lines: [201, 207]
+
+  - id: nl-06
+    category: nl
+    query: "how are interactive search queries prioritized over indexing batches"
+    relevant:
+      - path: src/noesis/core/embedder.py
+        lines: [85, 135]
+
+  - id: nl-07
+    category: nl
+    query: "where is the vector collection created with the embedding dimension"
+    relevant:
+      - path: src/noesis/core/vectorstore.py
+        lines: [96, 148]
+
+  - id: nl-08
+    category: nl
+    query: "how are stale chunks removed after a file's content changes"
+    relevant:
+      - path: src/noesis/core/indexer.py
+        lines: [107, 124]
+      - path: src/noesis/core/vectorstore.py
+        lines: [199, 240]
+
+  - id: nl-09
+    category: nl
+    query: "what happens to the run record when indexing fails midway"
+    relevant:
+      - path: src/noesis/core/indexer.py
+        lines: [146, 150]
+      - path: src/noesis/core/state.py
+        lines: [159, 178]
+
+  - id: nl-10
+    category: nl
+    query: "where are runtime settings loaded from the toml config file"
+    relevant:
+      - path: src/noesis/core/config.py
+        lines: [38, 58]
+
+  - id: nl-11
+    category: nl
+    query: "how do I check the status of a running index job"
+    relevant:
+      - path: src/noesis/api/routes.py
+        lines: [71, 79]
+
+  - id: nl-12
+    category: nl
+    query: "where are secret files kept out of the index"
+    relevant:
+      - path: src/noesis/core/discovery.py
+        lines: [41, 101]
+
+  - id: nl-13
+    category: nl
+    query: "how is the web application started and its core resources wired together"
+    relevant:
+      - path: src/noesis/app.py
+        lines: [37, 83]
+
+  - id: nl-14
+    category: nl
+    query: "where are model weights and parser grammars downloaded ahead of time"
+    relevant:
+      - path: src/noesis/prefetch.py
+        lines: [28, 56]
+
+  # ------------------------------------------------------------ symbol (14)
+  - id: symbol-01
+    category: symbol
+    query: "chunk_point_id"
+    relevant:
+      - path: src/noesis/core/vectorstore.py
+        lines: [73, 79]
+
+  - id: symbol-02
+    category: symbol
+    query: "CHUNK_NAMESPACE"
+    relevant:
+      - path: src/noesis/core/vectorstore.py
+        lines: [44, 46]
+
+  - id: symbol-03
+    category: symbol
+    query: "LocalSTEmbedder"
+    relevant:
+      - path: src/noesis/core/embedder.py
+        lines: [92, 220]
+
+  - id: symbol-04
+    category: symbol
+    query: "FakeEmbedder"
+    relevant:
+      - path: src/noesis/core/embedder.py
+        lines: [42, 82]
+
+  - id: symbol-05
+    category: symbol
+    query: "execute_run"
+    relevant:
+      - path: src/noesis/core/indexer.py
+        lines: [69, 150]
+
+  - id: symbol-06
+    category: symbol
+    query: "register_project"
+    relevant:
+      - path: src/noesis/core/state.py
+        lines: [72, 95]
+
+  - id: symbol-07
+    category: symbol
+    query: "discover_files"
+    relevant:
+      - path: src/noesis/core/discovery.py
+        lines: [143, 193]
+
+  - id: symbol-08
+    category: symbol
+    query: "SECRET_SKIP_PATTERNS"
+    relevant:
+      - path: src/noesis/core/discovery.py
+        lines: [41, 64]
+
+  - id: symbol-09
+    category: symbol
+    query: "hash_file"
+    relevant:
+      - path: src/noesis/core/hashdiff.py
+        lines: [18, 24]
+
+  - id: symbol-10
+    category: symbol
+    query: "chunk_file"
+    relevant:
+      - path: src/noesis/core/chunker.py
+        lines: [66, 95]
+
+  - id: symbol-11
+    category: symbol
+    query: "EXT_TO_LANGUAGE"
+    relevant:
+      - path: src/noesis/core/languages.py
+        lines: [13, 50]
+
+  - id: symbol-12
+    category: symbol
+    query: "load_settings"
+    relevant:
+      - path: src/noesis/core/config.py
+        lines: [38, 58]
+
+  - id: symbol-13
+    category: symbol
+    query: "AppContext"
+    relevant:
+      - path: src/noesis/app.py
+        lines: [27, 34]
+
+  - id: symbol-14
+    category: symbol
+    query: "delete_file_chunks"
+    relevant:
+      - path: src/noesis/core/vectorstore.py
+        lines: [199, 240]
+
+  # -------------------------------------------------------- structural (12)
+  - id: structural-01
+    category: structural
+    query: "functions that call query_points"
+    relevant:
+      - path: src/noesis/core/vectorstore.py
+        lines: [241, 337]
+
+  - id: structural-02
+    category: structural
+    query: "code that opens a sqlite connection with WAL mode"
+    relevant:
+      - path: src/noesis/core/state.py
+        lines: [55, 64]
+
+  - id: structural-03
+    category: structural
+    query: "async functions that embed a batch of documents"
+    relevant:
+      - path: src/noesis/core/embedder.py
+        lines: [76, 78]
+      - path: src/noesis/core/embedder.py
+        lines: [186, 199]
+
+  - id: structural-04
+    category: structural
+    query: "frozen dataclasses that hold result partitions"
+    relevant:
+      - path: src/noesis/core/hashdiff.py
+        lines: [27, 36]
+      - path: src/noesis/core/indexer.py
+        lines: [23, 30]
+
+  - id: structural-05
+    category: structural
+    query: "code that walks the directory tree with os.walk"
+    relevant:
+      - path: src/noesis/core/discovery.py
+        lines: [150, 171]
+
+  - id: structural-06
+    category: structural
+    query: "code that starts a daemon worker thread"
+    relevant:
+      - path: src/noesis/core/embedder.py
+        lines: [171, 184]
+
+  - id: structural-07
+    category: structural
+    query: "functions that compute a sha256 digest"
+    relevant:
+      - path: src/noesis/core/hashdiff.py
+        lines: [18, 24]
+      - path: src/noesis/core/embedder.py
+        lines: [66, 74]
+
+  - id: structural-08
+    category: structural
+    query: "endpoint that returns 202 accepted with a run id"
+    relevant:
+      - path: src/noesis/api/routes.py
+        lines: [42, 62]
+
+  - id: structural-09
+    category: structural
+    query: "code that creates keyword payload indexes on a collection"
+    relevant:
+      - path: src/noesis/core/vectorstore.py
+        lines: [141, 148]
+
+  - id: structural-10
+    category: structural
+    query: "functions that parse source text with a tree sitter parser"
+    relevant:
+      - path: src/noesis/core/chunker.py
+        lines: [119, 153]
+
+  - id: structural-11
+    category: structural
+    query: "filters that combine must and must_not conditions"
+    relevant:
+      - path: src/noesis/core/vectorstore.py
+        lines: [199, 240]
+
+  - id: structural-12
+    category: structural
+    query: "async context manager that manages the application lifespan"
+    relevant:
+      - path: src/noesis/app.py
+        lines: [42, 76]

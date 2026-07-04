@@ -11,7 +11,7 @@ dependencies = [
     "einops>=0.8.2",
     "fastapi[standard]>=0.139.0",
     "pathspec>=1.1.1",
-    "qdrant-client>=1.18.0",
+    "qdrant-client[fastembed]>=1.18.0",
     "sentence-transformers>=5.6.0",
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.12.2",
@@ -26,6 +26,7 @@ dev = [
     "astchunk>=0.1.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pyyaml>=6.0",
 ]
 
 [tool.pytest.ini_options]
@@ -33,5 +34,6 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: loads the real embedding model (slow, large download); run with -m integration",
+    "golden: M3 eval harness — self-indexes this repo with the real model; run with -m golden",
 ]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration and not golden'"

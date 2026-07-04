@@ -44,6 +44,14 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
         if ctx is not None:
             app.state.ctx = ctx
         else:
+            # Same persistent fastembed cache default as noesis.prefetch —
+            # without it, the BM25 assets land in the system tmp dir and
+            # get re-fetched after a reboot (runtime network, ADR-25-adjacent).
+            import os
+
+            from noesis.prefetch import FASTEMBED_CACHE_DEFAULT, FASTEMBED_CACHE_ENV
+
+            os.environ.setdefault(FASTEMBED_CACHE_ENV, FASTEMBED_CACHE_DEFAULT)
             conn = state.connect(cfg.db_path)
             state.init_db(conn)
             embedder = LocalSTEmbedder(

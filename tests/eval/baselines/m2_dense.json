@@ -1,0 +1,35 @@
+{
+  "categories": {
+    "nl": {
+      "n_queries": 14,
+      "ndcg@10": 0.5657660800598882,
+      "recall@10": 0.6428571428571429,
+      "recall@5": 0.5357142857142857
+    },
+    "structural": {
+      "n_queries": 12,
+      "ndcg@10": 0.6189795987670836,
+      "recall@10": 0.7916666666666666,
+      "recall@5": 0.7083333333333334
+    },
+    "symbol": {
+      "n_queries": 14,
+      "ndcg@10": 0.6606426034158853,
+      "recall@10": 0.7857142857142857,
+      "recall@5": 0.7142857142857143
+    }
+  },
+  "meta": {
+    "channel": "dense",
+    "corpus": "git-tracked tree minus tests/eval/ (see test_golden.py corpus fixture)",
+    "date": "2026-07-04",
+    "embedding_model": "nomic-ai/CodeRankEmbed",
+    "milestone": "M2"
+  },
+  "overall": {
+    "n_queries": 40,
+    "ndcg@10": 0.6149369188466458,
+    "recall@10": 0.7375,
+    "recall@5": 0.65
+  }
+}
