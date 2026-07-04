@@ -1,11 +1,15 @@
-"""M3 golden-set evaluation (doc §6.2, M3 gate) plus harness metric tests.
+"""Golden-set evaluation (doc §6.2; M3 + M4 gates) plus harness metric tests.
 
 The ``golden``-marked test self-indexes this repository with the real
-embedder and an in-memory Qdrant, evaluates the dense / sparse / hybrid
-channels against ``tests/eval/golden.yaml``, prints the comparison tables,
-and writes ``tests/eval/report_latest.json``. It asserts only harness
-mechanics — the gate itself (hybrid beats stored M2 dense, especially the
-symbol subset) is a stakeholder decision made from the printed numbers.
+embedder and an in-memory Qdrant, evaluates the dense / sparse / hybrid /
+hybrid+rerank channels against ``tests/eval/golden.yaml``, prints the
+comparison tables (quality + latency p50/p95), and writes
+``tests/eval/report_latest.json``. It asserts only harness mechanics — the
+gates themselves (M3: hybrid beats stored M2 dense; M4: rerank default-on
+only on a measured NDCG@10 win over same-run hybrid, Finding 2) are
+stakeholder decisions made from the printed numbers. The M4 comparison is
+same-run by design: both channels share the corpus, models and labels, so
+no stale stored baseline can skew it (lesson 3).
 
 The unmarked tests cover the metric math with fabricated results and run in
 the default suite.
@@ -24,11 +28,13 @@ from qdrant_client import QdrantClient
 from noesis.core import state
 from noesis.core.embedder import LocalSTEmbedder
 from noesis.core.indexer import index_project
+from noesis.core.reranker import LocalCrossEncoderReranker
 from noesis.core.retriever import search_code
 from noesis.core.vectorstore import VectorStore
 
 from .harness import (
     CATEGORIES,
+    LATENCY_KEYS,
     GoldenQuery,
     RelevantItem,
     dedupe_by_path,
@@ -37,6 +43,7 @@ from .harness import (
     format_table,
     load_baseline,
     load_golden,
+    percentile,
     save_baseline,
     score_query,
 )
@@ -45,6 +52,8 @@ EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parents[1]
 GOLDEN_PATH = EVAL_DIR / "golden.yaml"
 BASELINE_PATH = EVAL_DIR / "baselines" / "m2_dense.json"
+M3_BASELINE_PATH = EVAL_DIR / "baselines" / "m3_hybrid.json"
+M4_BASELINE_PATH = EVAL_DIR / "baselines" / "m4_hybrid_rerank.json"
 REPORT_PATH = EVAL_DIR / "report_latest.json"
 
 
@@ -117,6 +126,33 @@ async def test_evaluate_aggregates_per_category():
     assert report["overall"]["recall@10"] == pytest.approx(1 / 3)
 
 
+def test_percentile_nearest_rank():
+    assert percentile([], 50) == 0.0
+    assert percentile([5.0], 50) == 5.0
+    assert percentile([5.0], 95) == 5.0
+    values = [float(i) for i in range(1, 101)]  # 1..100
+    assert percentile(values, 50) == 50.0
+    assert percentile(values, 95) == 95.0
+    assert percentile([3.0, 1.0, 2.0], 50) == 2.0  # unsorted input
+
+
+async def test_evaluate_reports_latency_percentiles():
+    golden = [
+        GoldenQuery("nl-1", "nl", "q1", (RelevantItem("a.py"),)),
+        GoldenQuery("nl-2", "nl", "q2", (RelevantItem("a.py"),)),
+    ]
+
+    async def search_fn(query: str) -> list[dict]:
+        return [result("a.py")]
+
+    report = await evaluate(search_fn, golden)
+    for row in (report["overall"], report["categories"]["nl"]):
+        assert row["latency_p50_ms"] > 0
+        assert row["latency_p95_ms"] >= row["latency_p50_ms"]
+    # Empty categories report zero latency, not a crash.
+    assert report["categories"]["symbol"]["latency_p50_ms"] == 0.0
+
+
 def test_load_golden_rejects_bad_entries(tmp_path):
     bad = tmp_path / "golden.yaml"
     bad.write_text("queries:\n  - id: x\n    category: nope\n    query: q\n")
@@ -174,19 +210,39 @@ def corpus(tmp_path_factory):
 async def test_golden_set_gate_numbers(corpus):
     store, embedder, project_id = corpus
     golden = load_golden(GOLDEN_PATH)
+    reranker = LocalCrossEncoderReranker()
 
-    def channel_fn(channel: str):
+    def channel_fn(channel: str, rerank: bool = False):
         async def fn(query: str) -> list[dict]:
-            return await search_code(
-                store, embedder, query, project_id, top_k=10, channel=channel
+            result = await search_code(
+                store,
+                embedder,
+                query,
+                project_id,
+                top_k=10,
+                channel=channel,
+                reranker=reranker if rerank else None,
+                rerank=rerank or None,
             )
+            return result["hits"]
 
         return fn
 
-    reports = {
-        channel: await evaluate(channel_fn(channel), golden)
-        for channel in ("dense", "sparse", "hybrid")
-    }
+    # Warm the reranker outside the timed loop: the first reranked call pays
+    # the ~568M model load, which is startup cost, not per-query latency.
+    await reranker.preload()
+
+    try:
+        reports = {
+            "dense": await evaluate(channel_fn("dense"), golden),
+            "sparse": await evaluate(channel_fn("sparse"), golden),
+            "hybrid": await evaluate(channel_fn("hybrid"), golden),
+            "hybrid+rerank": await evaluate(
+                channel_fn("hybrid", rerank=True), golden
+            ),
+        }
+    finally:
+        reranker.close()
 
     baseline = load_baseline(BASELINE_PATH)
     baseline_note = ""
@@ -207,18 +263,49 @@ async def test_golden_set_gate_numbers(corpus):
             f"the M2 baseline at {BASELINE_PATH}.\n"
         )
 
+    # Record both M4-gate channels from this same clean run (lesson 3:
+    # baselines carry their provenance; the gate comparison itself is
+    # same-run and never reads these files).
+    for path, channel, milestone in (
+        (M3_BASELINE_PATH, "hybrid", "M3"),
+        (M4_BASELINE_PATH, "hybrid+rerank", "M4"),
+    ):
+        save_baseline(
+            reports[channel],
+            path,
+            meta={
+                "embedding_model": embedder.model_id,
+                "reranker_model": reranker.model_id,
+                "date": date.today().isoformat(),
+                "milestone": milestone,
+                "channel": channel,
+            },
+        )
+
     REPORT_PATH.write_text(json.dumps(reports, indent=2, sort_keys=True) + "\n")
 
-    print("\n\n== M3 channel comparison ==")
+    print("\n\n== Channel comparison (quality + latency) ==")
     print(format_table(reports))
     print("\n== M3 gate: hybrid vs stored M2 dense baseline ==")
     print(baseline_note + format_delta(reports["hybrid"], baseline))
+    print("\n== M4 gate: hybrid+rerank vs same-run hybrid (Finding 2) ==")
+    print(
+        format_delta(
+            reports["hybrid+rerank"],
+            reports["hybrid"],
+            challenger_label="hybrid+rerank",
+            baseline_label="hybrid (same run)",
+        )
+    )
 
-    # Harness mechanics only — the gate decision is made from the numbers.
+    # Harness mechanics only — the gate decisions are made from the numbers.
     for report in reports.values():
         assert set(report["categories"]) == set(CATEGORIES)
         for row in (report["overall"], *report["categories"].values()):
             for key, value in row.items():
-                if key != "n_queries":
+                if key == "n_queries" or key in LATENCY_KEYS:
+                    assert value >= 0
+                else:
                     assert 0.0 <= value <= 1.0
+    assert reports["hybrid+rerank"]["overall"]["n_queries"] == len(golden)
     assert reports["hybrid"]["overall"]["n_queries"] == len(golden)

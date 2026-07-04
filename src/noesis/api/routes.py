@@ -1,9 +1,10 @@
 """REST routes (Overview §8) — every handler is a thin call into core/.
 
 M3 surface: register+index a project (202 + run_id, status polled), hybrid
-``POST /search`` (``channel`` selects hybrid/dense/sparse), health. The MCP
-adapter (M6) wraps the same core functions; the two surfaces must not
-drift.
+``POST /search`` (``channel`` selects hybrid/dense/sparse), health. M4 adds
+the ``rerank`` flag (None → server default per ADR-34) and the ``reranked``
+response field. The MCP adapter (M6) wraps the same core functions; the two
+surfaces must not drift.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=100)
     language: str | None = None
     channel: SearchChannel = "hybrid"
+    # None → server default (reranker availability, config reranker.enabled).
+    rerank: bool | None = None
 
 
 @router.get("/healthz")
@@ -87,7 +90,7 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
     if state.get_project(ctx.conn, req.project_id) is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
-    hits = await search_code(
+    result = await search_code(
         ctx.store,
         ctx.embedder,
         req.query,
@@ -95,5 +98,13 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
         top_k=req.top_k,
         language=req.language,
         channel=req.channel,
+        reranker=ctx.reranker,
+        rerank=req.rerank,
+        candidates=ctx.rerank_candidates,
     )
-    return {"query": req.query, "channel": req.channel, "hits": hits}
+    return {
+        "query": req.query,
+        "channel": req.channel,
+        "reranked": result["reranked"],
+        "hits": result["hits"],
+    }

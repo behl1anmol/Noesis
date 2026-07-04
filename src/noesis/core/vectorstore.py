@@ -248,6 +248,7 @@ class VectorStore:
         language: str | None = None,
         channel: SearchChannel = "hybrid",
         prefetch_limit: int = 50,
+        with_text: bool = False,
     ) -> list[dict[str, Any]]:
         """Search one project's chunks over the requested channel (§3.3).
 
@@ -259,8 +260,11 @@ class VectorStore:
         candidate lists are project-scoped before fusion.
 
         Returns span dicts per §3.3; ``snippet`` is the first ~200 chars
-        of the stored chunk text. No ``path_prefix`` yet — see the module
-        docstring."""
+        of the stored chunk text. ``with_text=True`` additionally returns
+        the full stored chunk ``text`` — the M4 reranker scores (query,
+        chunk_text) pairs from the payload instead of re-opening files; the
+        retriever strips it before results leave core. No ``path_prefix``
+        yet — see the module docstring."""
         must: list[models.FieldCondition] = [
             models.FieldCondition(
                 key="project_id", match=models.MatchValue(value=project_id)
@@ -323,15 +327,16 @@ class VectorStore:
         results: list[dict[str, Any]] = []
         for point in response.points:
             payload = point.payload or {}
-            results.append(
-                {
-                    "file_path": payload.get("file_path"),
-                    "start_line": payload.get("start_line"),
-                    "end_line": payload.get("end_line"),
-                    "language": payload.get("language"),
-                    "symbol_name": payload.get("symbol_name"),
-                    "score": point.score,
-                    "snippet": (payload.get("text") or "")[:_SNIPPET_CHARS],
-                }
-            )
+            result = {
+                "file_path": payload.get("file_path"),
+                "start_line": payload.get("start_line"),
+                "end_line": payload.get("end_line"),
+                "language": payload.get("language"),
+                "symbol_name": payload.get("symbol_name"),
+                "score": point.score,
+                "snippet": (payload.get("text") or "")[:_SNIPPET_CHARS],
+            }
+            if with_text:
+                result["text"] = payload.get("text") or ""
+            results.append(result)
         return results

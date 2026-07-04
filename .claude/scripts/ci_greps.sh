@@ -5,11 +5,12 @@ set -u
 
 fail=0
 
-# Rule 1: sentence_transformers may only be imported in core/embedder.py.
+# Rule 1 (as amended by ADR-33): sentence_transformers may only be imported
+# in the two model-loading boundaries, core/embedder.py and core/reranker.py.
 hits=$(grep -rn --include='*.py' -E '(^|[^#]*)\b(import|from)\s+sentence_transformers\b' src/ \
-  | grep -v '^src/noesis/core/embedder\.py:' || true)
+  | grep -v -e '^src/noesis/core/embedder\.py:' -e '^src/noesis/core/reranker\.py:' || true)
 if [ -n "$hits" ]; then
-  echo "FAIL: sentence_transformers imported outside core/embedder.py:"
+  echo "FAIL: sentence_transformers imported outside core/{embedder,reranker}.py:"
   echo "$hits"
   fail=1
 fi

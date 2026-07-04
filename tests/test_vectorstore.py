@@ -116,6 +116,19 @@ async def test_upsert_then_search_returns_payload_fields(store: VectorStore):
     assert isinstance(hit["score"], float)
     assert hit["snippet"] == chunk.text[:200]
     assert len(hit["snippet"]) == 200  # long text truncated to ~200 chars
+    assert "text" not in hit  # full text only on request (with_text)
+
+
+async def test_with_text_returns_full_chunk_text(store: VectorStore):
+    embedder = FakeEmbedder(dim=8)
+    store.ensure_collection(embedder)
+    chunk = make_chunk(text="def parse_config(path):\n" + "    x = 1\n" * 100)
+    await index_chunks(store, embedder, "proj1", [chunk])
+
+    results = dense_search(
+        store, await embedder.embed_query("parse config"), "proj1", with_text=True
+    )
+    assert results[0]["text"] == chunk.text  # untruncated, for the reranker
 
 
 async def test_project_id_filter_isolates_projects(store: VectorStore):
