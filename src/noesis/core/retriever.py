@@ -1,9 +1,13 @@
-"""Retrieval pipeline, dense-only in M2 (§3.3, Overview §6).
+"""Retrieval pipeline — hybrid dense + BM25 with RRF fusion in M3 (§3.3,
+Overview §6).
 
 Query embedding goes through the Embedder Protocol at HIGH priority so
-searches preempt any running index batch. Results are candidates, not
-ground truth — callers read the live file before acting. M3 adds the
-sparse channel + RRF fusion here; M4 adds the optional reranker.
+searches preempt any running index batch; the sparse channel needs only
+the raw query text (BM25 TF is encoded inside the vector store's client,
+IDF server-side). ``channel`` selects hybrid (default), dense-only, or
+sparse-only — the single-channel modes exist because the M3 eval gate
+measures hybrid *against* them. Results are candidates, not ground truth —
+callers read the live file before acting. M4 adds the optional reranker.
 """
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from .embedder import Embedder
-from .vectorstore import VectorStore
+from .vectorstore import SearchChannel, VectorStore
 
 
 async def search_code(
@@ -22,9 +26,19 @@ async def search_code(
     *,
     top_k: int = 10,
     language: str | None = None,
+    channel: SearchChannel = "hybrid",
 ) -> list[dict[str, Any]]:
-    """Dense semantic search over one project's chunks."""
-    vector = await embedder.embed_query(query)
+    """Search one project's chunks. Skips the query embed entirely for
+    sparse-only searches — no reason to queue on the embed worker for a
+    channel that won't use the vector."""
+    dense_vector = (
+        await embedder.embed_query(query) if channel != "sparse" else None
+    )
     return store.search(
-        vector, project_id, top_k=top_k, language=language
+        project_id,
+        dense_vector=dense_vector,
+        query_text=query,
+        top_k=top_k,
+        language=language,
+        channel=channel,
     )

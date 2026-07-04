@@ -91,3 +91,38 @@ def test_search_unknown_project_404(client):
 
 def test_run_status_unknown_404(client):
     assert client.get("/runs/nope").status_code == 404
+
+
+def test_search_channel_param(client, project_dir):
+    resp = client.post("/projects", json={"root_path": str(project_dir)})
+    body = resp.json()
+    run = asyncio.run(_wait_done(client, body["run_id"]))
+    assert run["status"] == "done"
+
+    # Default is hybrid and the response says so.
+    resp = client.post(
+        "/search", json={"query": "validate_token", "project_id": body["project_id"]}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["channel"] == "hybrid"
+
+    # Sparse-only surfaces the exact-symbol file without any dense help.
+    resp = client.post(
+        "/search",
+        json={
+            "query": "validate_token",
+            "project_id": body["project_id"],
+            "channel": "sparse",
+        },
+    )
+    assert resp.status_code == 200
+    body_sparse = resp.json()
+    assert body_sparse["channel"] == "sparse"
+    assert body_sparse["hits"][0]["file_path"] == "auth.py"
+
+    # Unknown channel is rejected by validation.
+    resp = client.post(
+        "/search",
+        json={"query": "x", "project_id": body["project_id"], "channel": "psychic"},
+    )
+    assert resp.status_code == 422

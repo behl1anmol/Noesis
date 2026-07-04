@@ -20,6 +20,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-groups
-      # Default suite is offline: FakeEmbedder + in-memory Qdrant. The
-      # integration-marked real-model test is deliberately not run in CI.
+      # Default suite: FakeEmbedder + in-memory Qdrant. Since M3, upserts
+      # exercise the real BM25 sparse path, so the first run fetches the
+      # ~100 KB Qdrant/bm25 tokenizer assets (ADR-32) — no model weights.
+      # The integration/golden real-model tests are deliberately not in CI.
       - run: uv run pytest -q
