@@ -3,26 +3,23 @@
 M3 surface: register+index a project (202 + run_id, status polled), hybrid
 ``POST /search`` (``channel`` selects hybrid/dense/sparse), health. M4 adds
 the ``rerank`` flag (None → server default per ADR-34) and the ``reranked``
-response field. The MCP adapter (M6) wraps the same core functions; the two
-surfaces must not drift.
+response field. M6 adds ``GET /projects/{id}/status`` and
+``POST /projects/{id}/reindex`` (initial idea §8) via the shared core job
+manager. The MCP adapter (noesis.mcp.server) wraps the same core functions;
+tests assert the two surfaces return identical bodies.
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from noesis.core import state
-from noesis.core.indexer import execute_run, prepare_run
+from noesis.core import jobs, state
 from noesis.core.retriever import search_code
 from noesis.core.structural import StructuralSearchError, structural_search
 from noesis.core.vectorstore import SearchChannel
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -59,29 +56,35 @@ async def healthz() -> dict[str, str]:
 async def register_and_index(req: RegisterProjectRequest, request: Request) -> dict[str, str]:
     ctx = request.app.state.ctx
     try:
-        project_id, run_id = prepare_run(ctx.conn, ctx.embedder, req.root_path)
+        return jobs.launch_index_run(ctx, req.root_path)
     except ValueError as exc:  # mixed-model guard
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    async def _run() -> None:
-        try:
-            await execute_run(
-                ctx.conn, ctx.store, ctx.embedder, req.root_path, project_id, run_id
-            )
-        except Exception:
-            # execute_run already marked the run failed; log for the operator.
-            logger.exception("index run %s failed", run_id)
-
-    task = asyncio.create_task(_run())
-    ctx.jobs[run_id] = task
-    task.add_done_callback(lambda _t: ctx.jobs.pop(run_id, None))
-    return {"project_id": project_id, "run_id": run_id, "status": "accepted"}
 
 
 @router.get("/projects")
 async def list_projects(request: Request) -> list[dict[str, Any]]:
     ctx = request.app.state.ctx
     return [dict(row) for row in state.list_projects(ctx.conn)]
+
+
+@router.get("/projects/{project_id}/status")
+async def project_status(project_id: str, request: Request) -> dict[str, Any]:
+    ctx = request.app.state.ctx
+    if state.get_project(ctx.conn, project_id) is None:
+        raise HTTPException(status_code=404, detail="unknown project_id")
+    return jobs.index_status(ctx, project_id)
+
+
+@router.post("/projects/{project_id}/reindex", status_code=202)
+async def reindex(project_id: str, request: Request) -> dict[str, str]:
+    ctx = request.app.state.ctx
+    project = state.get_project(ctx.conn, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="unknown project_id")
+    try:
+        return jobs.launch_index_run(ctx, project["root_path"])
+    except ValueError as exc:  # mixed-model guard
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}")

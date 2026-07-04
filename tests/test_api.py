@@ -95,6 +95,34 @@ def test_register_index_search_roundtrip(client, project_dir):
     assert top["file_path"] in ("auth.py", "db.py")
 
 
+def test_project_status_and_reindex_roundtrip(client, project_dir):
+    body = client.post("/projects", json={"root_path": str(project_dir)}).json()
+    project_id = body["project_id"]
+    asyncio.run(_wait_done(client, body["run_id"]))
+
+    status = client.get(f"/projects/{project_id}/status").json()
+    assert status["project_id"] == project_id
+    assert status["run_id"] == body["run_id"]
+    assert status["status"] == "done"
+    assert status["chunks_written"] > 0
+
+    resp = client.post(f"/projects/{project_id}/reindex")
+    assert resp.status_code == 202
+    again = resp.json()
+    assert again["project_id"] == project_id
+    assert again["run_id"] != body["run_id"]
+    run = asyncio.run(_wait_done(client, again["run_id"]))
+    # Incremental: nothing changed between the two runs.
+    assert run["status"] == "done"
+    assert run["files_changed"] == 0
+    assert client.get(f"/projects/{project_id}/status").json()["run_id"] == again["run_id"]
+
+
+def test_project_status_unknown_404(client):
+    assert client.get("/projects/nope/status").status_code == 404
+    assert client.post("/projects/nope/reindex").status_code == 404
+
+
 def test_search_unknown_project_404(client):
     resp = client.post("/search", json={"query": "x", "project_id": "nope"})
     assert resp.status_code == 404

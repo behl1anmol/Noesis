@@ -365,7 +365,8 @@ structural_patterns:
     pattern: "HTTPException($$$ARGS)"
     language: python
     expected:
-      src/noesis/api/routes.py: 4
+      # 7 since M6: status/reindex endpoints added 404 + 404/409 raises.
+      src/noesis/api/routes.py: 7
 
   - id: sp-07
     pattern: "time.monotonic()"

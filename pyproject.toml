@@ -11,12 +11,18 @@ dependencies = [
     "ast-grep-py==0.44.0",
     "einops>=0.8.2",
     "fastapi[standard]>=0.139.0",
+    "fastmcp>=3.4.2,<4",
     "pathspec>=1.1.1",
     "qdrant-client[fastembed]>=1.18.0",
     "sentence-transformers>=5.6.0",
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.12.2",
 ]
+
+[tool.uv]
+# CLAUDE.md rule 5: fastmcp resolves the mcp SDK; never float past <2 until
+# the M8 checkpoint decides. This makes the rule mechanical at resolve time.
+constraint-dependencies = ["mcp<2"]
 
 [build-system]
 requires = ["uv_build>=0.11.19,<0.12.0"]
