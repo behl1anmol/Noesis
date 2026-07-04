@@ -19,7 +19,7 @@ from qdrant_client import QdrantClient
 
 from noesis.api.routes import router
 from noesis.core import state
-from noesis.core.config import Settings, load_settings
+from noesis.core.config import Settings, StructuralSettings, load_settings
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
 from noesis.core.vectorstore import VectorStore
@@ -37,6 +37,7 @@ class AppContext:
     embedder: Embedder
     reranker: Reranker | None = None
     rerank_candidates: int = 50
+    structural: StructuralSettings = field(default_factory=StructuralSettings)
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
 
 
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
                 embedder=embedder,
                 reranker=reranker,
                 rerank_candidates=cfg.reranker.candidates,
+                structural=cfg.structural,
             )
         try:
             yield

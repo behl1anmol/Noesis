@@ -1,9 +1,8 @@
 """Runtime settings, read once at startup from ``config.toml`` (§3.7).
 
-M2 added ``[embedder]`` and ``[qdrant]`` plus the state-DB path; M4 adds
-``[reranker]``; later milestones add ``[structural]`` and ``[git]`` sections
-to the same file. Everything has a working default so the service runs with
-no config file at all.
+M2 added ``[embedder]`` and ``[qdrant]`` plus the state-DB path; M4 added
+``[reranker]``; M5 adds ``[structural]``; M7 adds ``[git]``. Everything has
+a working default so the service runs with no config file at all.
 """
 
 from __future__ import annotations
@@ -44,6 +43,18 @@ class RerankerSettings:
 
 
 @dataclass(frozen=True)
+class StructuralSettings:
+    """§3.7 ``[structural]``. ``max_results`` caps matches per query (the
+    request may ask for less, never more); ``timeout_s`` is the wall-clock
+    scan budget — on expiry the scan stops and returns partial results with
+    ``timed_out: true`` rather than erroring, since partial matches are
+    still actionable to an iterating agent."""
+
+    max_results: int = 100
+    timeout_s: float = 10.0
+
+
+@dataclass(frozen=True)
 class QdrantSettings:
     url: str = DEFAULT_QUERY_URL
     collection: str = "noesis_chunks"
@@ -54,6 +65,7 @@ class Settings:
     db_path: Path = Path("data/noesis.sqlite")
     embedder: EmbedderSettings = field(default_factory=EmbedderSettings)
     reranker: RerankerSettings = field(default_factory=RerankerSettings)
+    structural: StructuralSettings = field(default_factory=StructuralSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
 
 
@@ -66,6 +78,7 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
         raw = tomllib.load(fh)
     emb = raw.get("embedder", {})
     rrk = raw.get("reranker", {})
+    stru = raw.get("structural", {})
     qdr = raw.get("qdrant", {})
     return Settings(
         db_path=Path(raw.get("db_path", Settings.db_path)),
@@ -82,6 +95,10 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
             candidates=int(rrk.get("candidates", RerankerSettings.candidates)),
             batch_size=int(rrk.get("batch_size", RerankerSettings.batch_size)),
             device=rrk.get("device", RerankerSettings.device),
+        ),
+        structural=StructuralSettings(
+            max_results=int(stru.get("max_results", StructuralSettings.max_results)),
+            timeout_s=float(stru.get("timeout_s", StructuralSettings.timeout_s)),
         ),
         qdrant=QdrantSettings(
             url=qdr.get("url", QdrantSettings.url),

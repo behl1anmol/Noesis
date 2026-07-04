@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "ast-grep-py==0.44.0",
     "einops>=0.8.2",
     "fastapi[standard]>=0.139.0",
     "pathspec>=1.1.1",
