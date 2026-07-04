@@ -1,0 +1,28 @@
+Indexer operations notes
+========================
+
+These notes are plain text on purpose: they exercise the chunker's
+line-based fallback path, where no tree-sitter grammar applies.
+
+First indexing run
+------------------
+The first run over a repository is always a full pass: every discovered
+file is hashed, chunked, embedded, and upserted. Expect this to be
+dominated by embedding time, not parsing time. On a laptop CPU the
+embedder is the bottleneck by an order of magnitude.
+
+Incremental runs
+----------------
+Subsequent runs re-hash every candidate file but only re-chunk and
+re-embed the files whose content hash changed. Deleted files drop all
+of their chunks. Renames currently look like a delete plus an add;
+that is acceptable for now and cheap to revisit later.
+
+Operational tips
+----------------
+1. Keep the Qdrant container on a local SSD; vector upserts are the
+   second-largest cost after embedding.
+2. Watch the failed-files count in the dashboard after big refactors.
+   A spike usually means a grammar regression, not corrupt files.
+3. When the embedding model changes, the whole index is invalid.
+   Force a full re-index rather than mixing vector spaces.

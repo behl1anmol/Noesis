@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # M2 exit criterion: no sentence_transformers outside core/embedder.py,
+      # no HTTP clients in core/, no 0.0.0.0 (CLAUDE.md rules 1-2).
+      - run: bash .claude/scripts/ci_greps.sh
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-groups
+      # Default suite is offline: FakeEmbedder + in-memory Qdrant. The
+      # integration-marked real-model test is deliberately not run in CI.
+      - run: uv run pytest -q

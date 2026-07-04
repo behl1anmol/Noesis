@@ -1,7 +1,8 @@
 """File discovery: walk a project tree and yield indexable files.
 
 Filters, in order: excluded directories, .gitignore (git semantics, nested
-files, negation), the secret skip-list, symlinks, size cap, binary sniff.
+files, negation), the secret skip-list, the generated-lockfile skip-list,
+symlinks, size cap, binary sniff.
 The secret skip-list is defense-in-depth on top of .gitignore — a secret
 file is skipped even when no .gitignore mentions it, so it can never enter
 the index (a retrievable surface) or M5 structural-search results.
@@ -63,6 +64,28 @@ SECRET_SKIP_PATTERNS: tuple[str, ...] = (
 )
 
 _SECRET_SPEC = GitIgnoreSpec.from_lines(SECRET_SKIP_PATTERNS)
+
+# Generated lockfiles: committed (so not gitignored), text, often huge, and
+# pure noise for retrieval — indexing one can dominate a small repo's embed
+# cost (decision row 31). Same skip-list pattern as secrets.
+GENERATED_SKIP_PATTERNS: tuple[str, ...] = (
+    "uv.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lockb",
+    "Cargo.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "go.sum",
+    "composer.lock",
+    "Gemfile.lock",
+    "packages.lock.json",
+    "flake.lock",
+)
+
+_GENERATED_SPEC = GitIgnoreSpec.from_lines(GENERATED_SKIP_PATTERNS)
 
 _BINARY_SNIFF_BYTES = 8192
 
@@ -156,6 +179,8 @@ def discover_files(root: str | Path, config: DiscoveryConfig | None = None) -> l
                 if ignores.ignored(rel):
                     continue
                 if is_secret_path(rel):
+                    continue
+                if _GENERATED_SPEC.match_file(rel):
                     continue
                 if full.stat().st_size > cfg.max_file_bytes:
                     continue
