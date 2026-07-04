@@ -25,6 +25,9 @@ from .harness import load_structural_patterns
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = REPO_ROOT / "tests" / "eval" / "golden.yaml"
 
+# Import-time load is deliberate: a malformed golden.yaml fails collection
+# loudly (same fail-loudly rule as load_golden) instead of green-skipping
+# the exit-criterion check.
 PATTERNS = load_structural_patterns(GOLDEN)
 
 

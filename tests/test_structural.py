@@ -174,6 +174,16 @@ async def test_escaping_paths_rejected(conn, project_id):
         assert exc.value.error_type == "invalid_path"
 
 
+async def test_empty_path_rejected(conn, project_id):
+    # "" / "/" normalize to nothing and would silently match zero files.
+    for bad in ["", "/"]:
+        with pytest.raises(StructuralSearchError) as exc:
+            await structural_search(
+                conn, project_id, "print($X)", "python", paths=[bad]
+            )
+        assert exc.value.error_type == "invalid_path"
+
+
 # --- caps and budget --------------------------------------------------------
 
 
@@ -196,6 +206,26 @@ async def test_request_cannot_raise_configured_cap(conn, project_id):
         settings=settings,
     )
     assert len(result["matches"]) == 2
+    assert result["truncated"] is True
+
+
+async def test_cap_equal_to_total_reports_truncated(conn, project_id):
+    # The scan stops the moment the cap fills; it cannot know whether more
+    # matches exist, so hitting the cap always reports truncated.
+    result = await structural_search(
+        conn, project_id, "def $NAME($$$PARAMS): $$$BODY", "python", max_results=3
+    )
+    assert len(result["matches"]) == 3  # exactly all of them
+    assert result["truncated"] is True
+
+
+async def test_non_positive_max_results_clamps_to_one(conn, project_id):
+    # Core-level guard for non-REST callers (MCP in M6): pydantic's ge=1
+    # never sees them.
+    result = await structural_search(
+        conn, project_id, "def $NAME($$$PARAMS): $$$BODY", "python", max_results=0
+    )
+    assert len(result["matches"]) == 1
     assert result["truncated"] is True
 
 

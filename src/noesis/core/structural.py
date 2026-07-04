@@ -48,7 +48,7 @@ class StructuralMatch(TypedDict):
 class StructuralResult(TypedDict):
     matches: list[StructuralMatch]
     scanned_files: int
-    truncated: bool  # stopped at max_results
+    truncated: bool  # scan stopped at max_results; more matches may exist
     timed_out: bool  # stopped at the timeout_s budget; matches are partial
 
 
@@ -71,6 +71,10 @@ def _validate_pattern(pattern: str, ast_grep_lang: str) -> None:
     nothing (that is a legitimate empty result, not an error). Only patterns
     the engine refuses outright raise — probe once against empty source so
     the failure surfaces before any file is read.
+
+    Runs on the caller's thread (the event loop): parsing empty source is
+    microseconds. If this probe ever grows real work, move it into the
+    executor with the scan.
     """
     try:
         SgRoot("", ast_grep_lang).root().find_all(pattern=pattern)
@@ -89,7 +93,13 @@ def _normalize_paths(paths: list[str] | None) -> list[str] | None:
                 "invalid_path",
                 f"paths must be project-relative without '..': {p!r}",
             )
-        normalized.append(p.strip("/"))
+        stripped = p.strip("/")
+        if not stripped:  # "" or "/" would silently match nothing
+            raise StructuralSearchError(
+                "invalid_path",
+                f"empty path restriction {p!r}; omit paths to scan the whole project",
+            )
+        normalized.append(stripped)
     return normalized
 
 
@@ -124,6 +134,9 @@ def _scan_sync(
     truncated = False
     timed_out = False
     for rel in candidates:
+        # Budget granularity is per file: a single file can overrun the
+        # deadline by its own parse+match time, which discovery bounds at
+        # max_file_bytes (1 MB) — small enough that we skip mid-file checks.
         if time.monotonic() > deadline:
             timed_out = True
             break
@@ -134,7 +147,6 @@ def _scan_sync(
         scanned += 1
         for node in SgRoot(src, mapping.ast_grep).root().find_all(pattern=pattern):
             if len(matches) >= max_results:
-                truncated = True
                 break
             rng = node.range()
             meta: dict[str, Any] = {}
@@ -154,7 +166,10 @@ def _scan_sync(
                     meta_vars=meta,
                 )
             )
-        if truncated:
+        if len(matches) >= max_results:
+            # Cap reached — stop scanning. More matches may exist in files
+            # (or nodes) never examined, so this is always reported truncated.
+            truncated = True
             break
 
     return StructuralResult(
@@ -189,7 +204,11 @@ async def structural_search(
         )
     _validate_pattern(pattern, LANGUAGE_MAP[language].ast_grep)
     norm_paths = _normalize_paths(paths)
+    # Requests may lower the configured cap, never raise it; a non-positive
+    # value (REST validates ge=1, but core has other callers — MCP in M6)
+    # clamps to 1 rather than silently returning nothing.
     limit = cfg.max_results if max_results is None else min(max_results, cfg.max_results)
+    limit = max(1, limit)
 
     return await asyncio.get_running_loop().run_in_executor(
         None,
