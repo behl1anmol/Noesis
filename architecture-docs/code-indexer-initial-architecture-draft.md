@@ -410,8 +410,8 @@ Two pieces of durable state: the Qdrant volume and the SQLite file. For the MVP,
  
 | # | Risk | Severity | Mitigation |
 |---|---|---|---|
-| 1 | **MCP SDK v2** (stable 2026-07-27) ships breaking transport/auth changes [3] | High | Let FastMCP drive the compatible `mcp` range; lock it; schedule a dependency-refresh pass after 2026-07-27 |
-| 2 | **FastMCP 3.x churn** — 3.0 removed APIs and changed task scoping mid-3.x | Medium | Pin FastMCP hard in `uv.lock`; do not float; test transports after upgrades |
+| 1 | **MCP SDK v2** (stable 2026-07-27) ships breaking transport/auth changes [3] | High | Let FastMCP drive the compatible `mcp` range; lock it; the dependency-refresh pass is scheduled as milestone **M9** (post-2026-07-28), memo before any code (ADR-26, ADR-38) |
+| 2 | **FastMCP 3.x churn** — 3.0 removed APIs and changed task scoping mid-3.x | Medium | Pin FastMCP hard in `uv.lock`; do not float; test transports after upgrades — folded into the M9 checkpoint |
 | 3 | Cross-file reasoning is weak (chunks do not follow call graphs) | Medium | Honest limitation; Phase 2 adds structural/`ast-grep` search |
 | 4 | Embedding recall has a representational ceiling for any fixed dimension | Medium | Lexical channel and agent verification are the hedge, not bigger vectors |
 | 5 | First full index of a large repo is slow | Low | One-time cost; communicate progress via the dashboard |
@@ -430,9 +430,15 @@ Two pieces of durable state: the Qdrant volume and the SQLite file. For the MVP,
 | **M1 — Spine** | Project registration, discovery + `.gitignore`/binary/secret filtering, SHA-256 diff, SQLite state. No embeddings. | Incremental change detection works |
 | **M2 — Dense search** | cAST chunk → CodeRankEmbed → Qdrant dense-only search. | Natural-language→code returns sane spans |
 | **M3 — Hybrid** | Add BM25 sparse channel + RRF fusion. Run the §6.2 evaluation. | Hybrid beats dense-only on the symbol subset |
-| **M4 — MCP** | Expose retriever as MCP tools; connect a real agent. | An agent calls `search_code` and reads files |
-| **M5 — Dashboard + watcher** | Monitoring page + `watchdog` auto-reindex. | Humans can see index health; freshness is automatic |
-| **Phase 2** | Reranker, structural/`ast-grep` search, git-aware diffing, hosted-embedder pluggability, multi-repo. | Post-MVP precision and reach |
+| **M4 — Reranker** ✅ | bge-reranker-v2-m3 cross-encoder, gated behind the eval; NDCG@10 + latency measured. | Precision lever quantified; ships opt-in (ADR-35) |
+| **M5 — Structural search** ✅ | `structural_search` via ast-grep over live discovery-filtered files; `POST /structural-search`. | Shape queries answered without a second index (ADR-21) |
+| **M6 — MCP** ✅ | Expose retriever as MCP tools (six); connect a real agent. | An agent calls `search_code` and reads files |
+| **M7 — Git fast-path** ✅ | Subprocess-git candidate-set shrink; hash remains truth; every fallback tested. | 3-file change hashes ~3 files, not all |
+| **M8 — Dashboard + watcher** ⬜ | Server-rendered Jinja2 monitoring page + `watchdog` auto-reindex. | Humans can see index health; freshness is automatic |
+| **M9 — MCP v2 checkpoint** ⬜ | Post-2026-07-28 `mcp`/FastMCP dependency-refresh memo + transport re-test. | Breaking-change exposure assessed before any migration |
+| **Phase 2 (remaining)** | Git-aware diffing beyond M7, hosted-embedder pluggability, multi-repo. | Post-MVP reach |
+
+> **Roadmap note (ADR-38, 2026-07-04).** The as-built order diverged from this draft's original sequence: reranker (M4) and structural search (M5) — originally Phase 2 — were pulled forward, MCP moved to M6, and git fast-path became M7. Dashboard + watcher (originally M5) had fallen off the board with no milestone id and are now promoted to **M8** as a critical MVP deliverable; the MCP-v2 checkpoint renumbered to **M9**. ✅ = done, ⬜ = pending. The authoritative milestone specs live in `code-indexer-expanded-architecture.md` §6.
  
 ---
  
