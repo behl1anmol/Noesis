@@ -64,6 +64,7 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
                 model_id=cfg.embedder.model,
                 dim=cfg.embedder.dim,
                 batch_size=cfg.embedder.batch_size,
+                device=cfg.embedder.device,
             )
             store = VectorStore(
                 QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
@@ -74,6 +75,7 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
                 reranker = LocalCrossEncoderReranker(
                     model_id=cfg.reranker.model,
                     batch_size=cfg.reranker.batch_size,
+                    device=cfg.reranker.device,
                 )
                 if cfg.reranker.preload:
                     await reranker.preload()

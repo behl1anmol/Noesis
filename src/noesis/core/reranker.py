@@ -121,6 +121,7 @@ class LocalCrossEncoderReranker:
     ) -> None:
         self._model_id = model_id
         self._device = device
+        self._resolved_device: str | None = None  # set at model load
         self._batch_size = batch_size
         self._load_model = _load_model or self._default_load
         self._queue: queue.Queue[
@@ -134,13 +135,24 @@ class LocalCrossEncoderReranker:
     def model_id(self) -> str:
         return self._model_id
 
+    @property
+    def resolved_device(self) -> str | None:
+        """The device the model loaded on, or None before the first rerank
+        (the worker loads lazily on its first job)."""
+        return self._resolved_device
+
     def _default_load(self) -> Any:
         # Lazy import: allowed only here and in core/embedder.py (CLAUDE.md
         # hard rule 1 as amended by ADR-33; CI greps for this). Local model,
         # no network service — ADR-25.
         from sentence_transformers import CrossEncoder
 
-        return CrossEncoder(self._model_id, device=self._device)
+        from .compute import resolve_device
+
+        # Explicit device resolution, not ST's device=None auto-detect, which
+        # was seen running this cross-encoder on CPU with a T4 idle (lesson 4).
+        self._resolved_device = resolve_device(self._device)
+        return CrossEncoder(self._model_id, device=self._resolved_device)
 
     def _worker_loop(self) -> None:
         model: Any = None

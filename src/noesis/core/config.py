@@ -20,6 +20,9 @@ class EmbedderSettings:
     model: str = "nomic-ai/CodeRankEmbed"
     dim: int = 768
     batch_size: int = 32
+    # None → auto-detect (cuda→mps→cpu); set e.g. "cuda"/"cpu" to pin. The
+    # model runner resolves and logs the device (core/compute.py).
+    device: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,9 @@ class RerankerSettings:
     preload: bool = False
     candidates: int = 50
     batch_size: int = 16
+    # None → auto-detect (cuda→mps→cpu); pin to force. On CPU the cross-encoder
+    # cannot meet the p95 budget (M4 gate), which is why it ships default-off.
+    device: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,7 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
             model=emb.get("model", EmbedderSettings.model),
             dim=int(emb.get("dim", EmbedderSettings.dim)),
             batch_size=int(emb.get("batch_size", EmbedderSettings.batch_size)),
+            device=emb.get("device", EmbedderSettings.device),
         ),
         reranker=RerankerSettings(
             model=rrk.get("model", RerankerSettings.model),
@@ -74,6 +81,7 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
             preload=bool(rrk.get("preload", RerankerSettings.preload)),
             candidates=int(rrk.get("candidates", RerankerSettings.candidates)),
             batch_size=int(rrk.get("batch_size", RerankerSettings.batch_size)),
+            device=rrk.get("device", RerankerSettings.device),
         ),
         qdrant=QdrantSettings(
             url=qdr.get("url", QdrantSettings.url),

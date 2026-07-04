@@ -11,6 +11,11 @@ lesson may never weaken those. See `architecture-docs/code-indexer-expanded-arch
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
+## [4] testing (occurrences: 1)
+**Mistake:** Ran the M4 latency benchmark on a GPU-capable Colab box without pinning or logging the compute device. The cross-encoder silently executed on CPU while a T4 sat idle, producing an ambiguous ~13s p95, and I first misattributed it to a CPU-only torch build — nearly writing that wrong root cause into the architecture doc before a torch.cuda.is_available() check disproved it.
+**Lesson:** When benchmarking model latency, resolve the compute device explicitly, pass it to the model, and record which device each model ran on in the report — never rely on a library's implicit device auto-detect. A latency figure without a recorded device is not a measurement; a fast/slow number is uninterpretable until you know the hardware it ran on.
+**Rationale:** Latency is hardware-dependent by definition, so an unrecorded device makes the number meaningless and invites a fabricated root cause. sentence-transformers device=None auto-detect returned CPU on a cuda-available box, so implicit placement is not trustworthy across envs; explicit resolution + logging is the only way a benchmark is reproducible and a gate decision defensible (constraint A: no hallucination, rationale for every decision).
+
 ## [3] process (occurrences: 1)
 **Mistake:** The eval harness's write-baseline-if-missing convenience let a subagent's early background run (contaminated corpus: golden.yaml indexed, pre-fix labels) silently become the stored M2 baseline; the clean gate run then loaded it instead of writing its own, and the mismatch only surfaced because live-dense and stored-dense NDCG disagreed in the third decimal
 **Lesson:** Before trusting any auto-written-on-absence artifact (baselines, caches, snapshots), verify its provenance matches the current methodology - after changing corpus, labels, or scoring, delete and regenerate such artifacts rather than letting stale ones be silently consumed

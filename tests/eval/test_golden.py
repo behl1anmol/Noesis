@@ -232,6 +232,19 @@ async def test_golden_set_gate_numbers(corpus):
     # the ~568M model load, which is startup cost, not per-query latency.
     await reranker.preload()
 
+    # Record the compute device every model actually loaded on — a latency
+    # benchmark without a recorded device is uninterpretable (lesson 4). The
+    # embedder loaded during the corpus fixture's index; the reranker just now.
+    import torch
+
+    device = {
+        "torch": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "embedder": embedder.resolved_device,
+        "reranker": reranker.resolved_device,
+    }
+    print(f"\n== compute device ==\n{device}")
+
     try:
         reports = {
             "dense": await evaluate(channel_fn("dense"), golden),
@@ -279,6 +292,7 @@ async def test_golden_set_gate_numbers(corpus):
                 "date": date.today().isoformat(),
                 "milestone": milestone,
                 "channel": channel,
+                "device": device,
             },
         )
 
