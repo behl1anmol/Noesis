@@ -102,6 +102,51 @@ def load_golden(path: str | Path) -> list[GoldenQuery]:
     return queries
 
 
+@dataclass(frozen=True)
+class StructuralPattern:
+    """M5 golden entry (§3.8): a structural_search pattern with its exact
+    expected per-file match counts. Evaluated pass/fail, deliberately outside
+    the retrieval metrics — pattern matching is exact, so partial credit
+    would only hide regressions."""
+
+    id: str
+    pattern: str
+    language: str
+    expected: dict[str, int]  # repo-relative path -> match count
+
+
+def load_structural_patterns(path: str | Path) -> list[StructuralPattern]:
+    """Parse and validate the golden ``structural_patterns`` section. Same
+    fail-loudly rule as load_golden: a silently skipped entry corrupts the
+    exit-criterion check."""
+    with open(path, "rb") as fh:
+        raw = yaml.safe_load(fh)
+    entries = raw.get("structural_patterns") if isinstance(raw, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"{path}: expected a non-empty 'structural_patterns' list")
+    patterns: list[StructuralPattern] = []
+    seen_ids: set[str] = set()
+    for i, entry in enumerate(entries):
+        pid = entry.get("id")
+        if not pid or pid in seen_ids:
+            raise ValueError(f"{path}: pattern #{i} has a missing or duplicate id")
+        seen_ids.add(pid)
+        if not entry.get("pattern") or not entry.get("language"):
+            raise ValueError(f"{path}: pattern {pid!r} needs pattern and language")
+        expected = entry.get("expected")
+        if not isinstance(expected, dict) or not expected:
+            raise ValueError(f"{path}: pattern {pid!r} has no expected match counts")
+        patterns.append(
+            StructuralPattern(
+                id=pid,
+                pattern=entry["pattern"],
+                language=entry["language"],
+                expected={str(k): int(v) for k, v in expected.items()},
+            )
+        )
+    return patterns
+
+
 def matches(result: dict[str, Any], item: RelevantItem) -> bool:
     if result.get("file_path") != item.path:
         return False

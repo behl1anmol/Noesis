@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from noesis.core import state
 from noesis.core.indexer import execute_run, prepare_run
 from noesis.core.retriever import search_code
+from noesis.core.structural import StructuralSearchError, structural_search
 from noesis.core.vectorstore import SearchChannel
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,15 @@ class SearchRequest(BaseModel):
     channel: SearchChannel = "hybrid"
     # None → server default (reranker availability, config reranker.enabled).
     rerank: bool | None = None
+
+
+class StructuralSearchRequest(BaseModel):
+    pattern: str
+    language: str
+    project_id: str
+    paths: list[str] | None = None
+    # None → config structural.max_results; requests may lower the cap, not raise it.
+    max_results: int | None = Field(default=None, ge=1)
 
 
 @router.get("/healthz")
@@ -108,3 +118,27 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
         "reranked": result["reranked"],
         "hits": result["hits"],
     }
+
+
+@router.post("/structural-search")
+async def structural_search_route(
+    req: StructuralSearchRequest, request: Request
+) -> dict[str, Any]:
+    ctx = request.app.state.ctx
+    try:
+        result = await structural_search(
+            ctx.conn,
+            req.project_id,
+            req.pattern,
+            req.language,
+            paths=req.paths,
+            max_results=req.max_results,
+            settings=ctx.structural,
+        )
+    except StructuralSearchError as exc:
+        status = 404 if exc.error_type == "unknown_project" else 400
+        raise HTTPException(
+            status_code=status,
+            detail={"type": exc.error_type, "message": exc.message},
+        ) from exc
+    return {"pattern": req.pattern, "language": req.language, **result}

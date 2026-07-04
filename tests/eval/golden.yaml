@@ -1,4 +1,5 @@
-# M3 golden query set (expanded architecture doc §6.2, M3 gate).
+# Golden set: M3 retrieval queries (`queries`) + M5 structural patterns
+# (`structural_patterns`) — expanded architecture doc §6.2 / §3.8.
 #
 # Corpus: this repository (noesis), self-indexed from the repo root — the
 # same corpus the M2 live verification used. All `path` values are relative
@@ -20,6 +21,15 @@
 # authoritative (M3 prompt: "I will label 40 queries").
 #
 # 40 queries: 14 nl, 14 symbol, 12 structural.
+#
+# `structural_patterns` (M5, §3.8) is evaluated separately from the
+# retrieval metrics: each pattern runs through structural_search against
+# this repo (scoped to src/ so agent-tooling churn under .claude/ cannot
+# flake the set) and must return EXACTLY the labeled per-file match counts.
+# Counts, not line numbers, are pinned: ordinary edits move lines, but a
+# match-count change means the code or the matcher changed — either way a
+# human should look. Every entry was verified by running the pattern at
+# labeling time. Same stakeholder-review rule as above.
 
 queries:
   # ---------------------------------------------------------------- nl (14)
@@ -97,14 +107,14 @@ queries:
     query: "where are runtime settings loaded from the toml config file"
     relevant:
       - path: src/noesis/core/config.py
-        lines: [38, 58]
+        lines: [63, 107]
 
   - id: nl-11
     category: nl
     query: "how do I check the status of a running index job"
     relevant:
       - path: src/noesis/api/routes.py
-        lines: [71, 79]
+        lines: [81, 96]
 
   - id: nl-12
     category: nl
@@ -118,7 +128,7 @@ queries:
     query: "how is the web application started and its core resources wired together"
     relevant:
       - path: src/noesis/app.py
-        lines: [37, 83]
+        lines: [37, 85]
 
   - id: nl-14
     category: nl
@@ -203,14 +213,14 @@ queries:
     query: "EXT_TO_LANGUAGE"
     relevant:
       - path: src/noesis/core/languages.py
-        lines: [13, 50]
+        lines: [16, 53]
 
   - id: symbol-12
     category: symbol
     query: "load_settings"
     relevant:
       - path: src/noesis/core/config.py
-        lines: [38, 58]
+        lines: [72, 107]
 
   - id: symbol-13
     category: symbol
@@ -287,7 +297,7 @@ queries:
     query: "endpoint that returns 202 accepted with a run id"
     relevant:
       - path: src/noesis/api/routes.py
-        lines: [42, 62]
+        lines: [52, 72]
 
   - id: structural-09
     category: structural
@@ -315,4 +325,62 @@ queries:
     query: "async context manager that manages the application lifespan"
     relevant:
       - path: src/noesis/app.py
-        lines: [42, 76]
+        lines: [43, 77]
+
+# ------------------------------------------------------- structural (M5)
+# Evaluated by tests/eval/test_structural_golden.py: exact per-file match
+# counts via structural_search, scoped to paths: ["src"].
+structural_patterns:
+  - id: sp-01
+    pattern: "SgRoot($$$ARGS)"
+    language: python
+    expected:
+      src/noesis/core/structural.py: 2
+
+  - id: sp-02
+    pattern: "sqlite3.connect($$$ARGS)"
+    language: python
+    expected:
+      src/noesis/core/state.py: 1
+
+  - id: sp-03
+    pattern: "conn.executescript($S)"
+    language: python
+    expected:
+      src/noesis/core/state.py: 1
+
+  - id: sp-04
+    pattern: "def detect_language($$$P) -> $RET: $$$B"
+    language: python
+    expected:
+      src/noesis/core/languages.py: 1
+
+  - id: sp-05
+    pattern: "GitIgnoreSpec.from_lines($X)"
+    language: python
+    expected:
+      src/noesis/core/discovery.py: 3
+
+  - id: sp-06
+    pattern: "HTTPException($$$ARGS)"
+    language: python
+    expected:
+      src/noesis/api/routes.py: 4
+
+  - id: sp-07
+    pattern: "time.monotonic()"
+    language: python
+    expected:
+      src/noesis/core/structural.py: 2
+
+  - id: sp-08
+    pattern: "$LOOP.run_in_executor($$$ARGS)"
+    language: python
+    expected:
+      src/noesis/core/structural.py: 1
+
+  - id: sp-09
+    pattern: "uuid.uuid4()"
+    language: python
+    expected:
+      src/noesis/core/state.py: 3
