@@ -222,3 +222,6 @@ dev/devlog.sqlite
 dev/devlog.sqlite-wal
 dev/devlog.sqlite-shm
 .claude/settings.local.json
+
+# noesis runtime state (service-created, machine-local)
+data/

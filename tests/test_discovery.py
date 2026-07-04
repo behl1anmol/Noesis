@@ -82,6 +82,23 @@ def test_secret_skip_list_applies_without_gitignore(tmp_path: Path) -> None:
     assert "config.py" in found
 
 
+def test_generated_lockfiles_excluded(tmp_path: Path) -> None:
+    make_tree(
+        tmp_path,
+        {
+            "uv.lock": 'version = 1\n[[package]]\nname = "x"\n',
+            "web/package-lock.json": '{"lockfileVersion": 3}\n',
+            "Cargo.lock": "[[package]]\n",
+            "main.py": "pass\n",
+        },
+    )
+    found = discover_files(tmp_path)
+    assert "uv.lock" not in found
+    assert "web/package-lock.json" not in found
+    assert "Cargo.lock" not in found
+    assert "main.py" in found
+
+
 def test_is_secret_path_patterns() -> None:
     assert is_secret_path(".env")
     assert is_secret_path("deploy/.env.production")

@@ -15,8 +15,13 @@ CodeRankEmbed's query prefix) live inside implementations' ``embed_query``
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import hashlib
-from typing import Protocol, runtime_checkable
+import itertools
+import queue
+import threading
+from typing import Any, Callable, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -75,3 +80,141 @@ class FakeEmbedder:
     async def embed_query(self, text: str) -> list[float]:
         self.query_calls.append(text)
         return self._vector(f"query:{text}")
+
+
+# Priority classes for the LocalSTEmbedder worker queue (§3.3): queries
+# preempt indexing batches; freshness lags under query load and recovers.
+_HIGH = 0  # embed_query — interactive path
+_LOW = 1  # embed_documents — indexing path
+_SHUTDOWN = 2  # close() sentinel — drains queued jobs first
+
+
+class LocalSTEmbedder:
+    """Default local Embedder: CodeRankEmbed via sentence-transformers (M2).
+
+    Concurrency model (§3.3): one dedicated single worker thread owns the
+    model — forward passes are never concurrent. Jobs go through a
+    ``queue.PriorityQueue`` of ``(priority, seq, job)``: HIGH for
+    ``embed_query``, LOW for ``embed_documents``, so an interactive query
+    preempts queued indexing batches. ``seq`` is a monotonic counter that
+    keeps FIFO order within a priority class and keeps tuple comparison
+    away from job objects.
+
+    The worker thread starts lazily on the first embed call (daemon, so
+    never calling ``close()`` is safe) and the model loads inside the
+    worker on its first job. ``sentence_transformers`` is imported lazily
+    in the loader — never at module top level — so FakeEmbedder users
+    don't pay the torch import; this module is the only place allowed to
+    import it (CLAUDE.md hard rule 1).
+
+    CodeRankEmbed's query instruction prefix is applied inside
+    ``embed_query`` only (§3.4 rule 3) — callers never see it.
+    """
+
+    _QUERY_PREFIX = "Represent this query for searching relevant code: "
+
+    def __init__(
+        self,
+        model_id: str = "nomic-ai/CodeRankEmbed",
+        dim: int = 768,
+        device: str | None = None,
+        batch_size: int = 32,
+        _load_model: Callable[[], Any] | None = None,
+    ) -> None:
+        self._model_id = model_id
+        self._dim = dim
+        self._device = device
+        self._batch_size = batch_size
+        self._load_model = _load_model or self._default_load
+        self._queue: queue.PriorityQueue[
+            tuple[int, int, tuple[Callable[[Any], Any], concurrent.futures.Future] | None]
+        ] = queue.PriorityQueue()
+        self._seq = itertools.count()
+        self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._closed = False
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    def _default_load(self) -> Any:
+        # Lazy import: the only sentence_transformers import in the codebase
+        # (CLAUDE.md hard rule 1; CI greps for this). Local model, no network
+        # service — ADR-25.
+        from sentence_transformers import SentenceTransformer
+
+        return SentenceTransformer(
+            self._model_id, trust_remote_code=True, device=self._device
+        )
+
+    def _worker_loop(self) -> None:
+        model: Any = None
+        while True:
+            _priority, _seq, item = self._queue.get()
+            if item is None:  # shutdown sentinel
+                return
+            fn, future = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                if model is None:
+                    model = self._load_model()
+                future.set_result(fn(model))
+            except BaseException as exc:  # noqa: BLE001 — propagate to caller,
+                future.set_exception(exc)  # never kill the worker thread.
+
+    def _submit(
+        self, priority: int, fn: Callable[[Any], Any]
+    ) -> concurrent.futures.Future:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("LocalSTEmbedder is closed")
+            if self._worker is None:
+                self._worker = threading.Thread(
+                    target=self._worker_loop, name="noesis-embedder", daemon=True
+                )
+                self._worker.start()
+            self._queue.put((priority, next(self._seq), (fn, future)))
+        return future
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        texts = list(texts)
+        batch_size = self._batch_size
+
+        def job(model: Any) -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for start in range(0, len(texts), batch_size):
+                batch = texts[start : start + batch_size]
+                vectors.extend(v.tolist() for v in model.encode(batch))
+            return vectors
+
+        return await asyncio.wrap_future(self._submit(_LOW, job))
+
+    async def embed_query(self, text: str) -> list[float]:
+        prefixed = self._QUERY_PREFIX + text
+
+        def job(model: Any) -> list[float]:
+            return model.encode([prefixed])[0].tolist()
+
+        return await asyncio.wrap_future(self._submit(_HIGH, job))
+
+    def close(self) -> None:
+        """Drain queued jobs, then stop the worker. Idempotent; optional —
+        the worker is a daemon thread, so never closing is also safe."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            worker = self._worker
+            if worker is None:
+                return
+            self._queue.put((_SHUTDOWN, next(self._seq), None))
+        worker.join()
