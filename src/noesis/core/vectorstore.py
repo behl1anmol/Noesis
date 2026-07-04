@@ -359,12 +359,16 @@ class VectorStore:
             )
         except UnexpectedResponse as exc:
             # A remote server rejects malformed point ids (non-UUID strings)
-            # with 400 — same meaning as unknown. Local mode just returns
-            # nothing. Anything else (connection down, 5xx) must propagate,
-            # not masquerade as "unknown chunk_id".
+            # with 400 — same meaning as unknown. Anything else (connection
+            # down, 5xx) must propagate, not masquerade as "unknown chunk_id".
             if exc.status_code == 400:
                 return None
             raise
+        except ValueError:
+            # Local (in-process) Qdrant raises ValueError on a malformed
+            # (non-UUID) point id where a remote server answers 400 — both
+            # mean "no such chunk". Keeps the contract transport-independent.
+            return None
         if not points:
             return None
         payload = points[0].payload or {}

@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Protocol
 
 from noesis.core import state
-from noesis.core.indexer import execute_run, prepare_run
+from noesis.core.indexer import execute_run
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,25 @@ class _ContextLike(Protocol):
 def launch_index_run(ctx: _ContextLike, root_path: str) -> dict[str, str]:
     """Register (or re-open) the project and start indexing in the
     background. Returns the 202-style acceptance body shared verbatim by
-    REST and MCP. Raises ValueError on the mixed-model guard
-    (state.register_project)."""
-    project_id, run_id = prepare_run(ctx.conn, ctx.embedder, root_path)
+    REST and MCP.
+
+    Fails fast with ValueError before touching state when *root_path* is
+    missing or not a directory (an agent gets the answer now instead of
+    polling a background failure), and on the mixed-model guard
+    (state.register_project). If a run is already ``running`` for this
+    project, returns that run's id rather than launching a second
+    concurrent index racing on the same collection and state rows."""
+    if not os.path.isdir(root_path):
+        raise ValueError(f"root_path is not an existing directory: {root_path!r}")
+    project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
+    latest = state.get_latest_run(ctx.conn, project_id)
+    if latest is not None and latest["status"] == "running":
+        return {
+            "project_id": project_id,
+            "run_id": latest["id"],
+            "status": "accepted",
+        }
+    run_id = state.start_run(ctx.conn, project_id)
 
     async def _run() -> None:
         try:

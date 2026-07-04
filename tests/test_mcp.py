@@ -27,7 +27,7 @@ from fastmcp.exceptions import ToolError
 from qdrant_client import QdrantClient
 
 from noesis.app import AppContext, create_app
-from noesis.core import state
+from noesis.core import jobs, state
 from noesis.core.embedder import FakeEmbedder
 from noesis.core.vectorstore import VectorStore
 from noesis.mcp import build_mcp
@@ -180,8 +180,9 @@ async def test_get_chunk_roundtrip_from_search_hit(rest, mcp, project_dir):
     assert chunk["file_path"] == hit["file_path"]
     assert chunk["start_line"] == hit["start_line"]
     assert chunk["end_line"] == hit["end_line"]
-    # The stored content is the full chunk text the snippet was cut from.
-    assert chunk["content"].startswith(hit["snippet"])
+    # The stored content is the full chunk text the snippet was cut from
+    # (snippet may be a window into content, not necessarily its prefix).
+    assert hit["snippet"] in chunk["content"]
 
 
 @pytest.mark.parametrize(
@@ -207,6 +208,21 @@ async def test_structural_errors_carry_type_and_diagnostic(rest, mcp, project_di
                 "structural_search",
                 {"pattern": "x", "language": "sql", "project_id": project_id},
             )
+
+
+def test_launch_dedups_while_a_run_is_in_flight(ctx, project_dir):
+    """A second launch while a run is still ``running`` returns the live
+    run's id instead of starting a concurrent index over the same state."""
+    pid = state.register_project(ctx.conn, str(project_dir), ctx.embedder.model_id)
+    running = state.start_run(ctx.conn, pid)  # simulate an in-flight run
+    body = jobs.launch_index_run(ctx, str(project_dir))
+    assert body == {"project_id": pid, "run_id": running, "status": "accepted"}
+    assert not ctx.jobs  # no second background task spawned
+
+
+def test_launch_rejects_missing_root_path(ctx, tmp_path):
+    with pytest.raises(ValueError, match="not an existing directory"):
+        jobs.launch_index_run(ctx, str(tmp_path / "does-not-exist"))
 
 
 async def test_mounted_http_transport_lifespan(ctx, project_dir):
