@@ -113,13 +113,26 @@ class WatcherManager:
                     self._launch_scoped(row["id"], [p["path"] for p in pending])
 
     def stop(self) -> None:
-        if self._consumer is not None:
-            self._consumer.cancel()
-            self._consumer = None
+        # Stop the observer first (no new events), then drain what already
+        # reached the queue and flush the accumulator — otherwise up to one
+        # debounce window of events is dropped across a clean restart, and
+        # start()'s catch-up only ever sees flushed rows (PR #10 review).
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=5)
             self._observer = None
+        if self._consumer is not None:
+            self._consumer.cancel()
+            self._consumer = None
+        while True:
+            try:
+                self._accumulate(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        try:
+            self._flush()
+        except Exception:  # noqa: BLE001 — shutdown must complete
+            logger.exception("final watcher flush failed")
         self._watches.clear()
 
     def set_watch(self, project_id: str, enabled: bool) -> None:
@@ -162,6 +175,13 @@ class WatcherManager:
             self._loop.call_soon_threadsafe(
                 self._queue.put_nowait, (project_id, rel, event_type)
             )
+
+    def _reload_ignore_threadsafe(self, watch: _ProjectWatch) -> None:
+        """Reload a project's root .gitignore spec on the event loop — the
+        observer event thread does string checks only, no file reads
+        (PR #10 review keeps that invariant honest)."""
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(watch.reload_ignore)
 
     # -- consumer side (event loop) ------------------------------------------
 
@@ -284,7 +304,7 @@ class _Handler:
         if _is_noise(name):
             return
         if name == ".gitignore":
-            self._watch.reload_ignore()
+            self._manager._reload_ignore_threadsafe(self._watch)
             return
         if not is_dir:
             if is_secret_path(rel):

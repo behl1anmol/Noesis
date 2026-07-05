@@ -89,7 +89,7 @@ def launch_index_run(
 
     async def _run() -> None:
         try:
-            await execute_run(
+            result = await execute_run(
                 ctx.conn,
                 ctx.store,
                 ctx.embedder,
@@ -110,6 +110,17 @@ def launch_index_run(
             state.clear_pending_changes(
                 ctx.conn, project_id, paths=paths, before=started_iso
             )
+            # Files that failed per-file containment (ADR-41) go straight
+            # back to pending: their state rows are stale, and without a
+            # pending row the watcher would never auto-retry them — only a
+            # manual full run would (PR #10 review). No hot loop: a retry
+            # fires only on the next event/quiet cycle or manual action.
+            if result.failed_paths:
+                state.upsert_pending_changes(
+                    ctx.conn,
+                    project_id,
+                    [(p, "modified") for p in result.failed_paths],
+                )
 
     task = asyncio.create_task(_run())
     ctx.jobs[run_id] = task

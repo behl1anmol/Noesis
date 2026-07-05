@@ -19,6 +19,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from noesis.core import dashboard as core_dashboard
+from noesis.core.state import MixedModelError
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -239,6 +240,7 @@ async def api_register(req: RegisterRequest, request: Request) -> dict[str, Any]
             index_now=req.index_now,
         )
     except ValueError as exc:
-        # missing dir → 400; mixed-model guard → 409
-        status = 409 if "indexed with model" in str(exc) else 400
+        # Typed, not text-matched (PR #10 review): mixed-model guard → 409,
+        # any other validation failure (missing dir, bad values) → 400.
+        status = 409 if isinstance(exc, MixedModelError) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc

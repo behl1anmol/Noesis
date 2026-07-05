@@ -50,9 +50,12 @@ class AppContext:
     # watcher manager, both owned by the lifespan.
     progress: dict[str, dict] = field(default_factory=dict)
     watcher: object | None = None
-    # Effective device pin from config.toml, if any — the dashboard's
-    # device setting defers to it (operator config wins over UI state).
+    # Effective device pins from config.toml, if any — the dashboard's
+    # device setting defers to them (operator config wins over UI state).
+    # Both tracked: a reranker-only pin must also block the UI, or
+    # set_compute_device would silently override it (PR #10 review).
     config_device_pin: str | None = None
+    config_reranker_device_pin: str | None = None
 
 
 async def build_runtime_context(cfg: Settings) -> AppContext:
@@ -69,6 +72,16 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
     os.environ.setdefault(FASTEMBED_CACHE_ENV, FASTEMBED_CACHE_DEFAULT)
     conn = state.connect(cfg.db_path)
     state.init_db(conn)
+    # Crash recovery: a fresh process has no live index tasks, so any
+    # 'running' row is a leftover that would jam the launch guard forever.
+    orphaned = state.fail_orphaned_runs(conn)
+    if orphaned:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "marked %d orphaned 'running' index run(s) as failed (interrupted)",
+            orphaned,
+        )
     # Device precedence (ADR-40): an explicit config.toml pin wins (operator
     # config is never second-guessed by UI state); otherwise the dashboard's
     # persisted app_settings choice; otherwise auto-detect (None).
@@ -105,6 +118,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         structural=cfg.structural,
         git_fast_path=cfg.git.fast_path,
         config_device_pin=cfg.embedder.device,
+        config_reranker_device_pin=cfg.reranker.device,
     )
 
 
@@ -156,6 +170,17 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
 
     app = FastAPI(
         title="noesis", lifespan=combine_lifespans(lifespan, mcp_app.lifespan)
+    )
+    # DNS-rebinding guard (PR #10 security review): binding 127.0.0.1 stops
+    # remote hosts, but a browser on this machine visiting a page whose
+    # domain re-resolves to 127.0.0.1 would reach the mutation endpoints
+    # with readable responses. Rejecting foreign Host headers closes that
+    # class; "testserver" is Starlette's TestClient default.
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["127.0.0.1", "localhost", "testserver"],
     )
     app.include_router(router)
     app.include_router(dashboard_router)

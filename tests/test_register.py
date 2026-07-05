@@ -228,6 +228,103 @@ def test_delete_unknown_project_404(client):
     assert client.delete("/api/projects/nope").status_code == 404
 
 
+# -- PR #10 review fixes --------------------------------------------------------
+
+
+def test_reregister_watch_off_unschedules(client, repo):
+    body = client.post(
+        "/api/register", json={"root_path": str(repo), "watch": True}
+    ).json()
+    pid = body["project"]["id"]
+    assert body["project"]["watching"] is True
+    again = client.post(
+        "/api/register", json={"root_path": str(repo), "watch": False}
+    ).json()
+    assert again["project"]["id"] == pid
+    assert again["project"]["watch_enabled"] is False
+    assert again["project"]["watching"] is False  # live watch unscheduled
+
+
+def test_failed_file_stays_pending_after_scoped_run(client, repo, monkeypatch):
+    from noesis.core import indexer as indexer_mod
+
+    body = client.post(
+        "/api/register", json={"root_path": str(repo), "index_now": True}
+    ).json()
+    pid = body["project"]["id"]
+    asyncio.run(_wait_done(client, body["run"]["run_id"]))
+    ctx = client.app.state.ctx
+
+    real_chunk_file = indexer_mod.chunk_file
+
+    def flaky(text, *, language=None, file_path=None, file_hash=None):
+        if file_path == "a.py":
+            raise RuntimeError("boom")
+        return real_chunk_file(
+            text, language=language, file_path=file_path, file_hash=file_hash
+        )
+
+    monkeypatch.setattr(indexer_mod, "chunk_file", flaky)
+    (repo / "a.py").write_text("x = 99\n")
+    (repo / "b.go").write_text("package main // v2\n")
+    state.upsert_pending_changes(
+        ctx.conn, pid, [("a.py", "modified"), ("b.go", "modified")]
+    )
+    # Scoped run over exactly the pending set (the watcher's launch path).
+    launched = client.post(f"/api/projects/{pid}/reindex-pending").json()
+    run = asyncio.run(_wait_done(client, launched["run_id"]))
+    assert run["files_failed"] == 1
+    # b.go cleared (indexed); a.py re-pended so the watcher retries it —
+    # without this, only a manual full run would ever pick it up (ADR-41).
+    remaining = {r["path"] for r in state.list_pending_changes(ctx.conn, pid)}
+    assert remaining == {"a.py"}
+
+
+def test_reranker_only_pin_blocks_device_change(tmp_path):
+    from noesis.core import dashboard as core_dashboard
+
+    ctx = make_ctx(tmp_path)
+    ctx.config_reranker_device_pin = "cuda"
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="pinned"):
+        core_dashboard.set_compute_device(ctx, "cpu")
+
+
+def test_orphaned_running_runs_failed_and_unblock_launch(client, repo):
+    ctx = client.app.state.ctx
+    pid = state.register_project(ctx.conn, repo, ctx.embedder.model_id)
+    dead_run = state.start_run(ctx.conn, pid)  # simulates a crash leftover
+    assert state.fail_orphaned_runs(ctx.conn) == 1
+    row = ctx.conn.execute(
+        "SELECT status, error FROM index_runs WHERE id = ?", (dead_run,)
+    ).fetchone()
+    assert row["status"] == "failed" and row["error"] == "interrupted"
+    # Launch guard no longer returns the dead run id.
+    resp = client.post(f"/projects/{pid}/reindex")
+    assert resp.status_code == 202
+    assert resp.json()["run_id"] != dead_run
+
+
+def test_pending_created_survives_later_modified(client, repo):
+    ctx = client.app.state.ctx
+    pid = state.register_project(ctx.conn, repo, ctx.embedder.model_id)
+    state.upsert_pending_changes(ctx.conn, pid, [("new.py", "created")])
+    state.upsert_pending_changes(ctx.conn, pid, [("new.py", "modified")])
+    rows = state.list_pending_changes(ctx.conn, pid)
+    assert [(r["path"], r["event_type"]) for r in rows] == [("new.py", "created")]
+    state.upsert_pending_changes(ctx.conn, pid, [("new.py", "deleted")])
+    assert state.list_pending_changes(ctx.conn, pid)[0]["event_type"] == "deleted"
+
+
+def test_foreign_host_rejected(client, repo):
+    # DNS-rebinding guard: same socket, attacker-controlled Host header.
+    resp = client.get("/api/state", headers={"Host": "evil.example.com"})
+    assert resp.status_code == 400
+    resp = client.delete("/api/projects/whatever", headers={"Host": "evil.example.com"})
+    assert resp.status_code == 400
+
+
 def test_discovery_config_for_project_defaults(client, repo):
     body = client.post(
         "/api/register", json={"root_path": str(repo), "index_now": False}

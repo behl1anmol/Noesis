@@ -115,6 +115,12 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+class MixedModelError(ValueError):
+    """A project is already indexed with a different embedding model.
+    Typed so adapters can map it to 409 without matching message text
+    (PR #10 review)."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -149,7 +155,7 @@ def register_project(
     ).fetchone()
     if row is not None:
         if row["embedding_model"] != embedding_model:
-            raise ValueError(
+            raise MixedModelError(
                 f"project at {resolved} is indexed with model "
                 f"{row['embedding_model']!r}; refusing to serve mixed-model state. "
                 f"Re-register requires a full re-index with {embedding_model!r}."
@@ -229,6 +235,23 @@ def delete_files(
         [(project_id, p) for p in paths],
     )
     conn.commit()
+
+
+def fail_orphaned_runs(conn: sqlite3.Connection) -> int:
+    """Mark every 'running' run as failed. Called at process startup: a
+    fresh process has no live index tasks by definition, so any 'running'
+    row is a crash leftover — and the launch guard would otherwise return
+    that dead run id forever, silently no-opping every future launch
+    (PR #10 review). If a second process shares the DB mid-run, its live
+    run gets mislabelled transiently and self-heals: finish_run overwrites
+    the status when that run completes."""
+    cur = conn.execute(
+        "UPDATE index_runs SET status = 'failed', error = 'interrupted',"
+        " finished_at = ? WHERE status = 'running'",
+        (_now(),),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 def start_run(
@@ -387,7 +410,12 @@ def upsert_pending_changes(
         INSERT INTO pending_changes (project_id, path, event_type, detected_at)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(project_id, path) DO UPDATE SET
-          event_type = excluded.event_type,
+          -- created + later modified is still a creation: the file has never
+          -- been indexed. Deletion (or anything else) overwrites.
+          event_type = CASE
+            WHEN pending_changes.event_type = 'created'
+                 AND excluded.event_type = 'modified'
+            THEN 'created' ELSE excluded.event_type END,
           detected_at = excluded.detected_at
         """,
         [(project_id, path, event_type, now) for path, event_type in changes],

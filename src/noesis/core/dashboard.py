@@ -154,12 +154,17 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
     search usage, watcher activity — everything derived, nothing stored
     beyond what the run/query/watcher tables already hold."""
     conn = ctx.conn
+    # Day-granularity cutoff on both sides: stored timestamps are ISO with a
+    # 'T' separator + tz offset, SQLite's datetime() emits space-separated —
+    # comparing them raw is only lexically right away from the boundary
+    # (PR #10 review). substr → date-vs-date is exact.
     cutoff = f"-{days} days"
+    _DAY = "substr({col}, 1, 10) >= date('now', ?)"
 
     runs_per_day = [
         dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT substr(started_at, 1, 10) AS day,
                    COUNT(*) AS runs,
                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
@@ -167,7 +172,7 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
                    COALESCE(SUM(files_changed), 0) AS files_changed,
                    COALESCE(SUM(chunks_written), 0) AS chunks_written
             FROM index_runs
-            WHERE started_at >= datetime('now', ?)
+            WHERE {_DAY.format(col='started_at')}
             GROUP BY day ORDER BY day
             """,
             (cutoff,),
@@ -175,14 +180,14 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
     ]
     run_stats = dict(
         conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS total_runs,
                    SUM(CASE WHEN fast_path_used = 1 THEN 1 ELSE 0 END) AS fast_path_runs,
                    AVG(CASE WHEN finished_at IS NOT NULL AND started_at IS NOT NULL
                        THEN (julianday(finished_at) - julianday(started_at)) * 86400.0
                        END) AS avg_duration_s
             FROM index_runs
-            WHERE started_at >= datetime('now', ?)
+            WHERE {_DAY.format(col='started_at')}
             """,
             (cutoff,),
         ).fetchone()
@@ -191,7 +196,7 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
     queries_per_day = [
         dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT substr(ts, 1, 10) AS day,
                    COUNT(*) AS queries,
                    SUM(CASE WHEN interface = 'mcp' THEN 1 ELSE 0 END) AS mcp,
@@ -199,7 +204,7 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
                    SUM(CASE WHEN kind = 'structural' THEN 1 ELSE 0 END) AS structural,
                    SUM(CASE WHEN reranked = 1 THEN 1 ELSE 0 END) AS reranked
             FROM query_log
-            WHERE ts >= datetime('now', ?)
+            WHERE {_DAY.format(col='ts')}
             GROUP BY day ORDER BY day
             """,
             (cutoff,),
@@ -208,9 +213,9 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
     latencies = [
         row["latency_ms"]
         for row in conn.execute(
-            "SELECT latency_ms FROM query_log"
-            " WHERE ts >= datetime('now', ?) AND latency_ms IS NOT NULL"
-            " ORDER BY latency_ms",
+            f"SELECT latency_ms FROM query_log"
+            f" WHERE {_DAY.format(col='ts')} AND latency_ms IS NOT NULL"
+            f" ORDER BY latency_ms",
             (cutoff,),
         ).fetchall()
     ]
@@ -224,9 +229,9 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
     channel_mix = [
         dict(row)
         for row in conn.execute(
-            "SELECT COALESCE(channel, 'structural') AS channel, COUNT(*) AS queries"
-            " FROM query_log WHERE ts >= datetime('now', ?)"
-            " GROUP BY channel ORDER BY queries DESC",
+            f"SELECT COALESCE(channel, 'structural') AS channel, COUNT(*) AS queries"
+            f" FROM query_log WHERE {_DAY.format(col='ts')}"
+            f" GROUP BY channel ORDER BY queries DESC",
             (cutoff,),
         ).fetchall()
     ]
@@ -247,20 +252,46 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
         ).fetchall()
     ]
 
-    health = [
-        {
-            "id": p["id"],
-            "name": p["name"],
-            "file_count": p["file_count"],
-            "chunk_count": p["chunk_count"],
-            "pending_count": p["pending_count"],
-            "index_age_s": p["index_age_s"],
-            "files_failed": (p["last_run"] or {}).get("files_failed") or 0,
-        }
-        for p in (
-            _project_summary(ctx, row) for row in state.list_projects(ctx.conn)
+    # Direct grouped queries instead of a full _project_summary per project
+    # (which also computes live progress) — the health table needs 6 fields
+    # (PR #10 review).
+    file_counts = {
+        r["project_id"]: r
+        for r in conn.execute(
+            "SELECT project_id, COUNT(*) AS files,"
+            " COALESCE(SUM(chunk_count), 0) AS chunks"
+            " FROM files GROUP BY project_id"
+        ).fetchall()
+    }
+    pending_counts = {
+        r["project_id"]: r["n"]
+        for r in conn.execute(
+            "SELECT project_id, COUNT(*) AS n FROM pending_changes GROUP BY project_id"
+        ).fetchall()
+    }
+    last_done = {
+        r["project_id"]: r["finished_at"]
+        for r in conn.execute(
+            "SELECT project_id, MAX(finished_at) AS finished_at"
+            " FROM index_runs WHERE status = 'done' GROUP BY project_id"
+        ).fetchall()
+    }
+    health = []
+    for row in state.list_projects(conn):
+        pid = row["id"]
+        counts = file_counts.get(pid)
+        latest = state.get_latest_run(conn, pid)
+        health.append(
+            {
+                "id": pid,
+                "name": PurePath(row["root_path"]).name or row["root_path"],
+                "file_count": counts["files"] if counts else 0,
+                "chunk_count": counts["chunks"] if counts else 0,
+                "pending_count": pending_counts.get(pid, 0),
+                "index_age_s": _age_seconds(last_done.get(pid)),
+                "files_failed": (latest["files_failed"] if latest else 0) or 0,
+            }
         )
-    ]
 
     return {
         "days": days,
@@ -337,10 +368,20 @@ def reindex_pending(ctx: Any, project_id: str) -> dict[str, Any] | None:
     )
 
 
+def _config_pin(ctx: Any) -> str | None:
+    """The effective config.toml device pin shown/enforced by the dashboard.
+    Either model being pinned locks the UI — set_compute_device retargets
+    both models, so an embedder-only check would let a dashboard change
+    silently override a reranker pin (PR #10 review)."""
+    return getattr(ctx, "config_device_pin", None) or getattr(
+        ctx, "config_reranker_device_pin", None
+    )
+
+
 def device_info(ctx: Any) -> dict[str, Any]:
     """Current compute-device state for the dashboard settings surface."""
     setting = state.get_setting(ctx.conn, "compute_device") or "auto"
-    pin = getattr(ctx, "config_device_pin", None)
+    pin = _config_pin(ctx)
     embedder = ctx.embedder
     return {
         "setting": setting,
@@ -354,13 +395,14 @@ def device_info(ctx: Any) -> dict[str, Any]:
 def set_compute_device(ctx: Any, device: str) -> dict[str, Any]:
     """Persist the device choice and hot-retarget the loaded models
     (generation-bump reload, ADR-40). Raises ValueError on an invalid
-    value or when config.toml pins the device (operator config wins)."""
+    value or when config.toml pins either model's device (operator config
+    wins)."""
     if device not in VALID_DEVICES:
         raise ValueError(f"device must be one of {', '.join(VALID_DEVICES)}")
-    if getattr(ctx, "config_device_pin", None):
+    if _config_pin(ctx):
         raise ValueError(
-            "device is pinned in config.toml; remove the [embedder].device"
-            " pin to control it from the dashboard"
+            "device is pinned in config.toml; remove the [embedder]/[reranker]"
+            " device pin to control it from the dashboard"
         )
     state.set_setting(ctx.conn, "compute_device", device)
     target = None if device == "auto" else device
@@ -486,9 +528,8 @@ async def preview_scan(
     files = await loop.run_in_executor(None, discover_files, root_path, cfg)
     by_lang: dict[str, int] = {}
     for rel in files:
-        by_lang[detect_language(rel) or "other"] = (
-            by_lang.get(detect_language(rel) or "other", 0) + 1
-        )
+        lang = detect_language(rel) or "other"
+        by_lang[lang] = by_lang.get(lang, 0) + 1
     breakdown = sorted(
         ({"language": k, "files": v} for k, v in by_lang.items()),
         key=lambda d: (-d["files"], d["language"]),
@@ -532,9 +573,12 @@ def register_project(
     state.set_project_flags(
         ctx.conn, project_id, watch_enabled=watch, auto_reindex=auto_reindex
     )
+    # Unconditional: re-registering an already-watched project with
+    # watch=False must also unschedule the live OS watch, or events keep
+    # flowing while the flag reads off (PR #10 review).
     watcher = getattr(ctx, "watcher", None)
-    if watcher is not None and watch:
-        watcher.set_watch(project_id, True)
+    if watcher is not None:
+        watcher.set_watch(project_id, watch)
     run: dict[str, Any] | None = None
     if index_now:
         run = jobs.launch_index_run(ctx, root_path, triggered_by="manual")

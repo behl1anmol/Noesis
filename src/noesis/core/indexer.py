@@ -33,6 +33,9 @@ class IndexResult:
     fast_path_used: bool = False
     candidate_count: int | None = None
     files_failed: int = 0
+    # Paths whose per-file processing failed (ADR-41): callers that clear
+    # pending_changes must keep these pending or auto-reindex never retries.
+    failed_paths: tuple[str, ...] = ()
 
 
 # Live-progress callback: (files_done, files_to_index, chunks_written).
@@ -246,6 +249,7 @@ async def execute_run(
             fast_path_used=fast_path_active,
             candidate_count=len(candidates) if fast_path_active and candidates is not None else None,
             files_failed=len(file_errors),
+            failed_paths=tuple(path for path, _ in file_errors),
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

@@ -51,6 +51,10 @@ class _CaptureManager:
     def _enqueue_threadsafe(self, project_id, rel, event_type):
         self.items.append((project_id, rel, event_type))
 
+    def _reload_ignore_threadsafe(self, watch):
+        # unit tests run without a loop — reload synchronously
+        watch.reload_ignore()
+
 
 class _Event:
     def __init__(self, event_type, src_path, is_directory=False, dest_path=None):

@@ -51,14 +51,18 @@ def available_devices() -> tuple[str, ...]:
     does not change within a process, and the torch import is heavy.
     Returns ("cpu",) when torch is not importable so a broken torch
     install degrades the UI, never the request handling around it."""
+    devices: list[str] = []
     try:
         import torch
+
+        # The probes stay inside the try too: a torch build without the
+        # mps backend raises AttributeError, and "must not raise" has to
+        # cover that, not just a failed import (PR #10 review).
+        if torch.cuda.is_available():
+            devices.append("cuda")
+        if torch.backends.mps.is_available():
+            devices.append("mps")
     except Exception:  # noqa: BLE001 — availability probe must not raise
-        return ("cpu",)
-    devices: list[str] = []
-    if torch.cuda.is_available():
-        devices.append("cuda")
-    if torch.backends.mps.is_available():
-        devices.append("mps")
+        pass
     devices.append("cpu")
     return tuple(devices)
