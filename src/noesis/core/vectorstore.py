@@ -239,6 +239,24 @@ class VectorStore:
             wait=True,
         )
 
+    def delete_project_points(self, project_id: str) -> None:
+        """Delete every point belonging to a project (ADR-43 project
+        deletion). Filter-only — never touches other projects' points."""
+        self._client.delete(
+            collection_name=self._collection,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="project_id",
+                            match=models.MatchValue(value=project_id),
+                        )
+                    ]
+                )
+            ),
+            wait=True,
+        )
+
     def search(
         self,
         project_id: str,

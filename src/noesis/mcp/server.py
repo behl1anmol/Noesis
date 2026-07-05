@@ -14,13 +14,14 @@ can supply a context of its own.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from noesis.core import jobs, state
+from noesis.core import jobs, state, telemetry
 from noesis.core import retriever
 from noesis.core import structural as structural_mod
 
@@ -55,6 +56,7 @@ def build_mcp(
         ctx = get_ctx()
         if state.get_project(ctx.conn, project_id) is None:
             raise ToolError("unknown project_id")
+        t0 = time.perf_counter()
         result = await retriever.search_code(
             ctx.store,
             ctx.embedder,
@@ -66,6 +68,16 @@ def build_mcp(
             reranker=ctx.reranker,
             rerank=rerank,
             candidates=ctx.rerank_candidates,
+        )
+        telemetry.record_query(
+            ctx.conn,
+            interface="mcp",
+            kind="search",
+            project_id=project_id,
+            channel=channel,
+            reranked=result["reranked"],
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            result_count=len(result["hits"]),
         )
         return {
             "query": query,
@@ -91,6 +103,7 @@ def build_mcp(
         even if the index is stale.
         """
         ctx = get_ctx()
+        t0 = time.perf_counter()
         try:
             result = await structural_mod.structural_search(
                 ctx.conn,
@@ -103,6 +116,14 @@ def build_mcp(
             )
         except structural_mod.StructuralSearchError as exc:
             raise ToolError(f"{exc.error_type}: {exc.message}") from exc
+        telemetry.record_query(
+            ctx.conn,
+            interface="mcp",
+            kind="structural",
+            project_id=project_id,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            result_count=len(result.get("matches", [])),
+        )
         return {"pattern": pattern, "language": language, **result}
 
     @mcp.tool

@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} — Noesis{% endblock %}
+{% block page %}project{% endblock %}
+{% block bodyattrs %} data-project-id="{{ project.id }}"{% endblock %}
+
+{% macro ago(s) -%}
+  {%- if s is none -%}never indexed
+  {%- elif s < 60 -%}indexed just now
+  {%- elif s < 3600 -%}indexed {{ (s // 60) | int }}m ago
+  {%- elif s < 86400 -%}indexed {{ (s // 3600) | int }}h ago
+  {%- else -%}indexed {{ (s // 86400) | int }}d ago
+  {%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+  {% set p = project %}
+  <a class="back-link" href="/">&larr; All projects</a>
+
+  <div data-project data-id="{{ p.id }}">
+    <section class="section panel fade">
+      {% if p.progress or (p.last_run and p.last_run.status == 'running') %}{% set st = 'running' %}
+      {% elif p.last_run %}{% set st = p.last_run.status %}
+      {% else %}{% set st = 'idle' %}{% endif %}
+
+      <div class="page-head">
+        <div>
+          <h1>{{ p.name }}
+            <span class="chip chip-{{ st }}" data-f="chip" style="vertical-align: 3px; margin-left: 8px">{{ 'never run' if st == 'idle' else st }}</span>
+          </h1>
+          <div class="path mono">{{ p.root_path }}</div>
+          <div class="meta-line">
+            <span class="mono">model: {{ p.embedding_model }}</span>
+            <span>created <span data-rel data-ts="{{ p.created_at }}" class="mono"></span></span>
+            <span class="fresh" data-f="fresh" data-age="{{ p.index_age_s if p.index_age_s is not none else '' }}"
+                  data-prefix="indexed " data-never="never indexed">{{ ago(p.index_age_s) }}</span>
+          </div>
+        </div>
+        <div class="card-foot" style="border-top: none; padding-top: 0; margin-top: 0">
+          <label class="switch" title="Watch this project for file changes">
+            <input type="checkbox" data-toggle="watch" {{ 'checked' if p.watch_enabled else '' }}>
+            <span class="track"></span><span class="switch-label">Watch</span>
+          </label>
+          <span class="live-dot" data-f="watching" {% if not p.watching %}hidden{% endif %} title="Watcher is running"></span>
+          <label class="switch{{ '' if p.watch_enabled else ' is-disabled' }}" data-f="autolabel"
+                 title="{{ 'Reindex automatically when watched files change' if p.watch_enabled else 'Enable Watch to use auto-reindex' }}">
+            <input type="checkbox" data-toggle="auto" {{ 'checked' if p.auto_reindex else '' }}
+                   {{ '' if p.watch_enabled else 'disabled' }}>
+            <span class="track"></span><span class="switch-label">Auto-reindex</span>
+          </label>
+          <button type="button" class="btn btn-amber" data-act="pending"
+                  {% if not p.pending_count %}hidden{% endif %}>Index pending</button>
+          <button type="button" class="btn" data-act="reindex">Reindex</button>
+        </div>
+      </div>
+
+      <div class="card-stats" style="margin-top: 14px">
+        <span><strong data-f="files">{{ p.file_count }}</strong> files</span>
+        <span><strong data-f="chunks">{{ p.chunk_count }}</strong> chunks</span>
+        <span class="badge pending" data-f="pendingbadge" {% if not p.pending_count %}hidden{% endif %}>
+          <span data-f="pending">{{ p.pending_count }}</span>&nbsp;pending
+        </span>
+      </div>
+
+      {% set pr = p.progress %}
+      <div class="progress" data-f="progress" {% if not pr %}hidden{% endif %}>
+        <div class="progress-track">
+          <div class="progress-fill{{ ' indet' if pr and pr.percent is none else '' }}" data-f="bar"
+               style="width: {{ pr.percent | round(1) if pr and pr.percent is not none else (100 if pr else 0) }}%"></div>
+        </div>
+        <div class="progress-meta">
+          <span data-f="pct">{% if pr and pr.percent is not none %}{{ pr.percent | round | int }}%{% endif %}</span>
+          <span data-f="pfiles">{% if pr %}{{ pr.files_done }} / {{ pr.files_to_index }} files{% endif %}</span>
+          <span data-f="pchunks">{% if pr %}{{ pr.chunks_written }} chunks{% endif %}</span>
+          <span data-f="eta"></span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="section panel fade" style="animation-delay: 70ms">
+    <div class="section-head"><h2>Pending changes</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Path</th><th>Event</th><th>Detected</th></tr></thead>
+        <tbody id="pending-body">
+          {% for f in p.pending_files %}
+            <tr>
+              <td class="mono">{{ f.path }}</td>
+              <td><span class="chip chip-ev-{{ f.event_type }}">{{ f.event_type }}</span></td>
+              <td class="mono muted" data-rel data-ts="{{ f.detected_at }}"></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="empty-note" id="pending-empty" {% if p.pending_files %}hidden{% endif %}>
+        No pending changes — index is fresh
+      </div>
+    </div>
+  </section>
+
+  <section class="section panel panel-danger fade" id="failed-section" style="animation-delay: 100ms"
+           {% if not p.failed_files %}hidden{% endif %}>
+    <div class="section-head"><h2>Failed files</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Path</th><th>Error</th></tr></thead>
+        <tbody id="failed-body">
+          {% for f in p.failed_files %}
+            <tr>
+              <td class="mono">{{ f.path }}</td>
+              <td><span class="err-text">{{ f.error }}</span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section panel fade" style="animation-delay: 130ms">
+    <div class="section-head"><h2>Recent runs</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th><th>Trigger</th>
+            <th class="num">Changed</th><th class="num">Failed</th><th class="num">Chunks</th>
+            <th class="num">Duration</th><th>Started</th>
+          </tr>
+        </thead>
+        <tbody id="runs-body">
+          {% for r in p.recent_runs %}
+            <tr>
+              <td><span class="chip chip-{{ r.status }}">{{ r.status }}</span></td>
+              <td>{{ r.triggered_by }}{% if r.fast_path_used %}<span class="tag">fast path</span>{% endif %}</td>
+              <td class="num">{{ r.files_changed }}</td>
+              <td class="num{{ '' if not r.files_failed else ' age-old' }}">{{ r.files_failed }}</td>
+              <td class="num">{{ r.chunks_written }}</td>
+              <td class="num" data-dur data-start="{{ r.started_at }}" data-end="{{ r.finished_at or '' }}"></td>
+              <td class="muted" data-rel data-ts="{{ r.started_at }}"></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="empty-note" id="runs-empty" {% if p.recent_runs %}hidden{% endif %}>No runs yet</div>
+    </div>
+  </section>
+{% endblock %}

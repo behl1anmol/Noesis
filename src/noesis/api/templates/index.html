@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% block title %}Noesis — Overview{% endblock %}
+{% block page %}index{% endblock %}
+
+{# rough server-side humanizer; app.js refines these from data-age on load #}
+{% macro ago(s) -%}
+  {%- if s is none -%}never indexed
+  {%- elif s < 60 -%}indexed just now
+  {%- elif s < 3600 -%}indexed {{ (s // 60) | int }}m ago
+  {%- elif s < 86400 -%}indexed {{ (s // 3600) | int }}h ago
+  {%- else -%}indexed {{ (s // 86400) | int }}d ago
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro status_of(p) -%}
+  {%- if p.progress or (p.last_run and p.last_run.status == 'running') -%}running
+  {%- elif p.last_run -%}{{ p.last_run.status }}
+  {%- else -%}idle
+  {%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+  {% set totals = overview.totals %}
+  {% set dev = overview.device %}
+
+  <section class="section fade">
+    <div class="stats">
+      <div class="stat"><div class="label">Projects</div><div class="value" data-total="projects" data-count="{{ totals.projects }}">{{ totals.projects }}</div></div>
+      <div class="stat"><div class="label">Files indexed</div><div class="value" data-total="files" data-count="{{ totals.files }}">{{ totals.files }}</div></div>
+      <div class="stat"><div class="label">Chunks</div><div class="value" data-total="chunks" data-count="{{ totals.chunks }}">{{ totals.chunks }}</div></div>
+      <div class="stat{{ ' is-warn' if totals.pending > 0 else '' }}" data-stat="pending"><div class="label">Pending changes</div><div class="value" data-total="pending" data-count="{{ totals.pending }}">{{ totals.pending }}</div></div>
+      <div class="stat{{ ' is-live' if totals.running > 0 else '' }}" data-stat="running"><div class="label">Runs in flight</div><div class="value" data-total="running" data-count="{{ totals.running }}">{{ totals.running }}</div></div>
+    </div>
+  </section>
+
+  <section class="section panel fade" style="animation-delay: 60ms">
+    <div class="section-head" style="margin-bottom: 0">
+      <h2>Compute device</h2>
+      {% if 'cuda' in dev.available or 'mps' in dev.available %}
+        <span class="badge gpu">GPU available</span>
+      {% endif %}
+    </div>
+    <div class="device-row">
+      <span class="device-current">Active: <strong data-device-current>{{ dev.resolved or dev.setting }}</strong></span>
+      <div class="pills" data-device-pills>
+        {% if 'auto' in dev.available %}{% set opts = dev.available %}{% else %}{% set opts = ['auto'] + dev.available|list %}{% endif %}
+        {% for d in opts %}
+          <button type="button" class="pill{{ ' active' if d == (dev.config_pin or dev.setting) else '' }}"
+                  data-device="{{ d }}" {% if dev.config_pin %}disabled{% endif %}>{{ d }}</button>
+        {% endfor %}
+      </div>
+      {% if dev.config_pin %}
+        <span class="pin-note" title="Device is pinned; remove the pin in config.toml to change it">
+          &#128274; {{ dev.config_pin }} — pinned in config.toml
+        </span>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head fade" style="animation-delay: 100ms; display:flex; align-items:center; justify-content:space-between">
+      <h2>Projects</h2>
+      <button type="button" class="btn btn-primary" data-open-register>+ Add project</button>
+    </div>
+    {% if overview.projects %}
+      <div class="cards">
+        {% for p in overview.projects %}
+          {% set st = status_of(p) | trim %}
+          <article class="card project-card fade" data-project data-id="{{ p.id }}"
+                   data-href="/projects/{{ p.id }}/view" style="animation-delay: {{ 120 + loop.index0 * 60 }}ms">
+            <div class="card-top">
+              <div>
+                <h3 class="card-title"><a href="/projects/{{ p.id }}/view">{{ p.name }}</a></h3>
+                <div class="path mono">{{ p.root_path }}</div>
+              </div>
+              <span class="chip chip-{{ st }}" data-f="chip">{{ 'never run' if st == 'idle' else st }}</span>
+            </div>
+
+            <div class="card-stats">
+              <span><strong data-f="files">{{ p.file_count }}</strong> files</span>
+              <span><strong data-f="chunks">{{ p.chunk_count }}</strong> chunks</span>
+              <span class="fresh muted" data-f="fresh" data-age="{{ p.index_age_s if p.index_age_s is not none else '' }}"
+                    data-prefix="indexed " data-never="never indexed">{{ ago(p.index_age_s) }}</span>
+              <span class="badge pending" data-f="pendingbadge" {% if not p.pending_count %}hidden{% endif %}>
+                <span data-f="pending">{{ p.pending_count }}</span>&nbsp;pending
+              </span>
+            </div>
+
+            {% set pr = p.progress %}
+            <div class="progress" data-f="progress" {% if not pr %}hidden{% endif %}>
+              <div class="progress-track">
+                <div class="progress-fill{{ ' indet' if pr and pr.percent is none else '' }}" data-f="bar"
+                     style="width: {{ pr.percent | round(1) if pr and pr.percent is not none else (100 if pr else 0) }}%"></div>
+              </div>
+              <div class="progress-meta">
+                <span data-f="pct">{% if pr and pr.percent is not none %}{{ pr.percent | round | int }}%{% endif %}</span>
+                <span data-f="pfiles">{% if pr %}{{ pr.files_done }} / {{ pr.files_to_index }} files{% endif %}</span>
+                <span data-f="pchunks">{% if pr %}{{ pr.chunks_written }} chunks{% endif %}</span>
+                <span data-f="eta"></span>
+              </div>
+            </div>
+
+            <div class="card-foot">
+              <label class="switch" title="Watch this project for file changes">
+                <input type="checkbox" data-toggle="watch" {{ 'checked' if p.watch_enabled else '' }}>
+                <span class="track"></span><span class="switch-label">Watch</span>
+              </label>
+              <span class="live-dot" data-f="watching" {% if not p.watching %}hidden{% endif %}
+                    title="Watcher is running"></span>
+              <label class="switch{{ '' if p.watch_enabled else ' is-disabled' }}" data-f="autolabel"
+                     title="{{ 'Reindex automatically when watched files change' if p.watch_enabled else 'Enable Watch to use auto-reindex' }}">
+                <input type="checkbox" data-toggle="auto" {{ 'checked' if p.auto_reindex else '' }}
+                       {{ '' if p.watch_enabled else 'disabled' }}>
+                <span class="track"></span><span class="switch-label">Auto-reindex</span>
+              </label>
+              <div class="actions">
+                <button type="button" class="btn btn-amber" data-act="pending"
+                        {% if not p.pending_count %}hidden{% endif %}>Index pending</button>
+                <button type="button" class="btn" data-act="reindex">Reindex</button>
+                <button type="button" class="btn btn-danger" data-act="delete"
+                        title="Remove this project's index (source files untouched)">Delete</button>
+              </div>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="panel fade"><div class="empty-note">
+        No projects indexed yet — <button type="button" class="btn btn-primary" data-open-register>+ Add your first project</button>
+      </div></div>
+    {% endif %}
+  </section>
+
+  {# ---- Delete-confirm modal (ADR-43) -------------------------------------- #}
+  <div class="modal-backdrop" data-confirm-modal hidden>
+    <div class="modal modal-narrow" role="alertdialog" aria-modal="true" aria-labelledby="del-title">
+      <div class="modal-head">
+        <h2 id="del-title">Delete project?</h2>
+        <button type="button" class="modal-x" data-confirm-cancel aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="confirm-text">
+          Remove <strong data-confirm-name></strong> from the index — all its
+          indexed chunks, run history, and pending changes are deleted.
+          <span class="muted">Your source files are not touched. You can re-add
+          and re-index the folder at any time.</span>
+        </p>
+        <div class="modal-foot">
+          <div class="modal-actions">
+            <button type="button" class="btn" data-confirm-cancel>Cancel</button>
+            <button type="button" class="btn btn-danger" data-confirm-yes>Delete project</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ---- Register modal (ADR-42) ------------------------------------------- #}
+  <div class="modal-backdrop" data-register-modal hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="reg-title">
+      <div class="modal-head">
+        <h2 id="reg-title">Add a project</h2>
+        <button type="button" class="modal-x" data-reg-close aria-label="Close">&times;</button>
+      </div>
+
+      <form class="modal-body" data-reg-form>
+        <label class="field">
+          <span class="field-label">Project folder</span>
+          <div class="path-row">
+            <input type="text" name="root_path" placeholder="/absolute/path/to/repo"
+                   autocomplete="off" spellcheck="false" data-reg-path required>
+            <button type="button" class="btn" data-reg-browse title="Browse folders">Browse…</button>
+          </div>
+          <span class="field-hint" data-reg-path-hint></span>
+        </label>
+
+        {# folder picker (hidden until Browse) #}
+        <div class="picker" data-reg-picker hidden>
+          <div class="picker-head">
+            <button type="button" class="btn btn-sm" data-picker-up>↑ Up</button>
+            <span class="picker-cwd mono" data-picker-cwd></span>
+          </div>
+          <ul class="picker-list" data-picker-list></ul>
+          <div class="picker-foot">
+            <button type="button" class="btn btn-sm btn-primary" data-picker-choose>Use this folder</button>
+            <button type="button" class="btn btn-sm" data-picker-cancel>Cancel</button>
+          </div>
+        </div>
+
+        <details class="reg-adv">
+          <summary>Index scope <span class="muted">(optional — defaults to everything)</span></summary>
+
+          <div class="field">
+            <span class="field-label">Languages to index</span>
+            {# Server-rendered: the language list is static per process — no
+               runtime fetch, chips are always present (§4.12). #}
+            <div class="lang-grid" data-reg-langs>
+              {% for l in languages %}
+                <label class="lang-chip">
+                  <input type="checkbox" value="{{ l.language }}" data-lang="1">
+                  <span title="{{ l.extensions | join(', ') }}{{ ' · structural search' if l.structural else '' }}">{{ l.language }}{{ ' ✳' if l.structural else '' }}</span>
+                </label>
+              {% endfor %}
+            </div>
+            <span class="field-hint">Leave all unchecked to index every language. Chips marked ✳ also support structural (AST) search.</span>
+          </div>
+
+          <div class="reg-knobs">
+            <label class="field field-sm">
+              <span class="field-label">Max file size (MB)</span>
+              <input type="number" name="max_mb" min="0" step="0.1" placeholder="1" data-reg-maxmb>
+            </label>
+            <label class="switch">
+              <input type="checkbox" data-reg-symlinks>
+              <span class="track"></span><span class="switch-label">Follow symlinks</span>
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field-label">Extra ignore globs</span>
+            <input type="text" name="extra_ignores" placeholder="build/, *.gen.go, vendor/" data-reg-ignores>
+            <span class="field-hint">Comma-separated, gitignore syntax. Applied on top of .gitignore + built-in skips.</span>
+          </label>
+        </details>
+
+        <div class="reg-preview" data-reg-preview hidden>
+          <div class="reg-preview-head">
+            <strong data-reg-preview-total>—</strong> files will be indexed
+            <button type="button" class="btn btn-sm" data-reg-refresh>Refresh preview</button>
+          </div>
+          <div class="reg-preview-bars" data-reg-preview-bars></div>
+        </div>
+
+        <div class="reg-flags">
+          <label class="switch" title="Watch this project for changes after adding">
+            <input type="checkbox" data-reg-watch>
+            <span class="track"></span><span class="switch-label">Watch after adding</span>
+          </label>
+          <label class="switch is-disabled" data-reg-autolabel title="Enable Watch to use auto-reindex">
+            <input type="checkbox" data-reg-auto disabled>
+            <span class="track"></span><span class="switch-label">Auto-reindex</span>
+          </label>
+        </div>
+
+        <div class="modal-foot">
+          <span class="field-hint" data-reg-error></span>
+          <div class="modal-actions">
+            <button type="button" class="btn" data-reg-preview-btn>Preview</button>
+            <button type="submit" class="btn" data-reg-submit="add">Add only</button>
+            <button type="submit" class="btn btn-primary" data-reg-submit="index">Add + index now</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

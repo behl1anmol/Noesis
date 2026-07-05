@@ -6,6 +6,12 @@ tool must behave identically (two thin adapters over one core), so this
 module owns the single launch path: open a run row, hand back ids
 immediately, and index in a background task tracked in ``ctx.jobs`` so the
 app lifespan can cancel orphans on shutdown.
+
+M8 additions (ADR-40): watcher-scoped launches (``paths`` narrows the
+candidate set, ``triggered_by`` records provenance), in-memory live
+progress per run (``ctx.progress``, read by the dashboard — deliberately
+not persisted: live progress of a dead process is meaningless), and
+pending-change clearing once a run has examined the files.
 """
 
 from __future__ import annotations
@@ -13,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Protocol
+import time
+from datetime import datetime, timezone
+from typing import Any, Protocol, Sequence
 
 from noesis.core import state
 from noesis.core.indexer import execute_run
@@ -29,10 +37,17 @@ class _ContextLike(Protocol):
     store: Any
     embedder: Any
     jobs: dict[str, asyncio.Task]
+    progress: dict[str, dict[str, Any]]
     git_fast_path: bool
 
 
-def launch_index_run(ctx: _ContextLike, root_path: str) -> dict[str, str]:
+def launch_index_run(
+    ctx: _ContextLike,
+    root_path: str,
+    *,
+    paths: Sequence[str] | None = None,
+    triggered_by: str = "manual",
+) -> dict[str, str]:
     """Register (or re-open) the project and start indexing in the
     background. Returns the 202-style acceptance body shared verbatim by
     REST and MCP.
@@ -42,7 +57,9 @@ def launch_index_run(ctx: _ContextLike, root_path: str) -> dict[str, str]:
     polling a background failure), and on the mixed-model guard
     (state.register_project). If a run is already ``running`` for this
     project, returns that run's id rather than launching a second
-    concurrent index racing on the same collection and state rows."""
+    concurrent index racing on the same collection and state rows —
+    pending rows for a skipped scoped launch survive and re-trigger on
+    the watcher's next quiet period."""
     if not os.path.isdir(root_path):
         raise ValueError(f"root_path is not an existing directory: {root_path!r}")
     project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
@@ -53,11 +70,26 @@ def launch_index_run(ctx: _ContextLike, root_path: str) -> dict[str, str]:
             "run_id": latest["id"],
             "status": "accepted",
         }
-    run_id = state.start_run(ctx.conn, project_id)
+    run_id = state.start_run(ctx.conn, project_id, triggered_by=triggered_by)
+    # Cut point for the pending clear: rows re-dirtied after this survive.
+    started_iso = datetime.now(timezone.utc).isoformat()
+    ctx.progress[run_id] = {
+        "files_done": None,
+        "files_to_index": None,
+        "chunks_written": 0,
+        "monotonic_start": time.monotonic(),
+    }
+
+    def _on_progress(done: int, total: int, chunks: int) -> None:
+        entry = ctx.progress.get(run_id)
+        if entry is not None:
+            entry["files_done"] = done
+            entry["files_to_index"] = total
+            entry["chunks_written"] = chunks
 
     async def _run() -> None:
         try:
-            await execute_run(
+            result = await execute_run(
                 ctx.conn,
                 ctx.store,
                 ctx.embedder,
@@ -65,15 +97,69 @@ def launch_index_run(ctx: _ContextLike, root_path: str) -> dict[str, str]:
                 project_id,
                 run_id,
                 git_fast_path=ctx.git_fast_path,
+                paths=paths,
+                on_progress=_on_progress,
             )
         except Exception:
             # execute_run already marked the run failed; log for the operator.
             logger.exception("index run %s failed", run_id)
+        else:
+            # The run examined these files — clear their pending rows, but
+            # only up to the launch timestamp so a file re-dirtied mid-run
+            # stays pending (resolved toward re-examination, ADR-40).
+            state.clear_pending_changes(
+                ctx.conn, project_id, paths=paths, before=started_iso
+            )
+            # Files that failed per-file containment (ADR-41) go straight
+            # back to pending: their state rows are stale, and without a
+            # pending row the watcher would never auto-retry them — only a
+            # manual full run would (PR #10 review). No hot loop: a retry
+            # fires only on the next event/quiet cycle or manual action.
+            if result.failed_paths:
+                state.upsert_pending_changes(
+                    ctx.conn,
+                    project_id,
+                    [(p, "modified") for p in result.failed_paths],
+                )
 
     task = asyncio.create_task(_run())
     ctx.jobs[run_id] = task
-    task.add_done_callback(lambda _t: ctx.jobs.pop(run_id, None))
+
+    def _cleanup(_t: asyncio.Task) -> None:
+        ctx.jobs.pop(run_id, None)
+        ctx.progress.pop(run_id, None)
+
+    task.add_done_callback(_cleanup)
     return {"project_id": project_id, "run_id": run_id, "status": "accepted"}
+
+
+def run_progress(ctx: _ContextLike, run_id: str) -> dict[str, Any] | None:
+    """Live progress for a running run: percent, counts, elapsed, ETA.
+    None when the run is not tracked (finished, or another process's).
+    ETA is naive linear extrapolation over files processed — honest enough
+    for a progress bar, no smoothing pretence."""
+    entry = ctx.progress.get(run_id)
+    if entry is None:
+        return None
+    done = entry["files_done"]
+    total = entry["files_to_index"]
+    elapsed = time.monotonic() - entry["monotonic_start"]
+    percent: float | None = None
+    eta: float | None = None
+    if done is not None and total is not None:
+        percent = 100.0 if total == 0 else round(done / total * 100.0, 1)
+        if done > 0 and total > done:
+            eta = round(elapsed / done * (total - done), 1)
+        elif total == done:
+            eta = 0.0
+    return {
+        "files_done": done,
+        "files_to_index": total,
+        "chunks_written": entry["chunks_written"],
+        "percent": percent,
+        "elapsed_s": round(elapsed, 1),
+        "eta_s": eta,
+    }
 
 
 def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:

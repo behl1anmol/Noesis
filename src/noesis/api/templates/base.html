@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Noesis{% endblock %}</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_ver }}">
+</head>
+<body data-page="{% block page %}{% endblock %}"{% block bodyattrs %}{% endblock %}>
+  <header class="topbar">
+    <a class="brand" href="/">
+      <img src="/static/noesis-logo.png" alt="Noesis logo">
+      <span class="brand-name">Noesis</span>
+    </a>
+    <nav aria-label="Main">
+      <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">Overview</a>
+      <a href="/usage" class="{{ 'active' if request.url.path == '/usage' else '' }}">Usage</a>
+    </nav>
+    <span class="local-note" title="Bound to 127.0.0.1 — nothing leaves this machine">127.0.0.1 &middot; local only</span>
+  </header>
+
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="toasts" aria-live="polite"></div>
+  <script src="/static/app.js?v={{ asset_ver }}" defer></script>
+</body>
+</html>

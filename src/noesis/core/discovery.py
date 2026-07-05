@@ -16,6 +16,8 @@ from pathlib import Path, PurePosixPath
 
 from pathspec import GitIgnoreSpec
 
+from .languages import detect_language
+
 EXCLUDED_DIRS: frozenset[str] = frozenset(
     {
         ".git",
@@ -94,6 +96,14 @@ _BINARY_SNIFF_BYTES = 8192
 class DiscoveryConfig:
     max_file_bytes: int = 1_048_576
     follow_symlinks: bool = False
+    # ADR-42 per-project scope. ``include_languages`` None = index every
+    # file (today's behavior); a set keeps only files whose detected
+    # language is in it — files with no detected language are dropped when
+    # a filter is active, since the user asked for specific languages.
+    # ``extra_ignore_patterns`` are additional gitignore-style globs applied
+    # like the secret skip-list, anchored at the project root.
+    include_languages: frozenset[str] | None = None
+    extra_ignore_patterns: tuple[str, ...] = ()
 
 
 def is_secret_path(rel_posix: str) -> bool:
@@ -145,6 +155,11 @@ def discover_files(root: str | Path, config: DiscoveryConfig | None = None) -> l
     cfg = config or DiscoveryConfig()
     root_path = Path(root).resolve()
     ignores = _IgnoreStack()
+    extra_spec = (
+        GitIgnoreSpec.from_lines(cfg.extra_ignore_patterns)
+        if cfg.extra_ignore_patterns
+        else None
+    )
     results: list[str] = []
 
     for dirpath, dirnames, filenames in os.walk(
@@ -181,6 +196,13 @@ def discover_files(root: str | Path, config: DiscoveryConfig | None = None) -> l
                 if is_secret_path(rel):
                     continue
                 if _GENERATED_SPEC.match_file(rel):
+                    continue
+                if extra_spec is not None and extra_spec.match_file(rel):
+                    continue
+                if (
+                    cfg.include_languages is not None
+                    and detect_language(rel) not in cfg.include_languages
+                ):
                     continue
                 if full.stat().st_size > cfg.max_file_bytes:
                     continue

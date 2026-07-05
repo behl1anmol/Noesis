@@ -624,8 +624,12 @@ async def test_anchor_not_updated_on_failed_run(tmp_path: Path) -> None:
     git(repo, "commit", "-q", "-a", "-m", "will fail to index")
     assert git_head(repo) != anchor
 
-    with pytest.raises(RuntimeError, match="boom"):
-        await index_project(conn, store, ExplodingEmbedder(dim=8), str(repo))
+    # Since ADR-41 (M8), a per-file embed failure is contained rather than
+    # propagated; with every changed file failing, the run is marked
+    # 'failed' without raising. The property under test is unchanged:
+    # a failed run must not move the anchor.
+    result2 = await index_project(conn, store, ExplodingEmbedder(dim=8), str(repo))
+    assert result2.files_failed == 1
 
     run_row = state.get_latest_run(conn, result1.project_id)
     assert run_row["status"] == "failed"
