@@ -249,12 +249,21 @@
   /* ---- polling ------------------------------------------------------------ */
 
   let pollTimer = null;
+  let pollInFlight = false;
   function schedule(fast) {
     clearTimeout(pollTimer);
     pollTimer = setTimeout(poll, fast ? 2000 : 8000);
   }
 
   async function poll() {
+    // Single chain only: never let two polls overlap (a stray schedule()
+    // during an in-flight fetch would otherwise fork the chain and the
+    // request rate would compound into a flood).
+    if (pollInFlight) return;
+    // A hidden/background tab does not need live data — skip the fetch and
+    // re-check later. visibilitychange resumes immediately when shown.
+    if (document.hidden) { schedule(false); return; }
+    pollInFlight = true;
     try {
       if (PAGE === "index") {
         const o = await (await fetch("/api/state")).json();
@@ -265,7 +274,7 @@
         schedule(o.totals.running > 0 || (o.projects || []).some((p) => p.progress));
       } else if (PAGE === "project") {
         const res = await fetch("/api/projects/" + encodeURIComponent(PID) + "/state");
-        if (!res.ok) return schedule(false);
+        if (!res.ok) { schedule(false); return; }
         const p = await res.json();
         applyProject(p);
         renderProjectTables(p);
@@ -274,8 +283,15 @@
       }
     } catch (e) {
       schedule(false); // server briefly away — keep trying slowly
+    } finally {
+      pollInFlight = false;
     }
   }
+
+  // Resume promptly when the tab is brought to the foreground.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && (PAGE === "index" || PAGE === "project")) schedule(true);
+  });
 
   /* ---- actions ------------------------------------------------------------ */
 
@@ -609,8 +625,14 @@
     }
 
     async function loadLanguages() {
+      // Never let this sit on "loading languages…" forever: abort after 8s
+      // (e.g. if the browser connection pool is momentarily saturated) and
+      // offer a retry instead of a permanent spinner.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
       try {
-        const data = await (await fetch("/api/languages")).json();
+        const data = await (await fetch("/api/languages", { signal: ctrl.signal })).json();
+        clearTimeout(timer);
         langsBox.textContent = "";
         (data.languages || []).forEach((l) => {
           const lab = document.createElement("label");
@@ -624,7 +646,15 @@
           langsBox.appendChild(lab);
         });
         langsLoaded = true;
-      } catch (e) { langsBox.textContent = "could not load languages"; }
+      } catch (e) {
+        clearTimeout(timer);
+        langsBox.textContent = "";
+        const retry = document.createElement("button");
+        retry.type = "button"; retry.className = "btn btn-sm";
+        retry.textContent = "Could not load languages — retry";
+        retry.addEventListener("click", loadLanguages);
+        langsBox.appendChild(retry);
+      }
     }
 
     function selectedLangs() {
