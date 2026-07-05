@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Noesis{% endblock %}</title>
   <link rel="icon" type="image/png" href="/static/favicon.png">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_ver }}">
 </head>
 <body data-page="{% block page %}{% endblock %}"{% block bodyattrs %}{% endblock %}>
   <header class="topbar">
@@ -25,6 +25,6 @@
   </main>
 
   <div id="toasts" aria-live="polite"></div>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v={{ asset_ver }}" defer></script>
 </body>
 </html>

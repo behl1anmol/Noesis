@@ -25,6 +25,24 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+
+def _asset_version() -> str:
+    """Cache-busting token from the static assets' latest mtime. Appended to
+    the app.js/style.css URLs so a browser can never serve a stale script
+    after a redeploy — the query string changes, forcing a fresh fetch."""
+    latest = 0.0
+    for name in ("app.js", "style.css"):
+        try:
+            latest = max(latest, (STATIC_DIR / name).stat().st_mtime)
+        except OSError:
+            continue
+    return str(int(latest))
+
+
+# Global so every template (base.html and all it extends) sees it without
+# each handler threading it through the response context.
+templates.env.globals["asset_ver"] = _asset_version()
+
 dashboard_router = APIRouter()
 
 
