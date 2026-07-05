@@ -359,7 +359,8 @@ structural_patterns:
     pattern: "GitIgnoreSpec.from_lines($X)"
     language: python
     expected:
-      src/noesis/core/discovery.py: 3
+      # ADR-42 added the extra-ignore-globs spec build in discovery.
+      src/noesis/core/discovery.py: 4
       # M8: the watcher reloads the root .gitignore spec on change.
       src/noesis/core/watcher.py: 1
 
@@ -369,8 +370,8 @@ structural_patterns:
     expected:
       # 7 since M6: status/reindex endpoints added 404 + 404/409 raises.
       src/noesis/api/routes.py: 7
-      # M8 dashboard adapter: 404s, reindex-pending 409/404, device 400.
-      src/noesis/api/dashboard.py: 6
+      # M8 dashboard adapter + ADR-42 register/browse/preview raises.
+      src/noesis/api/dashboard.py: 9
 
   - id: sp-07
     pattern: "time.monotonic()"
@@ -386,6 +387,8 @@ structural_patterns:
     language: python
     expected:
       src/noesis/core/structural.py: 1
+      # ADR-42: preview runs discovery in an executor to keep the loop free.
+      src/noesis/core/dashboard.py: 1
 
   - id: sp-09
     pattern: "uuid.uuid4()"

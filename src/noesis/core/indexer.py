@@ -9,6 +9,7 @@ priority so live queries preempt indexing (§3.8).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Sequence
@@ -38,6 +39,26 @@ class IndexResult:
 # Called after each processed file — consumers (jobs.py) keep it in memory
 # for the dashboard; nothing here touches the DB per-file beyond upsert_file.
 ProgressFn = Callable[[int, int, int], None]
+
+
+def discovery_config_for_project(
+    conn: sqlite3.Connection, project_id: str
+) -> DiscoveryConfig | None:
+    """Build a project's persisted index scope (ADR-42) into a
+    DiscoveryConfig. Returns None for an unknown project (caller falls
+    back to the default walk). NULL columns map to DiscoveryConfig
+    defaults, so an unconfigured project walks exactly as before."""
+    row = state.get_project(conn, project_id)
+    if row is None:
+        return None
+    kwargs: dict = {"follow_symlinks": bool(row["follow_symlinks"])}
+    if row["max_file_bytes"] is not None:
+        kwargs["max_file_bytes"] = row["max_file_bytes"]
+    if row["index_languages"]:
+        kwargs["include_languages"] = frozenset(json.loads(row["index_languages"]))
+    if row["extra_ignores"]:
+        kwargs["extra_ignore_patterns"] = tuple(json.loads(row["extra_ignores"]))
+    return DiscoveryConfig(**kwargs)
 
 
 def prepare_run(
@@ -135,6 +156,10 @@ async def execute_run(
 
         fast_path_active = git_fast_path and candidates is not None
 
+        # No explicit config → honor the project's persisted index scope
+        # (ADR-42), so manual/watcher/reindex runs all apply the same filter.
+        if discovery_config is None:
+            discovery_config = discovery_config_for_project(conn, project_id)
         discovered = discover_files(root_path, discovery_config)
         stored = state.get_file_states(conn, project_id)
         diff = hashdiff.partition(root_path, discovered, stored, candidates=candidates)

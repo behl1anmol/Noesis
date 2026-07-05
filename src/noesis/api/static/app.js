@@ -573,10 +573,195 @@
     }
   }
 
+  /* ---- register modal (ADR-42) ------------------------------------------- */
+
+  function initRegister() {
+    const backdrop = $("[data-register-modal]");
+    if (!backdrop) return;
+    const form = $("[data-reg-form]", backdrop);
+    const pathEl = $("[data-reg-path]", backdrop);
+    const pathHint = $("[data-reg-path-hint]", backdrop);
+    const errEl = $("[data-reg-error]", backdrop);
+    const langsBox = $("[data-reg-langs]", backdrop);
+    const previewBox = $("[data-reg-preview]", backdrop);
+    const previewTotal = $("[data-reg-preview-total]", backdrop);
+    const previewBars = $("[data-reg-preview-bars]", backdrop);
+    const watchEl = $("[data-reg-watch]", backdrop);
+    const autoEl = $("[data-reg-auto]", backdrop);
+    const autoLabel = $("[data-reg-autolabel]", backdrop);
+    const picker = $("[data-reg-picker]", backdrop);
+    let langsLoaded = false;
+    let submitting = false;
+
+    function setErr(msg) { if (errEl) { errEl.textContent = msg || ""; errEl.classList.toggle("is-error", !!msg); } }
+
+    function open() {
+      backdrop.hidden = false;
+      document.body.classList.add("modal-open");
+      setErr("");
+      if (!langsLoaded) loadLanguages();
+      setTimeout(() => pathEl && pathEl.focus(), 30);
+    }
+    function close() {
+      backdrop.hidden = true;
+      document.body.classList.remove("modal-open");
+      if (picker) picker.hidden = true;
+    }
+
+    async function loadLanguages() {
+      try {
+        const data = await (await fetch("/api/languages")).json();
+        langsBox.textContent = "";
+        (data.languages || []).forEach((l) => {
+          const lab = document.createElement("label");
+          lab.className = "lang-chip";
+          const cb = document.createElement("input");
+          cb.type = "checkbox"; cb.value = l.language; cb.dataset.lang = "1";
+          const span = document.createElement("span");
+          span.textContent = l.language + (l.structural ? " ✳" : "");
+          span.title = l.extensions.join(", ") + (l.structural ? " · structural search" : "");
+          lab.appendChild(cb); lab.appendChild(span);
+          langsBox.appendChild(lab);
+        });
+        langsLoaded = true;
+      } catch (e) { langsBox.textContent = "could not load languages"; }
+    }
+
+    function selectedLangs() {
+      return $$('[data-lang="1"]', langsBox).filter((c) => c.checked).map((c) => c.value);
+    }
+    function scope() {
+      const langs = selectedLangs();
+      const mb = parseFloat($("[data-reg-maxmb]", backdrop).value);
+      const ignores = ($("[data-reg-ignores]", backdrop).value || "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const body = {
+        root_path: (pathEl.value || "").trim(),
+        follow_symlinks: $("[data-reg-symlinks]", backdrop).checked,
+      };
+      if (langs.length) body.index_languages = langs;
+      if (!isNaN(mb) && mb > 0) body.max_file_bytes = Math.round(mb * 1048576);
+      if (ignores.length) body.extra_ignores = ignores;
+      return body;
+    }
+
+    async function runPreview() {
+      const body = scope();
+      if (!body.root_path) { setErr("Enter a project folder first."); return; }
+      setErr("");
+      previewTotal.textContent = "…";
+      previewBox.hidden = false;
+      try {
+        const p = await post("/api/register/preview", body);
+        previewTotal.textContent = p.total_files.toLocaleString();
+        const max = Math.max(1, ...p.by_language.map((b) => b.files));
+        previewBars.textContent = "";
+        if (!p.by_language.length) {
+          const d = document.createElement("div"); d.className = "muted";
+          d.textContent = "No files match — nothing would be indexed."; previewBars.appendChild(d);
+        }
+        p.by_language.forEach((b) => {
+          const row = document.createElement("div"); row.className = "pv-row";
+          const name = document.createElement("span"); name.className = "pv-name"; name.textContent = b.language;
+          const track = document.createElement("span"); track.className = "pv-track";
+          const fill = document.createElement("span"); fill.className = "pv-fill";
+          fill.style.width = Math.round((b.files / max) * 100) + "%";
+          track.appendChild(fill);
+          const n = document.createElement("span"); n.className = "pv-n"; n.textContent = b.files;
+          row.appendChild(name); row.appendChild(track); row.appendChild(n);
+          previewBars.appendChild(row);
+        });
+      } catch (e) { previewBox.hidden = true; setErr(e.message); }
+    }
+
+    async function submit(indexNow) {
+      if (submitting) return;
+      const body = scope();
+      if (!body.root_path) { setErr("Enter a project folder first."); return; }
+      body.watch = watchEl.checked;
+      body.auto_reindex = watchEl.checked && autoEl.checked;
+      body.index_now = indexNow;
+      submitting = true;
+      form.classList.add("busy");
+      setErr("");
+      try {
+        await post("/api/register", body);
+        toast(indexNow ? "Project added — indexing started" : "Project added", "ok");
+        close();
+        form.reset();
+        previewBox.hidden = true;
+        schedule(indexNow);
+      } catch (e) { setErr(e.message); }
+      submitting = false;
+      form.classList.remove("busy");
+    }
+
+    /* ---- folder picker ---- */
+    async function browseTo(path) {
+      try {
+        const url = "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : "");
+        const data = await (await fetch(url)).json();
+        if (data.detail) { setErr(String(data.detail)); return; }
+        picker.hidden = false;
+        picker.dataset.cwd = data.path;
+        picker.dataset.parent = data.parent || "";
+        $("[data-picker-cwd]", picker).textContent = data.path;
+        $("[data-picker-up]", picker).disabled = !data.parent;
+        const list = $("[data-picker-list]", picker);
+        list.textContent = "";
+        if (!data.entries.length) {
+          const li = document.createElement("li"); li.className = "muted"; li.textContent = "(no sub-folders)";
+          list.appendChild(li);
+        }
+        data.entries.forEach((e) => {
+          const li = document.createElement("li");
+          const b = document.createElement("button");
+          b.type = "button"; b.className = "picker-item"; b.textContent = "📁 " + e.name;
+          b.dataset.path = e.path;
+          li.appendChild(b); list.appendChild(li);
+        });
+      } catch (e) { setErr("browse failed: " + e.message); }
+    }
+
+    // wiring
+    $$("[data-open-register]").forEach((b) => b.addEventListener("click", open));
+    $("[data-reg-close]", backdrop).addEventListener("click", close);
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !backdrop.hidden) close(); });
+
+    pathEl.addEventListener("input", () => { setErr(""); pathHint.textContent = ""; });
+    watchEl.addEventListener("change", () => {
+      autoEl.disabled = !watchEl.checked;
+      autoLabel.classList.toggle("is-disabled", !watchEl.checked);
+      if (!watchEl.checked) autoEl.checked = false;
+    });
+
+    $("[data-reg-preview-btn]", backdrop).addEventListener("click", runPreview);
+    $("[data-reg-refresh]", backdrop).addEventListener("click", runPreview);
+    $("[data-reg-browse]", backdrop).addEventListener("click", () => browseTo(pathEl.value.trim() || null));
+    $("[data-picker-up]", picker).addEventListener("click", () => browseTo(picker.dataset.parent || null));
+    $("[data-picker-cancel]", picker).addEventListener("click", () => { picker.hidden = true; });
+    $("[data-picker-choose]", picker).addEventListener("click", () => {
+      pathEl.value = picker.dataset.cwd || ""; picker.hidden = true; setErr("");
+    });
+    $("[data-picker-list]", picker).addEventListener("click", (e) => {
+      const b = e.target.closest(".picker-item");
+      if (b) browseTo(b.dataset.path);
+    });
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const btn = e.submitter;
+      submit(btn && btn.dataset.regSubmit === "index");
+    });
+  }
+
   if (PAGE === "index" || PAGE === "project") {
     const busyNow = $$('[data-f="progress"]').some((el) => !el.hidden);
     schedule(busyNow);
     // keep relative times fresh between polls
     setInterval(renderTimes, 30000);
   }
+
+  if (PAGE === "index") initRegister();
 })();

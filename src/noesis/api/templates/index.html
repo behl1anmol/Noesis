@@ -58,7 +58,10 @@
   </section>
 
   <section class="section">
-    <div class="section-head fade" style="animation-delay: 100ms"><h2>Projects</h2></div>
+    <div class="section-head fade" style="animation-delay: 100ms; display:flex; align-items:center; justify-content:space-between">
+      <h2>Projects</h2>
+      <button type="button" class="btn btn-primary" data-open-register>+ Add project</button>
+    </div>
     {% if overview.projects %}
       <div class="cards">
         {% for p in overview.projects %}
@@ -120,7 +123,101 @@
         {% endfor %}
       </div>
     {% else %}
-      <div class="panel fade"><div class="empty-note">No projects indexed yet — register one via the API or MCP tools.</div></div>
+      <div class="panel fade"><div class="empty-note">
+        No projects indexed yet — <button type="button" class="btn btn-primary" data-open-register>+ Add your first project</button>
+      </div></div>
     {% endif %}
   </section>
+
+  {# ---- Register modal (ADR-42) ------------------------------------------- #}
+  <div class="modal-backdrop" data-register-modal hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="reg-title">
+      <div class="modal-head">
+        <h2 id="reg-title">Add a project</h2>
+        <button type="button" class="modal-x" data-reg-close aria-label="Close">&times;</button>
+      </div>
+
+      <form class="modal-body" data-reg-form>
+        <label class="field">
+          <span class="field-label">Project folder</span>
+          <div class="path-row">
+            <input type="text" name="root_path" placeholder="/absolute/path/to/repo"
+                   autocomplete="off" spellcheck="false" data-reg-path required>
+            <button type="button" class="btn" data-reg-browse title="Browse folders">Browse…</button>
+          </div>
+          <span class="field-hint" data-reg-path-hint></span>
+        </label>
+
+        {# folder picker (hidden until Browse) #}
+        <div class="picker" data-reg-picker hidden>
+          <div class="picker-head">
+            <button type="button" class="btn btn-sm" data-picker-up>↑ Up</button>
+            <span class="picker-cwd mono" data-picker-cwd></span>
+          </div>
+          <ul class="picker-list" data-picker-list></ul>
+          <div class="picker-foot">
+            <button type="button" class="btn btn-sm btn-primary" data-picker-choose>Use this folder</button>
+            <button type="button" class="btn btn-sm" data-picker-cancel>Cancel</button>
+          </div>
+        </div>
+
+        <details class="reg-adv">
+          <summary>Index scope <span class="muted">(optional — defaults to everything)</span></summary>
+
+          <div class="field">
+            <span class="field-label">Languages to index</span>
+            <div class="lang-grid" data-reg-langs>
+              <span class="muted">loading languages…</span>
+            </div>
+            <span class="field-hint">Leave all unchecked to index every language. Chips marked ✳ also support structural (AST) search.</span>
+          </div>
+
+          <div class="reg-knobs">
+            <label class="field field-sm">
+              <span class="field-label">Max file size (MB)</span>
+              <input type="number" name="max_mb" min="0" step="0.1" placeholder="1" data-reg-maxmb>
+            </label>
+            <label class="switch">
+              <input type="checkbox" data-reg-symlinks>
+              <span class="track"></span><span class="switch-label">Follow symlinks</span>
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field-label">Extra ignore globs</span>
+            <input type="text" name="extra_ignores" placeholder="build/, *.gen.go, vendor/" data-reg-ignores>
+            <span class="field-hint">Comma-separated, gitignore syntax. Applied on top of .gitignore + built-in skips.</span>
+          </label>
+        </details>
+
+        <div class="reg-preview" data-reg-preview hidden>
+          <div class="reg-preview-head">
+            <strong data-reg-preview-total>—</strong> files will be indexed
+            <button type="button" class="btn btn-sm" data-reg-refresh>Refresh preview</button>
+          </div>
+          <div class="reg-preview-bars" data-reg-preview-bars></div>
+        </div>
+
+        <div class="reg-flags">
+          <label class="switch" title="Watch this project for changes after adding">
+            <input type="checkbox" data-reg-watch>
+            <span class="track"></span><span class="switch-label">Watch after adding</span>
+          </label>
+          <label class="switch is-disabled" data-reg-autolabel title="Enable Watch to use auto-reindex">
+            <input type="checkbox" data-reg-auto disabled>
+            <span class="track"></span><span class="switch-label">Auto-reindex</span>
+          </label>
+        </div>
+
+        <div class="modal-foot">
+          <span class="field-hint" data-reg-error></span>
+          <div class="modal-actions">
+            <button type="button" class="btn" data-reg-preview-btn>Preview</button>
+            <button type="submit" class="btn" data-reg-submit="add">Add only</button>
+            <button type="submit" class="btn btn-primary" data-reg-submit="index">Add + index now</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
 {% endblock %}

@@ -8,14 +8,18 @@ may perform network I/O (CLAUDE.md rule 2).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any
 
 from . import jobs, state
 from .compute import available_devices
+from .discovery import DiscoveryConfig, discover_files
+from .languages import EXT_TO_LANGUAGE, LANGUAGE_MAP, detect_language
 
 logger = logging.getLogger(__name__)
 
@@ -365,3 +369,149 @@ def set_compute_device(ctx: Any, device: str) -> dict[str, Any]:
         if setter is not None:
             setter(target)
     return device_info(ctx)
+
+
+# -- project registration (ADR-42) -------------------------------------------
+
+
+def supported_languages() -> list[dict[str, Any]]:
+    """Canonical languages Noesis indexes, with their extensions and whether
+    structural (AST) search supports them. Static — derived from the language
+    maps."""
+    by_name: dict[str, list[str]] = {}
+    for ext, name in EXT_TO_LANGUAGE.items():
+        by_name.setdefault(name, []).append(ext)
+    return [
+        {
+            "language": name,
+            "extensions": sorted(exts),
+            "structural": name in LANGUAGE_MAP,
+        }
+        for name, exts in sorted(by_name.items())
+    ]
+
+
+def _discovery_config(
+    *,
+    index_languages: list[str] | None,
+    max_file_bytes: int | None,
+    follow_symlinks: bool,
+    extra_ignores: list[str] | None,
+) -> DiscoveryConfig:
+    kwargs: dict[str, Any] = {"follow_symlinks": follow_symlinks}
+    if max_file_bytes is not None:
+        kwargs["max_file_bytes"] = max_file_bytes
+    if index_languages:
+        kwargs["include_languages"] = frozenset(index_languages)
+    if extra_ignores:
+        kwargs["extra_ignore_patterns"] = tuple(extra_ignores)
+    return DiscoveryConfig(**kwargs)
+
+
+def browse_dir(path: str | None = None) -> dict[str, Any]:
+    """List sub-directories for the register folder-picker (ADR-42).
+
+    Directories only, never file contents — the picker chooses a project
+    root. Localhost-only surface (rule 2); errors on an unreadable or
+    non-directory path. Defaults to the user's home directory."""
+    base = Path(path).expanduser() if path else Path.home()
+    try:
+        base = base.resolve()
+    except OSError as exc:
+        raise ValueError(f"cannot resolve path: {exc}") from exc
+    if not base.is_dir():
+        raise ValueError(f"not a directory: {base}")
+    entries: list[dict[str, str]] = []
+    try:
+        for child in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+            try:
+                if child.is_dir():
+                    entries.append({"name": child.name, "path": str(child)})
+            except OSError:
+                continue  # unreadable child — skip, don't fail the listing
+    except OSError as exc:
+        raise ValueError(f"cannot list directory: {exc}") from exc
+    parent = str(base.parent) if base.parent != base else None
+    return {"path": str(base), "parent": parent, "entries": entries}
+
+
+async def preview_scan(
+    ctx: Any,
+    root_path: str,
+    *,
+    index_languages: list[str] | None = None,
+    max_file_bytes: int | None = None,
+    follow_symlinks: bool = False,
+    extra_ignores: list[str] | None = None,
+) -> dict[str, Any]:
+    """Pre-flight: run discovery only (no hashing, no embed, no state write)
+    and report what WOULD be indexed — file count + per-language breakdown
+    (ADR-42). The same walk a real index does, in a threadpool so it never
+    blocks the event loop."""
+    if not os.path.isdir(root_path):
+        raise ValueError(f"root_path is not an existing directory: {root_path!r}")
+    cfg = _discovery_config(
+        index_languages=index_languages,
+        max_file_bytes=max_file_bytes,
+        follow_symlinks=follow_symlinks,
+        extra_ignores=extra_ignores,
+    )
+    loop = asyncio.get_running_loop()
+    files = await loop.run_in_executor(None, discover_files, root_path, cfg)
+    by_lang: dict[str, int] = {}
+    for rel in files:
+        by_lang[detect_language(rel) or "other"] = (
+            by_lang.get(detect_language(rel) or "other", 0) + 1
+        )
+    breakdown = sorted(
+        ({"language": k, "files": v} for k, v in by_lang.items()),
+        key=lambda d: (-d["files"], d["language"]),
+    )
+    return {
+        "root_path": str(Path(root_path).resolve()),
+        "total_files": len(files),
+        "by_language": breakdown,
+    }
+
+
+def register_project(
+    ctx: Any,
+    root_path: str,
+    *,
+    watch: bool = False,
+    auto_reindex: bool = False,
+    index_languages: list[str] | None = None,
+    max_file_bytes: int | None = None,
+    follow_symlinks: bool = False,
+    extra_ignores: list[str] | None = None,
+    index_now: bool = False,
+) -> dict[str, Any]:
+    """Register a project from the dashboard (ADR-42), persist its index
+    scope + watcher flags, optionally start the first index. Raises
+    ValueError on a missing directory or the mixed-model guard.
+
+    ``index_now=False`` registers without indexing (the 'Add only' action);
+    ``True`` also launches the first run ('Add + index now')."""
+    if not os.path.isdir(root_path):
+        raise ValueError(f"root_path is not an existing directory: {root_path!r}")
+    project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
+    state.set_index_config(
+        ctx.conn,
+        project_id,
+        index_languages=index_languages,
+        max_file_bytes=max_file_bytes,
+        follow_symlinks=follow_symlinks,
+        extra_ignores=extra_ignores,
+    )
+    state.set_project_flags(
+        ctx.conn, project_id, watch_enabled=watch, auto_reindex=auto_reindex
+    )
+    watcher = getattr(ctx, "watcher", None)
+    if watcher is not None and watch:
+        watcher.set_watch(project_id, True)
+    run: dict[str, Any] | None = None
+    if index_now:
+        run = jobs.launch_index_run(ctx, root_path, triggered_by="manual")
+    project = state.get_project(ctx.conn, project_id)
+    assert project is not None
+    return {"project": _project_summary(ctx, project), "run": run}

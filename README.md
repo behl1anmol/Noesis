@@ -140,6 +140,12 @@ tooling, no CDN assets (it renders with the network cable pulled). Three pages:
 
 ### Overview (`/`)
 
+- **Add project** — a modal to register a repo without leaving the browser: pick the
+  folder (type the path or use the built-in folder browser), optionally scope the index
+  (choose languages, max file size, follow-symlinks, extra ignore globs), see a
+  **pre-flight preview** of how many files each language contributes before committing,
+  then **Add only** (register without indexing) or **Add + index now**. Watch /
+  auto-reindex can be enabled at registration.
 - **Totals row** — projects, files indexed, chunks, pending changes, runs in flight.
 - **Compute-device panel** — the active device and pills to switch between
   `auto` / `cuda` / `mps` / `cpu` (see [GPU / device control](#gpu--device-control)).
@@ -350,7 +356,8 @@ Secondary interface, for the dashboard and scripting. Interactive docs at `/docs
 | `POST` | `/search` | hybrid / dense / sparse search |
 | `POST` | `/structural-search` | AST-pattern search over live files |
 
-Register and search:
+Register and search (or use the dashboard's **Add project** modal for the same thing
+with a folder picker, per-language scope, and a pre-flight preview):
 
 ```bash
 # Register + index a project

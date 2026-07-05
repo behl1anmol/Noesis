@@ -37,6 +37,24 @@ class DeviceRequest(BaseModel):
     device: str
 
 
+class IndexScope(BaseModel):
+    index_languages: list[str] | None = None
+    max_file_bytes: int | None = None
+    follow_symlinks: bool = False
+    extra_ignores: list[str] | None = None
+
+
+class PreviewRequest(IndexScope):
+    root_path: str
+
+
+class RegisterRequest(IndexScope):
+    root_path: str
+    watch: bool = False
+    auto_reindex: bool = False
+    index_now: bool = False
+
+
 # -- pages -------------------------------------------------------------------
 
 
@@ -128,3 +146,54 @@ async def api_set_device(req: DeviceRequest, request: Request) -> dict[str, Any]
         return core_dashboard.set_compute_device(request.app.state.ctx, req.device)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# -- project registration (ADR-42) -------------------------------------------
+
+
+@dashboard_router.get("/api/languages")
+async def api_languages() -> dict[str, Any]:
+    return {"languages": core_dashboard.supported_languages()}
+
+
+@dashboard_router.get("/api/browse")
+async def api_browse(request: Request, path: str | None = None) -> dict[str, Any]:
+    try:
+        return core_dashboard.browse_dir(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@dashboard_router.post("/api/register/preview")
+async def api_register_preview(req: PreviewRequest, request: Request) -> dict[str, Any]:
+    try:
+        return await core_dashboard.preview_scan(
+            request.app.state.ctx,
+            req.root_path,
+            index_languages=req.index_languages,
+            max_file_bytes=req.max_file_bytes,
+            follow_symlinks=req.follow_symlinks,
+            extra_ignores=req.extra_ignores,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@dashboard_router.post("/api/register", status_code=201)
+async def api_register(req: RegisterRequest, request: Request) -> dict[str, Any]:
+    try:
+        return core_dashboard.register_project(
+            request.app.state.ctx,
+            req.root_path,
+            watch=req.watch,
+            auto_reindex=req.auto_reindex,
+            index_languages=req.index_languages,
+            max_file_bytes=req.max_file_bytes,
+            follow_symlinks=req.follow_symlinks,
+            extra_ignores=req.extra_ignores,
+            index_now=req.index_now,
+        )
+    except ValueError as exc:
+        # missing dir → 400; mixed-model guard → 409
+        status = 409 if "indexed with model" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc

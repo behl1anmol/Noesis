@@ -7,6 +7,7 @@ functions commit before returning; callers never manage transactions.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -104,6 +105,13 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("projects", "auto_reindex", "INTEGER NOT NULL DEFAULT 0"),
     ("index_runs", "triggered_by", "TEXT"),
     ("index_runs", "files_failed", "INTEGER"),
+    # ADR-42: per-project index config set at registration. NULL columns
+    # mean "use the default" (index_languages NULL = all languages,
+    # max_file_bytes NULL = DiscoveryConfig default). JSON-encoded lists.
+    ("projects", "index_languages", "TEXT"),
+    ("projects", "max_file_bytes", "INTEGER"),
+    ("projects", "follow_symlinks", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "extra_ignores", "TEXT"),
 )
 
 
@@ -307,6 +315,36 @@ def set_project_flags(
     sets.append("updated_at = ?")
     params.extend([_now(), project_id])
     conn.execute(f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+
+
+def set_index_config(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    index_languages: list[str] | None = None,
+    max_file_bytes: int | None = None,
+    follow_symlinks: bool = False,
+    extra_ignores: list[str] | None = None,
+) -> None:
+    """Persist a project's index scope (ADR-42). ``index_languages`` /
+    ``extra_ignores`` are JSON-encoded; an empty or None list stores NULL
+    (meaning 'no filter' / 'all languages'). ``max_file_bytes`` None stores
+    NULL (DiscoveryConfig default applies)."""
+    langs_json = json.dumps(index_languages) if index_languages else None
+    ignores_json = json.dumps(extra_ignores) if extra_ignores else None
+    conn.execute(
+        "UPDATE projects SET index_languages = ?, max_file_bytes = ?,"
+        " follow_symlinks = ?, extra_ignores = ?, updated_at = ? WHERE id = ?",
+        (
+            langs_json,
+            max_file_bytes,
+            int(follow_symlinks),
+            ignores_json,
+            _now(),
+            project_id,
+        ),
+    )
     conn.commit()
 
 
