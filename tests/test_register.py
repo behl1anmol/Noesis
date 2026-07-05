@@ -185,6 +185,49 @@ def test_register_missing_dir_400(client):
     ).status_code == 400
 
 
+# -- project deletion (ADR-43) ------------------------------------------------
+
+
+def test_delete_project_full_cleanup(client, repo):
+    body = client.post(
+        "/api/register",
+        json={"root_path": str(repo), "index_now": True, "watch": True},
+    ).json()
+    pid = body["project"]["id"]
+    asyncio.run(_wait_done(client, body["run"]["run_id"]))
+    ctx = client.app.state.ctx
+    state.upsert_pending_changes(ctx.conn, pid, [("a.py", "modified")])
+    state.bump_watcher_stats(ctx.conn, pid, events_seen=3)
+    assert ctx.watcher.watching(pid)
+    points_before = ctx.store._client.count(ctx.store.collection_name).count
+    assert points_before > 0
+
+    resp = client.delete(f"/api/projects/{pid}")
+    assert resp.status_code == 200 and resp.json()["deleted"] is True
+
+    # Source tree untouched; every index-state surface gone.
+    assert (repo / "a.py").exists()
+    assert state.get_project(ctx.conn, pid) is None
+    for table in ("files", "index_runs", "pending_changes", "watcher_stats"):
+        n = ctx.conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE project_id = ?", (pid,)
+        ).fetchone()[0]
+        assert n == 0, table
+    assert ctx.store._client.count(ctx.store.collection_name).count == 0
+    assert not ctx.watcher.watching(pid)
+    # Idempotent-ish: second delete is a clean 404.
+    assert client.delete(f"/api/projects/{pid}").status_code == 404
+    # Re-registering the same folder works (fresh id, fresh index).
+    again = client.post(
+        "/api/register", json={"root_path": str(repo), "index_now": False}
+    )
+    assert again.status_code == 201
+
+
+def test_delete_unknown_project_404(client):
+    assert client.delete("/api/projects/nope").status_code == 404
+
+
 def test_discovery_config_for_project_defaults(client, repo):
     body = client.post(
         "/api/register", json={"root_path": str(repo), "index_now": False}

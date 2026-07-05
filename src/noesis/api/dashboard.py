@@ -186,6 +186,13 @@ async def api_set_device(req: DeviceRequest, request: Request) -> dict[str, Any]
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@dashboard_router.delete("/api/projects/{project_id}")
+async def api_delete_project(project_id: str, request: Request) -> dict[str, Any]:
+    if not core_dashboard.delete_project(request.app.state.ctx, project_id):
+        raise HTTPException(status_code=404, detail="unknown project_id")
+    return {"project_id": project_id, "deleted": True}
+
+
 # -- project registration (ADR-42) -------------------------------------------
 
 

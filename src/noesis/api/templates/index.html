@@ -117,6 +117,8 @@
                 <button type="button" class="btn btn-amber" data-act="pending"
                         {% if not p.pending_count %}hidden{% endif %}>Index pending</button>
                 <button type="button" class="btn" data-act="reindex">Reindex</button>
+                <button type="button" class="btn btn-danger" data-act="delete"
+                        title="Remove this project's index (source files untouched)">Delete</button>
               </div>
             </div>
           </article>
@@ -128,6 +130,30 @@
       </div></div>
     {% endif %}
   </section>
+
+  {# ---- Delete-confirm modal (ADR-43) -------------------------------------- #}
+  <div class="modal-backdrop" data-confirm-modal hidden>
+    <div class="modal modal-narrow" role="alertdialog" aria-modal="true" aria-labelledby="del-title">
+      <div class="modal-head">
+        <h2 id="del-title">Delete project?</h2>
+        <button type="button" class="modal-x" data-confirm-cancel aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="confirm-text">
+          Remove <strong data-confirm-name></strong> from the index — all its
+          indexed chunks, run history, and pending changes are deleted.
+          <span class="muted">Your source files are not touched. You can re-add
+          and re-index the folder at any time.</span>
+        </p>
+        <div class="modal-foot">
+          <div class="modal-actions">
+            <button type="button" class="btn" data-confirm-cancel>Cancel</button>
+            <button type="button" class="btn btn-danger" data-confirm-yes>Delete project</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   {# ---- Register modal (ADR-42) ------------------------------------------- #}
   <div class="modal-backdrop" data-register-modal hidden>

@@ -371,6 +371,32 @@ def set_compute_device(ctx: Any, device: str) -> dict[str, Any]:
     return device_info(ctx)
 
 
+def delete_project(ctx: Any, project_id: str) -> bool:
+    """Remove a project's index state entirely (ADR-43): cancel its running
+    index task, unschedule its watch, drop its Qdrant points, delete its
+    SQLite rows. Touches ONLY derived index state — never the project's
+    source tree. Returns False for an unknown project.
+
+    Order matters: task first (a run mid-flight would re-insert file rows
+    and points after the wipe), then the watch (events would recreate
+    pending rows), then points, then rows."""
+    project = state.get_project(ctx.conn, project_id)
+    if project is None:
+        return False
+    latest = state.get_latest_run(ctx.conn, project_id)
+    if latest is not None and latest["status"] == "running":
+        task = ctx.jobs.get(latest["id"])
+        if task is not None:
+            task.cancel()
+    watcher = getattr(ctx, "watcher", None)
+    if watcher is not None:
+        watcher.set_watch(project_id, False)
+    ctx.store.delete_project_points(project_id)
+    state.delete_project(ctx.conn, project_id)
+    logger.info("project %s deleted (%s)", project_id, project["root_path"])
+    return True
+
+
 # -- project registration (ADR-42) -------------------------------------------
 
 

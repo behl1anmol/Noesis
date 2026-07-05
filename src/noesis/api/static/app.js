@@ -307,6 +307,10 @@
     }
 
     const btn = e.target.closest("button[data-act]");
+    if (btn && btn.dataset.act === "delete") {
+      openDeleteConfirm(btn.closest("[data-project]"));
+      return;
+    }
     if (btn) {
       const card = btn.closest("[data-project]");
       const id = encodeURIComponent(card.dataset.id);
@@ -589,6 +593,47 @@
     }
   }
 
+  /* ---- delete confirm (ADR-43) -------------------------------------------- */
+
+  let deleteTarget = null; // the card element pending confirmation
+
+  function openDeleteConfirm(card) {
+    const modal = $("[data-confirm-modal]");
+    if (!modal || !card) return;
+    deleteTarget = card;
+    $("[data-confirm-name]", modal).textContent =
+      (card.querySelector(".card-title") || {}).textContent || "this project";
+    modal.hidden = false;
+  }
+
+  function initDeleteConfirm() {
+    const modal = $("[data-confirm-modal]");
+    if (!modal) return;
+    const closeConfirm = () => { modal.hidden = true; deleteTarget = null; };
+    $$("[data-confirm-cancel]", modal).forEach((b) => b.addEventListener("click", closeConfirm));
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeConfirm(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden) closeConfirm(); });
+    $("[data-confirm-yes]", modal).addEventListener("click", async () => {
+      if (!deleteTarget) return;
+      const card = deleteTarget;
+      const yes = $("[data-confirm-yes]", modal);
+      yes.disabled = true;
+      try {
+        const res = await fetch("/api/projects/" + encodeURIComponent(card.dataset.id), { method: "DELETE" });
+        if (!res.ok) {
+          let detail = "Delete failed (" + res.status + ")";
+          try { const j = await res.json(); if (j && j.detail) detail = String(j.detail); } catch (e2) { /* no body */ }
+          throw new Error(detail);
+        }
+        card.remove();
+        toast("Project deleted", "ok");
+        closeConfirm();
+        schedule(true); // refresh totals promptly
+      } catch (err) { toast(err.message); }
+      yes.disabled = false;
+    });
+  }
+
   /* ---- register modal (ADR-42) ------------------------------------------- */
 
   function initRegister() {
@@ -760,5 +805,5 @@
     setInterval(renderTimes, 30000);
   }
 
-  if (PAGE === "index") initRegister();
+  if (PAGE === "index") { initRegister(); initDeleteConfirm(); }
 })();

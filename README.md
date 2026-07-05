@@ -146,6 +146,9 @@ tooling, no CDN assets (it renders with the network cable pulled). Three pages:
   **pre-flight preview** of how many files each language contributes before committing,
   then **Add only** (register without indexing) or **Add + index now**. Watch /
   auto-reindex can be enabled at registration.
+- **Delete project** — each card has a Delete action (with a confirm dialog) that
+  removes the project's index entirely: chunks, run history, pending changes.
+  Source files are never touched; re-add and re-index any time.
 - **Totals row** — projects, files indexed, chunks, pending changes, runs in flight.
 - **Compute-device panel** — the active device and pills to switch between
   `auto` / `cuda` / `mps` / `cpu` (see [GPU / device control](#gpu--device-control)).

@@ -348,6 +348,24 @@ def set_index_config(
     conn.commit()
 
 
+def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
+    """Remove a project and all its state rows, child-first so the FK
+    constraints hold (ADR-43). ``query_log`` rows are deliberately kept:
+    metadata-only aggregates with no FK — deleting them would silently
+    rewrite usage history."""
+    conn.execute(
+        "DELETE FROM run_file_errors WHERE run_id IN"
+        " (SELECT id FROM index_runs WHERE project_id = ?)",
+        (project_id,),
+    )
+    conn.execute("DELETE FROM index_runs WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM pending_changes WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM watcher_stats WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM files WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    conn.commit()
+
+
 def watched_projects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM projects WHERE watch_enabled = 1 ORDER BY created_at"
