@@ -459,6 +459,11 @@ svg rect.bar:hover, svg .hbar:hover { filter: brightness(1.2); }
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .meta-line { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
 
+/* The hidden attribute must always win: author display rules (flex/grid/
+   inline-flex on .modal-backdrop, .badge, .progress, …) otherwise override
+   the UA's [hidden]{display:none} and "hidden" elements stay visible. */
+[hidden] { display: none !important; }
+
 /* ---- register modal (ADR-42) --------------------------------------------- */
 
 .btn-primary { color: #fff; background: var(--accent); border-color: var(--accent); }

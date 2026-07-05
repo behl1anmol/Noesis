@@ -11,6 +11,11 @@ lesson may never weaken those. See `architecture-docs/code-indexer-expanded-arch
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
+## [9] testing (occurrences: 1)
+**Mistake:** M8 register modal 'close' was verified by asserting the DOM property (el.hidden === true) in Playwright — which passed — while the user-visible layer never changed: author CSS (display:flex on .modal-backdrop) overrides the UA's [hidden]{display:none}, so the modal stayed on screen. Same class hit the pending badge (inline-flex + hidden). Bug shipped through two 'verified' rounds because the assertion was one layer below what the user sees.
+**Lesson:** Verify UI behavior at the layer the user perceives: assert computed style / visibility / pixels (getComputedStyle().display, element screenshots), not the DOM attribute or property that is supposed to produce them; and when styling any element that also uses the hidden attribute, keep a global [hidden]{display:none !important} guard so author display rules can never resurrect it.
+**Rationale:** A property assertion tests intent, not outcome — hidden=true was faithfully set while CSS silently vetoed its effect, so the test green-lit a broken UI twice. The computed-style assertion caught it in one run. The !important guard removes the whole class: any future flex/grid element with hidden stays hidden.
+
 ## [8] design (occurrences: 1)
 **Mistake:** M8 register modal fetched the supported-language list over /api/languages at open time, even though the list is static per process and the page is server-rendered Jinja2. The runtime fetch chained the modal's usability to the browser connection pool, tab cache freshness, and JS wiring — and on the stakeholder's machine the chips sat on 'loading languages…' indefinitely across multiple debugging rounds, unreproducible from a clean browser.
 **Lesson:** On a server-rendered page, render static or request-time-known data into the HTML; introduce a client-side fetch only for data that changes while the page is open (live progress, polling). And when a UI bug reproduces on the user's machine but not in a clean automated browser, suspect the delivery chain (cached HTML/JS, connection pool, stale tabs) before adding client-side code — each speculative JS fix widened the surface without touching the root.
