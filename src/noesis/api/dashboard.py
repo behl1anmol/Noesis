@@ -76,11 +76,27 @@ class RegisterRequest(IndexScope):
 # -- pages -------------------------------------------------------------------
 
 
+# Pages are never cached: a stale HTML document wires stale expectations to
+# fresh assets (observed as a permanently stuck register modal). The pages
+# are cheap local renders — no-store costs nothing and removes the failure
+# class entirely.
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
 @dashboard_router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def dashboard_home(request: Request) -> Any:
     ctx = request.app.state.ctx
     return templates.TemplateResponse(
-        request, "index.html", {"overview": core_dashboard.overview(ctx)}
+        request,
+        "index.html",
+        {
+            "overview": core_dashboard.overview(ctx),
+            # Server-rendered into the register modal: the language list is
+            # static per process, so it belongs in the HTML, not behind a
+            # runtime fetch (§4.12 server-rendered principle).
+            "languages": core_dashboard.supported_languages(),
+        },
+        headers=_NO_STORE,
     )
 
 
@@ -96,6 +112,7 @@ async def dashboard_project(project_id: str, request: Request) -> Any:
         request,
         "project.html",
         {"project": detail, "device": core_dashboard.device_info(ctx)},
+        headers=_NO_STORE,
     )
 
 
@@ -104,7 +121,10 @@ async def dashboard_usage(request: Request, days: int = 30) -> Any:
     ctx = request.app.state.ctx
     days = max(1, min(days, 365))
     return templates.TemplateResponse(
-        request, "usage.html", {"usage": core_dashboard.usage(ctx, days=days)}
+        request,
+        "usage.html",
+        {"usage": core_dashboard.usage(ctx, days=days)},
+        headers=_NO_STORE,
     )
 
 

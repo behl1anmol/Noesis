@@ -11,6 +11,11 @@ lesson may never weaken those. See `architecture-docs/code-indexer-expanded-arch
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
+## [8] design (occurrences: 1)
+**Mistake:** M8 register modal fetched the supported-language list over /api/languages at open time, even though the list is static per process and the page is server-rendered Jinja2. The runtime fetch chained the modal's usability to the browser connection pool, tab cache freshness, and JS wiring — and on the stakeholder's machine the chips sat on 'loading languages…' indefinitely across multiple debugging rounds, unreproducible from a clean browser.
+**Lesson:** On a server-rendered page, render static or request-time-known data into the HTML; introduce a client-side fetch only for data that changes while the page is open (live progress, polling). And when a UI bug reproduces on the user's machine but not in a clean automated browser, suspect the delivery chain (cached HTML/JS, connection pool, stale tabs) before adding client-side code — each speculative JS fix widened the surface without touching the root.
+**Rationale:** The fetch bought nothing: supported_languages() is constant until restart, and the page renders server-side anyway (§4.12's whole point). Three debugging rounds (cache-bust, poll hardening, abort+retry) treated symptoms in the fragile layer; moving the data into the template deleted the failure class in one change — chips exist the moment the HTML parses, no fetch to fail. Server-rendered-first also degrades gracefully: the modal now works even if app.js never loads.
+
 ## [7] process (occurrences: 1)
 **Mistake:** M8: ran 'uv add jinja2 watchdog' before recording their rule-3 decision rows — the rows landed minutes later in the same session, but the hard rule's order (decision row, then dep) was inverted. Caught immediately after the uv output and corrected before any code used the deps.
 **Lesson:** Before running any dependency-adding command (uv add / pip install into the project), record the decision row first — treat the /adr write as the gate that unlocks the install, not as paperwork to backfill, even when the dependency is pre-decided in the architecture doc.

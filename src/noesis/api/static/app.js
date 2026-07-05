@@ -606,55 +606,22 @@
     const autoEl = $("[data-reg-auto]", backdrop);
     const autoLabel = $("[data-reg-autolabel]", backdrop);
     const picker = $("[data-reg-picker]", backdrop);
-    let langsLoaded = false;
     let submitting = false;
 
     function setErr(msg) { if (errEl) { errEl.textContent = msg || ""; errEl.classList.toggle("is-error", !!msg); } }
 
+    // Language chips are server-rendered into the template — no runtime
+    // fetch, nothing to load, the modal is complete the moment it opens.
     function open() {
       backdrop.hidden = false;
       document.body.classList.add("modal-open");
       setErr("");
-      if (!langsLoaded) loadLanguages();
       setTimeout(() => pathEl && pathEl.focus(), 30);
     }
     function close() {
       backdrop.hidden = true;
       document.body.classList.remove("modal-open");
       if (picker) picker.hidden = true;
-    }
-
-    async function loadLanguages() {
-      // Never let this sit on "loading languages…" forever: abort after 8s
-      // (e.g. if the browser connection pool is momentarily saturated) and
-      // offer a retry instead of a permanent spinner.
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8000);
-      try {
-        const data = await (await fetch("/api/languages", { signal: ctrl.signal })).json();
-        clearTimeout(timer);
-        langsBox.textContent = "";
-        (data.languages || []).forEach((l) => {
-          const lab = document.createElement("label");
-          lab.className = "lang-chip";
-          const cb = document.createElement("input");
-          cb.type = "checkbox"; cb.value = l.language; cb.dataset.lang = "1";
-          const span = document.createElement("span");
-          span.textContent = l.language + (l.structural ? " ✳" : "");
-          span.title = l.extensions.join(", ") + (l.structural ? " · structural search" : "");
-          lab.appendChild(cb); lab.appendChild(span);
-          langsBox.appendChild(lab);
-        });
-        langsLoaded = true;
-      } catch (e) {
-        clearTimeout(timer);
-        langsBox.textContent = "";
-        const retry = document.createElement("button");
-        retry.type = "button"; retry.className = "btn btn-sm";
-        retry.textContent = "Could not load languages — retry";
-        retry.addEventListener("click", loadLanguages);
-        langsBox.appendChild(retry);
-      }
     }
 
     function selectedLangs() {

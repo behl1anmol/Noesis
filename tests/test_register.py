@@ -77,6 +77,17 @@ def test_discovery_extra_ignores_and_size(repo):
 # -- supported languages / browse / preview -----------------------------------
 
 
+def test_language_chips_server_rendered(client):
+    """The register modal must not depend on a runtime fetch: chips are in
+    the HTML itself, and pages are no-store so a stale document can't wire
+    stale expectations to fresh assets."""
+    resp = client.get("/")
+    assert resp.headers["cache-control"] == "no-store"
+    html = resp.text
+    assert html.count('class="lang-chip"') >= 20  # all languages present
+    assert 'value="python"' in html and "loading languages" not in html
+
+
 def test_supported_languages(client):
     data = client.get("/api/languages").json()["languages"]
     names = {l["language"] for l in data}

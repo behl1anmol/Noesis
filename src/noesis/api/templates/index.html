@@ -166,8 +166,15 @@
 
           <div class="field">
             <span class="field-label">Languages to index</span>
+            {# Server-rendered: the language list is static per process — no
+               runtime fetch, chips are always present (§4.12). #}
             <div class="lang-grid" data-reg-langs>
-              <span class="muted">loading languages…</span>
+              {% for l in languages %}
+                <label class="lang-chip">
+                  <input type="checkbox" value="{{ l.language }}" data-lang="1">
+                  <span title="{{ l.extensions | join(', ') }}{{ ' · structural search' if l.structural else '' }}">{{ l.language }}{{ ' ✳' if l.structural else '' }}</span>
+                </label>
+              {% endfor %}
             </div>
             <span class="field-hint">Leave all unchecked to index every language. Chips marked ✳ also support structural (AST) search.</span>
           </div>
