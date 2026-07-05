@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastmcp.utilities.lifespan import combine_lifespans
 from qdrant_client import QdrantClient
 
+from noesis.api.dashboard import STATIC_DIR, dashboard_router
 from noesis.api.routes import router
 from noesis.core import state
 from noesis.core.config import Settings, StructuralSettings, load_settings
@@ -45,6 +46,13 @@ class AppContext:
     structural: StructuralSettings = field(default_factory=StructuralSettings)
     git_fast_path: bool = True
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
+    # M8 (ADR-40): live run progress (jobs.run_progress reads it) and the
+    # watcher manager, both owned by the lifespan.
+    progress: dict[str, dict] = field(default_factory=dict)
+    watcher: object | None = None
+    # Effective device pin from config.toml, if any — the dashboard's
+    # device setting defers to it (operator config wins over UI state).
+    config_device_pin: str | None = None
 
 
 async def build_runtime_context(cfg: Settings) -> AppContext:
@@ -61,11 +69,19 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
     os.environ.setdefault(FASTEMBED_CACHE_ENV, FASTEMBED_CACHE_DEFAULT)
     conn = state.connect(cfg.db_path)
     state.init_db(conn)
+    # Device precedence (ADR-40): an explicit config.toml pin wins (operator
+    # config is never second-guessed by UI state); otherwise the dashboard's
+    # persisted app_settings choice; otherwise auto-detect (None).
+    stored_device = state.get_setting(conn, "compute_device")
+    if stored_device == "auto":
+        stored_device = None
+    embedder_device = cfg.embedder.device or stored_device
+    reranker_device = cfg.reranker.device or stored_device
     embedder = LocalSTEmbedder(
         model_id=cfg.embedder.model,
         dim=cfg.embedder.dim,
         batch_size=cfg.embedder.batch_size,
-        device=cfg.embedder.device,
+        device=embedder_device,
     )
     store = VectorStore(
         QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
@@ -76,7 +92,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         reranker = LocalCrossEncoderReranker(
             model_id=cfg.reranker.model,
             batch_size=cfg.reranker.batch_size,
-            device=cfg.reranker.device,
+            device=reranker_device,
         )
         if cfg.reranker.preload:
             await reranker.preload()
@@ -88,6 +104,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         rerank_candidates=cfg.reranker.candidates,
         structural=cfg.structural,
         git_fast_path=cfg.git.fast_path,
+        config_device_pin=cfg.embedder.device,
     )
 
 
@@ -114,9 +131,17 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
             app.state.ctx = ctx
         else:
             app.state.ctx = await build_runtime_context(cfg)
+        # Watcher lives in the lifespan for prod and test contexts alike —
+        # the Observer thread is lazy (spawns on the first scheduled watch),
+        # so apps with no watched projects pay one asyncio task, nothing more.
+        from noesis.core.watcher import WatcherManager
+
+        app.state.ctx.watcher = WatcherManager(app.state.ctx)
+        app.state.ctx.watcher.start()
         try:
             yield
         finally:
+            app.state.ctx.watcher.stop()
             if ctx is None:
                 close_runtime_context(app.state.ctx)
             else:
@@ -133,6 +158,10 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
         title="noesis", lifespan=combine_lifespans(lifespan, mcp_app.lifespan)
     )
     app.include_router(router)
+    app.include_router(dashboard_router)
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.mount("/mcp", mcp_app)
     return app
 

@@ -130,6 +130,9 @@ class LocalCrossEncoderReranker:
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._closed = False
+        # Bumped by set_device (ADR-40): the worker reloads the model when
+        # its loaded generation falls behind.
+        self._generation = 0
 
     @property
     def model_id(self) -> str:
@@ -156,6 +159,7 @@ class LocalCrossEncoderReranker:
 
     def _worker_loop(self) -> None:
         model: Any = None
+        loaded_generation = -1
         while True:
             _kind, item = self._queue.get()
             if item is None:  # shutdown sentinel
@@ -164,11 +168,25 @@ class LocalCrossEncoderReranker:
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                if model is None:
+                generation = self._generation
+                if model is None or loaded_generation != generation:
+                    model = None  # drop the old model before loading the new
                     model = self._load_model()
+                    loaded_generation = generation
                 future.set_result(fn(model))
             except BaseException as exc:  # noqa: BLE001 — propagate to caller,
                 future.set_exception(exc)  # never kill the worker thread.
+
+    def set_device(self, device: str | None) -> None:
+        """Retarget the model's device (dashboard setting, ADR-40); None
+        re-enables auto-detect. Same generation mechanism as the embedder —
+        the single worker thread owns the model, so the swap is race-free."""
+        with self._lock:
+            if device == self._device:
+                return
+            self._device = device
+            self._generation += 1
+            self._resolved_device = None  # unknown until the reload happens
 
     def _submit(self, fn: Callable[[Any], Any]) -> concurrent.futures.Future:
         future: concurrent.futures.Future = concurrent.futures.Future()

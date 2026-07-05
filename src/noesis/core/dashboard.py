@@ -1,0 +1,367 @@
+"""Dashboard read models + settings mutations (M8, ADR-40).
+
+All SQL and aggregation for the human monitoring surface lives here —
+``api/dashboard.py`` renders templates and forwards JSON, nothing more
+(thin-adapter rule). Everything reads the local SQLite state; nothing here
+may perform network I/O (CLAUDE.md rule 2).
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import PurePath
+from typing import Any
+
+from . import jobs, state
+from .compute import available_devices
+
+logger = logging.getLogger(__name__)
+
+VALID_DEVICES = ("auto", "cuda", "mps", "cpu")
+
+
+def _age_seconds(iso_ts: str | None) -> float | None:
+    if not iso_ts:
+        return None
+    try:
+        then = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - then).total_seconds())
+
+
+def _project_summary(ctx: Any, project: sqlite3.Row) -> dict[str, Any]:
+    conn = ctx.conn
+    project_id = project["id"]
+    counts = conn.execute(
+        "SELECT COUNT(*) AS files, COALESCE(SUM(chunk_count), 0) AS chunks"
+        " FROM files WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+    pending = conn.execute(
+        "SELECT COUNT(*) AS n FROM pending_changes WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()["n"]
+    run = state.get_latest_run(conn, project_id)
+    last_run: dict[str, Any] | None = None
+    progress: dict[str, Any] | None = None
+    if run is not None:
+        last_run = {
+            "run_id": run["id"],
+            "status": run["status"],
+            "started_at": run["started_at"],
+            "finished_at": run["finished_at"],
+            "files_total": run["files_total"],
+            "files_changed": run["files_changed"],
+            "files_failed": run["files_failed"],
+            "chunks_written": run["chunks_written"],
+            "triggered_by": run["triggered_by"],
+            "error": run["error"],
+        }
+        if run["status"] == "running":
+            progress = jobs.run_progress(ctx, run["id"])
+    watcher = getattr(ctx, "watcher", None)
+    last_done = conn.execute(
+        "SELECT finished_at FROM index_runs WHERE project_id = ? AND status = 'done'"
+        " ORDER BY finished_at DESC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    return {
+        "id": project_id,
+        "name": PurePath(project["root_path"]).name or project["root_path"],
+        "root_path": project["root_path"],
+        "embedding_model": project["embedding_model"],
+        "created_at": project["created_at"],
+        "watch_enabled": bool(project["watch_enabled"]),
+        "auto_reindex": bool(project["auto_reindex"]),
+        "watching": bool(watcher is not None and watcher.watching(project_id)),
+        "file_count": counts["files"],
+        "chunk_count": counts["chunks"],
+        "pending_count": pending,
+        "last_indexed_at": None if last_done is None else last_done["finished_at"],
+        "index_age_s": None if last_done is None else _age_seconds(last_done["finished_at"]),
+        "last_run": last_run,
+        "progress": progress,
+    }
+
+
+def overview(ctx: Any) -> dict[str, Any]:
+    """The GET / read model: every project's health at a glance."""
+    projects = [_project_summary(ctx, row) for row in state.list_projects(ctx.conn)]
+    return {
+        "projects": projects,
+        "totals": {
+            "projects": len(projects),
+            "files": sum(p["file_count"] for p in projects),
+            "chunks": sum(p["chunk_count"] for p in projects),
+            "pending": sum(p["pending_count"] for p in projects),
+            "running": sum(
+                1
+                for p in projects
+                if p["last_run"] is not None and p["last_run"]["status"] == "running"
+            ),
+        },
+        "device": device_info(ctx),
+    }
+
+
+def project_detail(ctx: Any, project_id: str) -> dict[str, Any] | None:
+    """Per-project drill-down: pending files, recent runs, failed files."""
+    project = state.get_project(ctx.conn, project_id)
+    if project is None:
+        return None
+    summary = _project_summary(ctx, project)
+    pending = [
+        dict(row) for row in state.list_pending_changes(ctx.conn, project_id)
+    ]
+    runs = [
+        dict(row)
+        for row in ctx.conn.execute(
+            "SELECT * FROM index_runs WHERE project_id = ?"
+            " ORDER BY started_at DESC, rowid DESC LIMIT 20",
+            (project_id,),
+        ).fetchall()
+    ]
+    # Failed files of the most recent run that recorded any — the
+    # actionable set (older runs' failures were either fixed or recur here).
+    failed_files: list[dict[str, Any]] = []
+    for run in runs:
+        errors = state.list_file_errors(ctx.conn, run["id"])
+        if errors:
+            failed_files = [
+                {"path": e["path"], "error": e["error"], "run_id": run["id"]}
+                for e in errors
+            ]
+            break
+    return {
+        **summary,
+        "pending_files": pending,
+        "recent_runs": runs,
+        "failed_files": failed_files,
+    }
+
+
+def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
+    """The usage-page read model (ADR-40): index activity, index health,
+    search usage, watcher activity — everything derived, nothing stored
+    beyond what the run/query/watcher tables already hold."""
+    conn = ctx.conn
+    cutoff = f"-{days} days"
+
+    runs_per_day = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT substr(started_at, 1, 10) AS day,
+                   COUNT(*) AS runs,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                   SUM(CASE WHEN triggered_by = 'watcher' THEN 1 ELSE 0 END) AS watcher_runs,
+                   COALESCE(SUM(files_changed), 0) AS files_changed,
+                   COALESCE(SUM(chunks_written), 0) AS chunks_written
+            FROM index_runs
+            WHERE started_at >= datetime('now', ?)
+            GROUP BY day ORDER BY day
+            """,
+            (cutoff,),
+        ).fetchall()
+    ]
+    run_stats = dict(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS total_runs,
+                   SUM(CASE WHEN fast_path_used = 1 THEN 1 ELSE 0 END) AS fast_path_runs,
+                   AVG(CASE WHEN finished_at IS NOT NULL AND started_at IS NOT NULL
+                       THEN (julianday(finished_at) - julianday(started_at)) * 86400.0
+                       END) AS avg_duration_s
+            FROM index_runs
+            WHERE started_at >= datetime('now', ?)
+            """,
+            (cutoff,),
+        ).fetchone()
+    )
+
+    queries_per_day = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT substr(ts, 1, 10) AS day,
+                   COUNT(*) AS queries,
+                   SUM(CASE WHEN interface = 'mcp' THEN 1 ELSE 0 END) AS mcp,
+                   SUM(CASE WHEN interface = 'rest' THEN 1 ELSE 0 END) AS rest,
+                   SUM(CASE WHEN kind = 'structural' THEN 1 ELSE 0 END) AS structural,
+                   SUM(CASE WHEN reranked = 1 THEN 1 ELSE 0 END) AS reranked
+            FROM query_log
+            WHERE ts >= datetime('now', ?)
+            GROUP BY day ORDER BY day
+            """,
+            (cutoff,),
+        ).fetchall()
+    ]
+    latencies = [
+        row["latency_ms"]
+        for row in conn.execute(
+            "SELECT latency_ms FROM query_log"
+            " WHERE ts >= datetime('now', ?) AND latency_ms IS NOT NULL"
+            " ORDER BY latency_ms",
+            (cutoff,),
+        ).fetchall()
+    ]
+
+    def pct(p: float) -> float | None:
+        if not latencies:
+            return None
+        idx = min(len(latencies) - 1, int(round(p * (len(latencies) - 1))))
+        return round(latencies[idx], 1)
+
+    channel_mix = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT COALESCE(channel, 'structural') AS channel, COUNT(*) AS queries"
+            " FROM query_log WHERE ts >= datetime('now', ?)"
+            " GROUP BY channel ORDER BY queries DESC",
+            (cutoff,),
+        ).fetchall()
+    ]
+
+    watcher_per_day = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT day,
+                   SUM(events_seen) AS events_seen,
+                   SUM(events_coalesced) AS events_coalesced,
+                   SUM(auto_runs) AS auto_runs
+            FROM watcher_stats
+            WHERE day >= date('now', ?)
+            GROUP BY day ORDER BY day
+            """,
+            (cutoff,),
+        ).fetchall()
+    ]
+
+    health = [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "file_count": p["file_count"],
+            "chunk_count": p["chunk_count"],
+            "pending_count": p["pending_count"],
+            "index_age_s": p["index_age_s"],
+            "files_failed": (p["last_run"] or {}).get("files_failed") or 0,
+        }
+        for p in (
+            _project_summary(ctx, row) for row in state.list_projects(ctx.conn)
+        )
+    ]
+
+    return {
+        "days": days,
+        "index_activity": {
+            "per_day": runs_per_day,
+            "total_runs": run_stats["total_runs"] or 0,
+            "fast_path_runs": run_stats["fast_path_runs"] or 0,
+            "avg_duration_s": (
+                None
+                if run_stats["avg_duration_s"] is None
+                else round(run_stats["avg_duration_s"], 2)
+            ),
+        },
+        "search_usage": {
+            "per_day": queries_per_day,
+            "total_queries": sum(q["queries"] for q in queries_per_day),
+            "latency_p50_ms": pct(0.50),
+            "latency_p95_ms": pct(0.95),
+            "channel_mix": channel_mix,
+        },
+        "watcher_activity": {"per_day": watcher_per_day},
+        "index_health": health,
+    }
+
+
+def set_project_flags(
+    ctx: Any,
+    project_id: str,
+    *,
+    watch_enabled: bool | None = None,
+    auto_reindex: bool | None = None,
+) -> dict[str, Any] | None:
+    """Persist watcher flags and apply them live. Enabling auto_reindex on
+    a project with pending changes triggers an immediate catch-up scoped
+    run — the toggle means "keep me fresh", not "keep me fresh starting
+    with the next keystroke"."""
+    project = state.get_project(ctx.conn, project_id)
+    if project is None:
+        return None
+    state.set_project_flags(
+        ctx.conn, project_id, watch_enabled=watch_enabled, auto_reindex=auto_reindex
+    )
+    watcher = getattr(ctx, "watcher", None)
+    if watcher is not None and watch_enabled is not None:
+        watcher.set_watch(project_id, watch_enabled)
+    if auto_reindex:
+        pending = state.list_pending_changes(ctx.conn, project_id)
+        if pending:
+            try:
+                jobs.launch_index_run(
+                    ctx,
+                    project["root_path"],
+                    paths=[p["path"] for p in pending],
+                    triggered_by="watcher",
+                )
+            except ValueError as exc:
+                logger.warning("catch-up reindex skipped: %s", exc)
+    refreshed = state.get_project(ctx.conn, project_id)
+    assert refreshed is not None
+    return _project_summary(ctx, refreshed)
+
+
+def reindex_pending(ctx: Any, project_id: str) -> dict[str, Any] | None:
+    """Dashboard action: scoped run over the current pending set (or a
+    plain incremental run when nothing is pending — the button always
+    means "make it fresh now")."""
+    project = state.get_project(ctx.conn, project_id)
+    if project is None:
+        return None
+    pending = state.list_pending_changes(ctx.conn, project_id)
+    paths = [p["path"] for p in pending] or None
+    return jobs.launch_index_run(
+        ctx, project["root_path"], paths=paths, triggered_by="manual"
+    )
+
+
+def device_info(ctx: Any) -> dict[str, Any]:
+    """Current compute-device state for the dashboard settings surface."""
+    setting = state.get_setting(ctx.conn, "compute_device") or "auto"
+    pin = getattr(ctx, "config_device_pin", None)
+    embedder = ctx.embedder
+    return {
+        "setting": setting,
+        "config_pin": pin,
+        "effective_source": "config.toml" if pin else "setting",
+        "resolved": getattr(embedder, "resolved_device", None),
+        "available": available_devices(),
+    }
+
+
+def set_compute_device(ctx: Any, device: str) -> dict[str, Any]:
+    """Persist the device choice and hot-retarget the loaded models
+    (generation-bump reload, ADR-40). Raises ValueError on an invalid
+    value or when config.toml pins the device (operator config wins)."""
+    if device not in VALID_DEVICES:
+        raise ValueError(f"device must be one of {', '.join(VALID_DEVICES)}")
+    if getattr(ctx, "config_device_pin", None):
+        raise ValueError(
+            "device is pinned in config.toml; remove the [embedder].device"
+            " pin to control it from the dashboard"
+        )
+    state.set_setting(ctx.conn, "compute_device", device)
+    target = None if device == "auto" else device
+    for model in (ctx.embedder, getattr(ctx, "reranker", None)):
+        setter = getattr(model, "set_device", None)
+        if setter is not None:
+            setter(target)
+    return device_info(ctx)

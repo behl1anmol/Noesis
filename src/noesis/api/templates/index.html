@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Noesis — Overview{% endblock %}
+{% block page %}index{% endblock %}
+
+{# rough server-side humanizer; app.js refines these from data-age on load #}
+{% macro ago(s) -%}
+  {%- if s is none -%}never indexed
+  {%- elif s < 60 -%}indexed just now
+  {%- elif s < 3600 -%}indexed {{ (s // 60) | int }}m ago
+  {%- elif s < 86400 -%}indexed {{ (s // 3600) | int }}h ago
+  {%- else -%}indexed {{ (s // 86400) | int }}d ago
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro status_of(p) -%}
+  {%- if p.progress or (p.last_run and p.last_run.status == 'running') -%}running
+  {%- elif p.last_run -%}{{ p.last_run.status }}
+  {%- else -%}idle
+  {%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+  {% set totals = overview.totals %}
+  {% set dev = overview.device %}
+
+  <section class="section fade">
+    <div class="stats">
+      <div class="stat"><div class="label">Projects</div><div class="value" data-total="projects" data-count="{{ totals.projects }}">{{ totals.projects }}</div></div>
+      <div class="stat"><div class="label">Files indexed</div><div class="value" data-total="files" data-count="{{ totals.files }}">{{ totals.files }}</div></div>
+      <div class="stat"><div class="label">Chunks</div><div class="value" data-total="chunks" data-count="{{ totals.chunks }}">{{ totals.chunks }}</div></div>
+      <div class="stat{{ ' is-warn' if totals.pending > 0 else '' }}" data-stat="pending"><div class="label">Pending changes</div><div class="value" data-total="pending" data-count="{{ totals.pending }}">{{ totals.pending }}</div></div>
+      <div class="stat{{ ' is-live' if totals.running > 0 else '' }}" data-stat="running"><div class="label">Runs in flight</div><div class="value" data-total="running" data-count="{{ totals.running }}">{{ totals.running }}</div></div>
+    </div>
+  </section>
+
+  <section class="section panel fade" style="animation-delay: 60ms">
+    <div class="section-head" style="margin-bottom: 0">
+      <h2>Compute device</h2>
+      {% if 'cuda' in dev.available or 'mps' in dev.available %}
+        <span class="badge gpu">GPU available</span>
+      {% endif %}
+    </div>
+    <div class="device-row">
+      <span class="device-current">Active: <strong data-device-current>{{ dev.resolved or dev.setting }}</strong></span>
+      <div class="pills" data-device-pills>
+        {% if 'auto' in dev.available %}{% set opts = dev.available %}{% else %}{% set opts = ['auto'] + dev.available|list %}{% endif %}
+        {% for d in opts %}
+          <button type="button" class="pill{{ ' active' if d == (dev.config_pin or dev.setting) else '' }}"
+                  data-device="{{ d }}" {% if dev.config_pin %}disabled{% endif %}>{{ d }}</button>
+        {% endfor %}
+      </div>
+      {% if dev.config_pin %}
+        <span class="pin-note" title="Device is pinned; remove the pin in config.toml to change it">
+          &#128274; {{ dev.config_pin }} — pinned in config.toml
+        </span>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head fade" style="animation-delay: 100ms"><h2>Projects</h2></div>
+    {% if overview.projects %}
+      <div class="cards">
+        {% for p in overview.projects %}
+          {% set st = status_of(p) | trim %}
+          <article class="card project-card fade" data-project data-id="{{ p.id }}"
+                   data-href="/projects/{{ p.id }}/view" style="animation-delay: {{ 120 + loop.index0 * 60 }}ms">
+            <div class="card-top">
+              <div>
+                <h3 class="card-title"><a href="/projects/{{ p.id }}/view">{{ p.name }}</a></h3>
+                <div class="path mono">{{ p.root_path }}</div>
+              </div>
+              <span class="chip chip-{{ st }}" data-f="chip">{{ 'never run' if st == 'idle' else st }}</span>
+            </div>
+
+            <div class="card-stats">
+              <span><strong data-f="files">{{ p.file_count }}</strong> files</span>
+              <span><strong data-f="chunks">{{ p.chunk_count }}</strong> chunks</span>
+              <span class="fresh muted" data-f="fresh" data-age="{{ p.index_age_s if p.index_age_s is not none else '' }}"
+                    data-prefix="indexed " data-never="never indexed">{{ ago(p.index_age_s) }}</span>
+              <span class="badge pending" data-f="pendingbadge" {% if not p.pending_count %}hidden{% endif %}>
+                <span data-f="pending">{{ p.pending_count }}</span>&nbsp;pending
+              </span>
+            </div>
+
+            {% set pr = p.progress %}
+            <div class="progress" data-f="progress" {% if not pr %}hidden{% endif %}>
+              <div class="progress-track">
+                <div class="progress-fill{{ ' indet' if pr and pr.percent is none else '' }}" data-f="bar"
+                     style="width: {{ pr.percent | round(1) if pr and pr.percent is not none else (100 if pr else 0) }}%"></div>
+              </div>
+              <div class="progress-meta">
+                <span data-f="pct">{% if pr and pr.percent is not none %}{{ pr.percent | round | int }}%{% endif %}</span>
+                <span data-f="pfiles">{% if pr %}{{ pr.files_done }} / {{ pr.files_to_index }} files{% endif %}</span>
+                <span data-f="pchunks">{% if pr %}{{ pr.chunks_written }} chunks{% endif %}</span>
+                <span data-f="eta"></span>
+              </div>
+            </div>
+
+            <div class="card-foot">
+              <label class="switch" title="Watch this project for file changes">
+                <input type="checkbox" data-toggle="watch" {{ 'checked' if p.watch_enabled else '' }}>
+                <span class="track"></span><span class="switch-label">Watch</span>
+              </label>
+              <span class="live-dot" data-f="watching" {% if not p.watching %}hidden{% endif %}
+                    title="Watcher is running"></span>
+              <label class="switch{{ '' if p.watch_enabled else ' is-disabled' }}" data-f="autolabel"
+                     title="{{ 'Reindex automatically when watched files change' if p.watch_enabled else 'Enable Watch to use auto-reindex' }}">
+                <input type="checkbox" data-toggle="auto" {{ 'checked' if p.auto_reindex else '' }}
+                       {{ '' if p.watch_enabled else 'disabled' }}>
+                <span class="track"></span><span class="switch-label">Auto-reindex</span>
+              </label>
+              <div class="actions">
+                <button type="button" class="btn btn-amber" data-act="pending"
+                        {% if not p.pending_count %}hidden{% endif %}>Index pending</button>
+                <button type="button" class="btn" data-act="reindex">Reindex</button>
+              </div>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="panel fade"><div class="empty-note">No projects indexed yet — register one via the API or MCP tools.</div></div>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -45,7 +45,50 @@ CREATE TABLE IF NOT EXISTS index_runs (
   candidate_count INTEGER,
   started_at      TEXT,
   finished_at     TEXT,
-  error           TEXT
+  error           TEXT,
+  triggered_by    TEXT,
+  files_failed    INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS pending_changes (
+  project_id  TEXT NOT NULL REFERENCES projects(id),
+  path        TEXT NOT NULL,
+  event_type  TEXT NOT NULL CHECK(event_type IN ('created','modified','deleted')),
+  detected_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, path)
+);
+
+CREATE TABLE IF NOT EXISTS run_file_errors (
+  run_id TEXT NOT NULL REFERENCES index_runs(id),
+  path   TEXT NOT NULL,
+  error  TEXT NOT NULL,
+  PRIMARY KEY (run_id, path)
+);
+
+CREATE TABLE IF NOT EXISTS query_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           TEXT NOT NULL,
+  interface    TEXT NOT NULL CHECK(interface IN ('rest','mcp')),
+  kind         TEXT NOT NULL CHECK(kind IN ('search','structural')),
+  project_id   TEXT,
+  channel      TEXT,
+  reranked     INTEGER,
+  latency_ms   REAL,
+  result_count INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS watcher_stats (
+  project_id       TEXT NOT NULL REFERENCES projects(id),
+  day              TEXT NOT NULL,
+  events_seen      INTEGER NOT NULL DEFAULT 0,
+  events_coalesced INTEGER NOT NULL DEFAULT 0,
+  auto_runs        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 """
 
@@ -55,6 +98,12 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("projects", "last_indexed_commit", "TEXT"),
     ("index_runs", "fast_path_used", "INTEGER"),
     ("index_runs", "candidate_count", "INTEGER"),
+    # M8: per-project watcher flags (both default off, ADR-40) and run
+    # provenance/partial-failure fields (ADR-41).
+    ("projects", "watch_enabled", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "auto_reindex", "INTEGER NOT NULL DEFAULT 0"),
+    ("index_runs", "triggered_by", "TEXT"),
+    ("index_runs", "files_failed", "INTEGER"),
 )
 
 
@@ -174,11 +223,14 @@ def delete_files(
     conn.commit()
 
 
-def start_run(conn: sqlite3.Connection, project_id: str) -> str:
+def start_run(
+    conn: sqlite3.Connection, project_id: str, *, triggered_by: str = "manual"
+) -> str:
     run_id = uuid.uuid4().hex
     conn.execute(
-        "INSERT INTO index_runs (id, project_id, status, started_at) VALUES (?, ?, 'running', ?)",
-        (run_id, project_id, _now()),
+        "INSERT INTO index_runs (id, project_id, status, started_at, triggered_by)"
+        " VALUES (?, ?, 'running', ?, ?)",
+        (run_id, project_id, _now(), triggered_by),
     )
     conn.commit()
     return run_id
@@ -207,13 +259,15 @@ def finish_run(
     chunks_written: int | None = None,
     fast_path_used: bool | None = None,
     candidate_count: int | None = None,
+    files_failed: int | None = None,
     error: str | None = None,
 ) -> None:
     conn.execute(
         """
         UPDATE index_runs SET
           status = ?, files_total = ?, files_changed = ?, chunks_written = ?,
-          fast_path_used = ?, candidate_count = ?, finished_at = ?, error = ?
+          fast_path_used = ?, candidate_count = ?, files_failed = ?,
+          finished_at = ?, error = ?
         WHERE id = ?
         """,
         (
@@ -223,9 +277,183 @@ def finish_run(
             chunks_written,
             None if fast_path_used is None else int(fast_path_used),
             candidate_count,
+            files_failed,
             _now(),
             error,
             run_id,
         ),
+    )
+    conn.commit()
+
+
+def set_project_flags(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    watch_enabled: bool | None = None,
+    auto_reindex: bool | None = None,
+) -> None:
+    """Update the per-project watcher flags (ADR-40). None leaves a flag
+    untouched."""
+    sets, params = [], []
+    if watch_enabled is not None:
+        sets.append("watch_enabled = ?")
+        params.append(int(watch_enabled))
+    if auto_reindex is not None:
+        sets.append("auto_reindex = ?")
+        params.append(int(auto_reindex))
+    if not sets:
+        return
+    sets.append("updated_at = ?")
+    params.extend([_now(), project_id])
+    conn.execute(f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+
+
+def watched_projects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM projects WHERE watch_enabled = 1 ORDER BY created_at"
+    ).fetchall()
+
+
+def upsert_pending_changes(
+    conn: sqlite3.Connection,
+    project_id: str,
+    changes: Iterable[tuple[str, str]],
+) -> None:
+    """Record watcher-detected dirty files: (path, event_type) pairs. A
+    re-event on the same path refreshes event_type and detected_at, so the
+    row survives a clear cut at an earlier timestamp (the reindex race is
+    resolved toward re-examination, never toward silent loss)."""
+    now = _now()
+    conn.executemany(
+        """
+        INSERT INTO pending_changes (project_id, path, event_type, detected_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(project_id, path) DO UPDATE SET
+          event_type = excluded.event_type,
+          detected_at = excluded.detected_at
+        """,
+        [(project_id, path, event_type, now) for path, event_type in changes],
+    )
+    conn.commit()
+
+
+def list_pending_changes(
+    conn: sqlite3.Connection, project_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT path, event_type, detected_at FROM pending_changes"
+        " WHERE project_id = ? ORDER BY detected_at DESC, path",
+        (project_id,),
+    ).fetchall()
+
+
+def clear_pending_changes(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    paths: Iterable[str] | None = None,
+    before: str | None = None,
+) -> None:
+    """Clear pending rows after a run examined them. *paths* limits the
+    clear to a scoped run's candidate set (None = full run cleared all);
+    *before* keeps rows re-dirtied while the run was executing."""
+    where = "project_id = ?"
+    if before is not None:
+        where += " AND detected_at <= ?"
+    if paths is None:
+        params = [project_id] + ([before] if before is not None else [])
+        conn.execute(f"DELETE FROM pending_changes WHERE {where}", params)
+    else:
+        base = [project_id] + ([before] if before is not None else [])
+        conn.executemany(
+            f"DELETE FROM pending_changes WHERE {where} AND path = ?",
+            [(*base, p) for p in paths],
+        )
+    conn.commit()
+
+
+def record_file_errors(
+    conn: sqlite3.Connection, run_id: str, errors: Iterable[tuple[str, str]]
+) -> None:
+    conn.executemany(
+        "INSERT OR REPLACE INTO run_file_errors (run_id, path, error) VALUES (?, ?, ?)",
+        [(run_id, path, err) for path, err in errors],
+    )
+    conn.commit()
+
+
+def list_file_errors(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT path, error FROM run_file_errors WHERE run_id = ? ORDER BY path",
+        (run_id,),
+    ).fetchall()
+
+
+def log_query(
+    conn: sqlite3.Connection,
+    *,
+    interface: str,
+    kind: str,
+    project_id: str | None,
+    channel: str | None = None,
+    reranked: bool | None = None,
+    latency_ms: float | None = None,
+    result_count: int | None = None,
+) -> None:
+    """Metadata-only usage telemetry (ADR-40): never stores query text."""
+    conn.execute(
+        "INSERT INTO query_log (ts, interface, kind, project_id, channel,"
+        " reranked, latency_ms, result_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            _now(),
+            interface,
+            kind,
+            project_id,
+            channel,
+            None if reranked is None else int(reranked),
+            latency_ms,
+            result_count,
+        ),
+    )
+    conn.commit()
+
+
+def bump_watcher_stats(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    events_seen: int = 0,
+    events_coalesced: int = 0,
+    auto_runs: int = 0,
+) -> None:
+    day = _now()[:10]
+    conn.execute(
+        """
+        INSERT INTO watcher_stats (project_id, day, events_seen, events_coalesced, auto_runs)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, day) DO UPDATE SET
+          events_seen = events_seen + excluded.events_seen,
+          events_coalesced = events_coalesced + excluded.events_coalesced,
+          auto_runs = auto_runs + excluded.auto_runs
+        """,
+        (project_id, day, events_seen, events_coalesced, auto_runs),
+    )
+    conn.commit()
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = ?", (key,)
+    ).fetchone()
+    return None if row is None else row["value"]
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
     )
     conn.commit()

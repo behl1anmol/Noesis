@@ -11,6 +11,11 @@ lesson may never weaken those. See `architecture-docs/code-indexer-expanded-arch
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
+## [7] process (occurrences: 1)
+**Mistake:** M8: ran 'uv add jinja2 watchdog' before recording their rule-3 decision rows — the rows landed minutes later in the same session, but the hard rule's order (decision row, then dep) was inverted. Caught immediately after the uv output and corrected before any code used the deps.
+**Lesson:** Before running any dependency-adding command (uv add / pip install into the project), record the decision row first — treat the /adr write as the gate that unlocks the install, not as paperwork to backfill, even when the dependency is pre-decided in the architecture doc.
+**Rationale:** Rule 3's value is the forcing function: writing the rationale BEFORE the install is what catches a wrong version, a license problem, or a rejected alternative while reversal is still free (lesson 2's tree-sitter incident was exactly a consequence of install-first thinking). Backfilling inverts the check into a rubber stamp; the same-session correction was cheap this time only because the deps were genuinely pre-decided in Overview §4.9/§4.12.
+
 ## [6] correctness (occurrences: 1)
 **Mistake:** M7 gitfast's first implementation took 'git status --porcelain -z --untracked-files=all' at its documented word — that it lists every untracked file individually — and built candidate matching on exact path equality. A smoke run against the real noesis repo showed a nested git worktree surfaced as a single '?? dir/' entry (-uall never expands nested repos; submodule changes likewise collapse to one gitlink path), so a changed file inside such a directory would have been silently carried forward as unchanged, breaking the fast path's identical-partitioning guarantee before any test existed for it.
 **Lesson:** Before building logic on the output shape of an external tool (git plumbing, porcelain formats, CLI parsers), run the exact command against a real, messy instance of the data — not just fixtures or the documentation — and design the consumer to fail safe (here: directory entries match as prefixes, which can only widen the hash set, never shrink it).

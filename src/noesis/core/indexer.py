@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from typing import Callable, Sequence
 
 from . import gitfast, hashdiff, state
 from .chunker import chunk_file
@@ -30,6 +31,13 @@ class IndexResult:
     chunks_written: int
     fast_path_used: bool = False
     candidate_count: int | None = None
+    files_failed: int = 0
+
+
+# Live-progress callback: (files_done, files_to_index, chunks_written).
+# Called after each processed file — consumers (jobs.py) keep it in memory
+# for the dashboard; nothing here touches the DB per-file beyond upsert_file.
+ProgressFn = Callable[[int, int, int], None]
 
 
 def prepare_run(
@@ -81,20 +89,34 @@ async def execute_run(
     batch_size: int = 32,
     discovery_config: DiscoveryConfig | None = None,
     git_fast_path: bool = True,
+    paths: Sequence[str] | None = None,
+    on_progress: ProgressFn | None = None,
 ) -> IndexResult:
     """Index changes for an already-registered project under an open run.
 
     Idempotent: chunk ids are content-derived and file state is only written
     after that file's chunks are safely in Qdrant, so an interrupted run
     re-processes only what is still out of date (Overview §5).
+
+    *paths* scopes the run to an explicit candidate set (the watcher's
+    pending files, ADR-40): only those files (plus anything unknown to
+    stored state) are hashed; deletions are still detected discovery-wide.
+    A scoped run disables the git fast path and NEVER advances
+    ``last_indexed_commit`` — the anchor may only move when the candidate
+    set was derived from a git diff against it, otherwise the next fast
+    path would silently skip files the watcher never saw (§3.2 rule 1).
     """
+    if paths is not None:
+        git_fast_path = False
     try:
         # Git fast-path (§3.2): capture HEAD and the candidate set BEFORE
         # discovery/hashing — anything committed after this point is simply
         # re-examined next run (the safe direction). Every fallback is
         # silent here and logged in gitfast; hash stays the truth.
         head: str | None = None
-        candidates: gitfast.CandidatePathSet | None = None
+        candidates: "gitfast.CandidatePathSet | frozenset[str] | None" = None
+        if paths is not None:
+            candidates = frozenset(paths)
         if git_fast_path:
             anchor = None
             project = state.get_project(conn, project_id)
@@ -111,70 +133,94 @@ async def execute_run(
                 # the next run has an anchor to fast-path from (rule 4).
                 head = gitfast.resolve_head(root_path)
 
+        fast_path_active = git_fast_path and candidates is not None
+
         discovered = discover_files(root_path, discovery_config)
         stored = state.get_file_states(conn, project_id)
         diff = hashdiff.partition(root_path, discovered, stored, candidates=candidates)
 
         chunks_written = 0
+        file_errors: list[tuple[str, str]] = []
         to_index = [*diff.new, *diff.changed]
-        for rel in to_index:
-            text = _read_text(root_path, rel)
-            language = detect_language(rel)
-            file_hash = diff.hashes[rel]
-            chunks = chunk_file(
-                text, language=language, file_path=rel, file_hash=file_hash
-            )
-            if chunks:
-                vectors: list[list[float]] = []
-                for i in range(0, len(chunks), batch_size):
-                    batch = chunks[i : i + batch_size]
-                    vectors.extend(
-                        await embedder.embed_documents([c.text for c in batch])
-                    )
-                store.upsert_chunks(
-                    project_id, chunks, vectors, embedding_model=embedder.model_id
+        for done, rel in enumerate(to_index, start=1):
+            # Per-file failure containment (ADR-41): a bad file is recorded
+            # and skipped — its old chunks keep serving, its state row stays
+            # out of date so the next run retries it. Exception, not
+            # BaseException: cancellation must still abort the run.
+            try:
+                text = _read_text(root_path, rel)
+                language = detect_language(rel)
+                file_hash = diff.hashes[rel]
+                chunks = chunk_file(
+                    text, language=language, file_path=rel, file_hash=file_hash
                 )
-            # New points first, stale points after: chunk ids embed the file
-            # hash, so old content lives at different ids and must be pruned —
-            # but only once the replacement is searchable. A failure above
-            # leaves the old chunks serving; a failure below leaves brief
-            # duplicates that the next (self-healing) run prunes.
-            store.delete_file_chunks(project_id, [rel], exclude_file_hash=file_hash)
-            state.upsert_file(
-                conn,
-                project_id,
-                rel,
-                file_hash,
-                language=language,
-                chunk_count=len(chunks),
-            )
-            chunks_written += len(chunks)
+                if chunks:
+                    vectors: list[list[float]] = []
+                    for i in range(0, len(chunks), batch_size):
+                        batch = chunks[i : i + batch_size]
+                        vectors.extend(
+                            await embedder.embed_documents([c.text for c in batch])
+                        )
+                    store.upsert_chunks(
+                        project_id, chunks, vectors, embedding_model=embedder.model_id
+                    )
+                # New points first, stale points after: chunk ids embed the file
+                # hash, so old content lives at different ids and must be pruned —
+                # but only once the replacement is searchable. A failure above
+                # leaves the old chunks serving; a failure below leaves brief
+                # duplicates that the next (self-healing) run prunes.
+                store.delete_file_chunks(project_id, [rel], exclude_file_hash=file_hash)
+                state.upsert_file(
+                    conn,
+                    project_id,
+                    rel,
+                    file_hash,
+                    language=language,
+                    chunk_count=len(chunks),
+                )
+                chunks_written += len(chunks)
+            except Exception as exc:  # noqa: BLE001 — contained per ADR-41
+                file_errors.append((rel, str(exc) or type(exc).__name__))
+            if on_progress is not None:
+                on_progress(done, len(to_index), chunks_written)
 
         if diff.deleted:
             store.delete_file_chunks(project_id, diff.deleted)
             state.delete_files(conn, project_id, diff.deleted)
 
+        if file_errors:
+            state.record_file_errors(conn, run_id, file_errors)
+        # Partial failure is still a completed run (ADR-41); a run where
+        # every file failed is not "done" by any honest reading — likely an
+        # infrastructure problem (store/embedder down) wearing per-file dress.
+        all_failed = bool(to_index) and len(file_errors) == len(to_index)
         state.finish_run(
             conn,
             run_id,
-            "done",
+            "failed" if all_failed else "done",
             files_total=len(discovered),
             files_changed=len(to_index),
             chunks_written=chunks_written,
-            fast_path_used=candidates is not None,
-            candidate_count=None if candidates is None else len(candidates),
+            fast_path_used=fast_path_active,
+            candidate_count=len(candidates) if fast_path_active and candidates is not None else None,
+            files_failed=len(file_errors),
+            error=f"all {len(file_errors)} files failed" if all_failed else None,
         )
-        if head is not None:
+        # A run with failed files must not advance the git anchor either:
+        # the failed files' state rows are stale, and anchoring past them
+        # would let the next fast path carry them forward as unchanged.
+        if head is not None and not file_errors:
             state.set_last_indexed_commit(conn, project_id, head)
         return IndexResult(
             project_id=project_id,
             run_id=run_id,
             files_total=len(discovered),
-            files_indexed=len(to_index),
+            files_indexed=len(to_index) - len(file_errors),
             files_deleted=len(diff.deleted),
             chunks_written=chunks_written,
-            fast_path_used=candidates is not None,
-            candidate_count=None if candidates is None else len(candidates),
+            fast_path_used=fast_path_active,
+            candidate_count=len(candidates) if fast_path_active and candidates is not None else None,
+            files_failed=len(file_errors),
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

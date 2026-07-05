@@ -11,12 +11,13 @@ tests assert the two surfaces return identical bodies.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from noesis.core import jobs, state
+from noesis.core import jobs, state, telemetry
 from noesis.core.retriever import search_code
 from noesis.core.structural import StructuralSearchError, structural_search
 from noesis.core.vectorstore import SearchChannel
@@ -95,7 +96,12 @@ async def run_status(run_id: str, request: Request) -> dict[str, Any]:
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="unknown run_id")
-    return dict(row)
+    body = dict(row)
+    # Live progress (percent/ETA) exists only while the run's task is in
+    # this process — REST-only surface; the MCP status shape stays frozen.
+    if row["status"] == "running":
+        body["progress"] = jobs.run_progress(ctx, run_id)
+    return body
 
 
 @router.post("/search")
@@ -103,6 +109,7 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
     if state.get_project(ctx.conn, req.project_id) is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
+    t0 = time.perf_counter()
     result = await search_code(
         ctx.store,
         ctx.embedder,
@@ -114,6 +121,16 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
         reranker=ctx.reranker,
         rerank=req.rerank,
         candidates=ctx.rerank_candidates,
+    )
+    telemetry.record_query(
+        ctx.conn,
+        interface="rest",
+        kind="search",
+        project_id=req.project_id,
+        channel=req.channel,
+        reranked=result["reranked"],
+        latency_ms=(time.perf_counter() - t0) * 1000,
+        result_count=len(result["hits"]),
     )
     return {
         "query": req.query,
@@ -128,6 +145,7 @@ async def structural_search_route(
     req: StructuralSearchRequest, request: Request
 ) -> dict[str, Any]:
     ctx = request.app.state.ctx
+    t0 = time.perf_counter()
     try:
         result = await structural_search(
             ctx.conn,
@@ -144,4 +162,12 @@ async def structural_search_route(
             status_code=status,
             detail={"type": exc.error_type, "message": exc.message},
         ) from exc
+    telemetry.record_query(
+        ctx.conn,
+        interface="rest",
+        kind="structural",
+        project_id=req.project_id,
+        latency_ms=(time.perf_counter() - t0) * 1000,
+        result_count=len(result.get("matches", [])),
+    )
     return {"pattern": req.pattern, "language": req.language, **result}

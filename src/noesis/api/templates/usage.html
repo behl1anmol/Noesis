@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Noesis — Usage{% endblock %}
+{% block page %}usage{% endblock %}
+
+{% block content %}
+  {% set ia = usage.index_activity %}
+  {% set su = usage.search_usage %}
+
+  <section class="section fade">
+    <div class="section-head">
+      <h2>Usage &mdash; last {{ usage.days }} day{{ 's' if usage.days != 1 else '' }}</h2>
+    </div>
+    <div class="stats">
+      <div class="stat">
+        <div class="label">Index runs</div>
+        <div class="value" data-count="{{ ia.total_runs }}">{{ ia.total_runs }}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Fast-path runs</div>
+        <div class="value">{% if ia.total_runs %}{{ (ia.fast_path_runs / ia.total_runs * 100) | round | int }}%{% else %}&mdash;{% endif %}</div>
+        <div class="sub">{{ ia.fast_path_runs }} of {{ ia.total_runs }}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Avg run duration</div>
+        <div class="value" data-secs="{{ ia.avg_duration_s if ia.avg_duration_s is not none else '' }}">&mdash;</div>
+      </div>
+      <div class="stat">
+        <div class="label">Search queries</div>
+        <div class="value" data-count="{{ su.total_queries }}">{{ su.total_queries }}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Latency p50 / p95</div>
+        <div class="value" style="font-size: 20px">
+          {% if su.latency_p50_ms is not none %}{{ su.latency_p50_ms | round | int }}<span class="muted" style="font-size: 13px"> ms</span>
+            &nbsp;/&nbsp; {{ su.latency_p95_ms | round | int }}<span class="muted" style="font-size: 13px"> ms</span>
+          {% else %}&mdash;{% endif %}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section grid-2">
+    <figure class="panel chart fade" data-chart="runs" style="animation-delay: 60ms">
+      <figcaption>Index runs per day</figcaption>
+      <div class="legend" data-legend></div>
+      <div class="chart-body" data-body></div>
+    </figure>
+    <figure class="panel chart fade" data-chart="queries" style="animation-delay: 100ms">
+      <figcaption>Search queries per day</figcaption>
+      <div class="legend" data-legend></div>
+      <div class="chart-body" data-body></div>
+    </figure>
+    <figure class="panel chart fade" data-chart="channels" style="animation-delay: 140ms">
+      <figcaption>Channel mix</figcaption>
+      <div class="legend" data-legend></div>
+      <div class="chart-body" data-body></div>
+    </figure>
+    <figure class="panel chart fade" data-chart="watcher" style="animation-delay: 180ms">
+      <figcaption>Watcher events per day</figcaption>
+      <div class="legend" data-legend></div>
+      <div class="chart-body" data-body></div>
+    </figure>
+  </section>
+
+  <section class="section panel fade" style="animation-delay: 220ms">
+    <div class="section-head"><h2>Index health</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Project</th>
+            <th class="num">Files</th><th class="num">Chunks</th><th class="num">Pending</th>
+            <th>Freshness</th><th class="num">Failed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in usage.index_health %}
+            <tr>
+              <td><a href="/projects/{{ h.id }}/view">{{ h.name }}</a></td>
+              <td class="num">{{ h.file_count }}</td>
+              <td class="num">{{ h.chunk_count }}</td>
+              <td class="num{{ ' age-warn' if h.pending_count else '' }}">{{ h.pending_count }}</td>
+              <td class="mono {% if h.index_age_s is none %}age-never{% elif h.index_age_s < 3600 %}age-ok{% elif h.index_age_s < 86400 %}age-warn{% else %}age-old{% endif %}"
+                  data-age="{{ h.index_age_s if h.index_age_s is not none else '' }}" data-never="never"></td>
+              <td class="num{{ ' age-old' if h.files_failed else '' }}">{{ h.files_failed }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6"><div class="empty-note">No projects indexed yet</div></td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <script id="usage-data" type="application/json">{{ usage | tojson }}</script>
+{% endblock %}
