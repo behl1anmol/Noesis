@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "noesis-tools",
+  "owner": {
+    "name": "Anmol",
+    "email": "behl1anmol@gmail.com"
+  },
+  "description": "Plugins for Noesis, the local hybrid code-retrieval service for AI agents.",
+  "plugins": [
+    {
+      "name": "noesis",
+      "source": "./plugin/noesis",
+      "description": "Connects an agent to the Noesis code-retrieval MCP and ships the noesis-mcp skill (a usage guide, tool reference, and helper scripts).",
+      "category": "code-intelligence",
+      "keywords": ["mcp", "code-search", "retrieval", "rag", "noesis", "ast"],
+      "license": "MIT"
+    }
+  ]
+}
