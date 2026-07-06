@@ -135,16 +135,45 @@ def _boot_token() -> str:
         return ""
 
 
-# Per-process owner identity: <boot>:<pid>. Computed once — the pid is stable
-# for the life of the process and the boot token does not change under it.
-_OWNER = f"{_boot_token()}:{os.getpid()}"
+def _proc_start_time(pid: int) -> str:
+    """Process start time (clock ticks since boot) from ``/proc/<pid>/stat``
+    field 22 — distinguishes a recycled PID from the original one (PR review).
+    Empty when unavailable (process gone, or non-Linux): liveness then
+    degrades to a bare PID probe with a documented residual race."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return ""
+    # comm (field 2) is parenthesised and may contain spaces/parens, so split
+    # the tail after the final ')': tail[0] is state (field 3), and starttime
+    # (field 22) is therefore tail[19].
+    rparen = data.rfind(b")")
+    if rparen == -1:
+        return ""
+    tail = data[rparen + 2 :].split()
+    if len(tail) < 20:
+        return ""
+    return tail[19].decode("ascii", "replace")
+
+
+# Per-process owner identity: <boot>:<pid>:<starttime>. Computed once — all
+# three components are stable for the life of the process. starttime closes
+# same-boot PID recycling: a reused PID belongs to a process with a different
+# start time, so its stamped runs read as dead.
+_OWNER = f"{_boot_token()}:{os.getpid()}:{_proc_start_time(os.getpid())}"
 
 
 def _owner_alive(owner: str) -> bool:
     """True if the process that stamped *owner* is still running (M7). A
-    different boot token means a reboot happened → definitely dead. Same
-    boot → probe the PID with signal 0."""
-    boot, _, pid_s = owner.rpartition(":")
+    different boot token means a reboot happened → dead. Same boot → probe the
+    PID with signal 0, then confirm the live process's start time matches, so
+    a PID recycled within one boot is not mistaken for the original owner."""
+    parts = owner.split(":")
+    if len(parts) < 2:
+        return False
+    boot, pid_s = parts[0], parts[1]
+    start = parts[2] if len(parts) > 2 else ""
     if boot != _boot_token():
         return False
     try:
@@ -158,9 +187,17 @@ def _owner_alive(owner: str) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists but owned by another user
+        pass  # exists but owned by another user — /proc/<pid>/stat still readable
     except OSError:
         return False
+    # PID exists: guard against same-boot recycling. If we recorded a start
+    # time and the live process reports a different one, the original owner is
+    # dead and its PID was reused → treat as dead. If either is unavailable
+    # (non-Linux), fall back to "alive" (the documented residual race).
+    if start:
+        current = _proc_start_time(pid)
+        if current and current != start:
+            return False
     return True
 
 

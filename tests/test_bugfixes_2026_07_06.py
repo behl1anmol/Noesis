@@ -8,6 +8,7 @@ M7 (owner-gated crash recovery). See dev/bug-hunt-2026-07-06.md.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -162,5 +163,22 @@ def test_m7_null_owner_row_is_treated_as_dead(tmp_path: Path) -> None:
     pid = state.register_project(conn, tmp_path, "m")
     run = state.start_run(conn, pid)
     conn.execute("UPDATE index_runs SET owner=NULL WHERE id=?", (run,))
+    conn.commit()
+    assert state.fail_orphaned_runs(conn) == 1
+
+
+def test_m7_recycled_pid_same_boot_reads_dead(tmp_path: Path) -> None:
+    # PID 1 (init) is always alive; pair it with a start time that differs from
+    # init's real one so it looks like our crashed run's PID got recycled to an
+    # unrelated live process. os.kill(1,0) alone would read it 'alive' and never
+    # recover the run — the start-time check must catch the recycling (review).
+    real = state._proc_start_time(1)
+    if not real:
+        pytest.skip("no /proc start time available (non-Linux)")
+    conn = _state_conn(tmp_path)
+    project = state.register_project(conn, tmp_path, "m")
+    run = state.start_run(conn, project)
+    stale = f"{state._boot_token()}:1:{real}9"  # guaranteed != init's start time
+    conn.execute("UPDATE index_runs SET owner=? WHERE id=?", (stale, run))
     conn.commit()
     assert state.fail_orphaned_runs(conn) == 1

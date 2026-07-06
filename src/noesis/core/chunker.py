@@ -113,7 +113,11 @@ def _nws_prefix(data: bytes) -> list[int]:
     prefix = [0] * (len(data) + 1)
     total = 0
     pos = 0
-    for ch in data.decode("utf-8"):
+    # data is a round-trip of a valid str (chunk_file: text.encode), so this
+    # never sees invalid bytes; errors="replace" is defense-in-depth so a bad
+    # byte can never fail the counting pass (and the whole file) — matching the
+    # decode-free robustness of the pre-L6 byte loop.
+    for ch in data.decode("utf-8", "replace"):
         nxt = pos + len(ch.encode("utf-8"))
         if not ch.isspace():
             total += 1
