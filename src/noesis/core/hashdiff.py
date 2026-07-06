@@ -46,8 +46,12 @@ def partition(
     """Partition `discovered` (relative POSIX paths under `root`) against
     `stored` (path -> content_hash from the files table).
 
-    Files that vanish between discovery and hashing are treated as deleted —
-    the filesystem is ground truth at the moment it is read.
+    Files that vanish between discovery and hashing (FileNotFoundError /
+    NotADirectoryError) are treated as deleted — the filesystem is ground
+    truth at the moment it is read. A file that still exists but fails to
+    open for another reason (permissions, transient network-fs error) is
+    NOT treated as deleted: its stored hash is carried forward so its chunks
+    are never purged (H7).
 
     When `candidates` is given (git fast-path, §3.2), only discovered files
     that are candidates — or unknown to `stored` — get hashed; the rest
@@ -76,8 +80,20 @@ def partition(
             continue
         try:
             current = hash_file(root / rel)
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # genuinely vanished mid-run; falls through to deleted
         except OSError:
-            continue  # vanished mid-run; falls through to deleted if stored
+            # Transient/permission failure (EACCES after a chmod, EIO/ESTALE
+            # on a network fs) on a file that still exists — NOT a deletion
+            # (H7). Conflating the two would purge a live file's chunks. Carry
+            # the stored hash forward as unchanged so its chunks keep serving
+            # and the next run retries; a file unknown to `stored` we simply
+            # skip this run (nothing to preserve, and it is not "deleted").
+            if prior_hash is not None:
+                seen.add(rel)
+                hashes[rel] = prior_hash
+                unchanged.append(rel)
+            continue
         seen.add(rel)
         hashes[rel] = current
         prior = stored.get(rel)

@@ -56,10 +56,11 @@ def launch_index_run(
     missing or not a directory (an agent gets the answer now instead of
     polling a background failure), and on the mixed-model guard
     (state.register_project). If a run is already ``running`` for this
-    project, returns that run's id rather than launching a second
-    concurrent index racing on the same collection and state rows —
-    pending rows for a skipped scoped launch survive and re-trigger on
-    the watcher's next quiet period."""
+    project, launches nothing (a second concurrent index would race on the
+    same collection and state rows) and returns that run's id with
+    ``status: "already_running"`` — a distinct status so a scoped/watcher
+    caller can tell its launch was skipped and re-arm its retry (H3). A
+    real launch returns ``status: "accepted"``."""
     if not os.path.isdir(root_path):
         raise ValueError(f"root_path is not an existing directory: {root_path!r}")
     project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
@@ -68,7 +69,7 @@ def launch_index_run(
         return {
             "project_id": project_id,
             "run_id": latest["id"],
-            "status": "accepted",
+            "status": "already_running",
         }
     run_id = state.start_run(ctx.conn, project_id, triggered_by=triggered_by)
     # Cut point for the pending clear: rows re-dirtied after this survive.

@@ -79,6 +79,14 @@ class Settings:
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
 
 
+def _require_bool(value: object, key: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"config field {key!r} must be a boolean (true/false), got {value!r}"
+        )
+    return value
+
+
 def load_settings(config_path: str | Path = "config.toml") -> Settings:
     """Load settings from *config_path*, falling back to defaults per key."""
     path = Path(config_path)
@@ -92,7 +100,7 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
     git = raw.get("git", {})
     qdr = raw.get("qdrant", {})
     return Settings(
-        db_path=Path(raw.get("db_path", Settings.db_path)),
+        db_path=Path(raw.get("db_path", Settings.db_path)).expanduser(),
         embedder=EmbedderSettings(
             model=emb.get("model", EmbedderSettings.model),
             dim=int(emb.get("dim", EmbedderSettings.dim)),
@@ -101,8 +109,12 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
         ),
         reranker=RerankerSettings(
             model=rrk.get("model", RerankerSettings.model),
-            enabled=bool(rrk.get("enabled", RerankerSettings.enabled)),
-            preload=bool(rrk.get("preload", RerankerSettings.preload)),
+            enabled=_require_bool(
+                rrk.get("enabled", RerankerSettings.enabled), "reranker.enabled"
+            ),
+            preload=_require_bool(
+                rrk.get("preload", RerankerSettings.preload), "reranker.preload"
+            ),
             candidates=int(rrk.get("candidates", RerankerSettings.candidates)),
             batch_size=int(rrk.get("batch_size", RerankerSettings.batch_size)),
             device=rrk.get("device", RerankerSettings.device),
@@ -112,7 +124,9 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
             timeout_s=float(stru.get("timeout_s", StructuralSettings.timeout_s)),
         ),
         git=GitSettings(
-            fast_path=bool(git.get("fast_path", GitSettings.fast_path)),
+            fast_path=_require_bool(
+                git.get("fast_path", GitSettings.fast_path), "git.fast_path"
+            ),
         ),
         qdrant=QdrantSettings(
             url=qdr.get("url", QdrantSettings.url),

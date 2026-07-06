@@ -20,6 +20,7 @@ candidates, not ground truth — callers read the live file before acting.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .embedder import Embedder
@@ -51,13 +52,16 @@ async def search_code(
     apply_rerank = (
         rerank if rerank is not None else reranker is not None
     ) and reranker is not None
-    hits = store.search(
+    pool = max(top_k, candidates) if apply_rerank else top_k
+    hits = await asyncio.to_thread(
+        store.search,
         project_id,
         dense_vector=dense_vector,
         query_text=query,
-        top_k=max(top_k, candidates) if apply_rerank else top_k,
+        top_k=pool,
         language=language,
         channel=channel,
+        prefetch_limit=pool,
         with_text=apply_rerank,
     )
     if apply_rerank and hits:

@@ -13,11 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from noesis.api.security import verify_local_origin
 from noesis.core import dashboard as core_dashboard
 from noesis.core.state import MixedModelError
 
@@ -168,12 +169,19 @@ async def api_set_flags(
     return summary
 
 
-@dashboard_router.post("/api/projects/{project_id}/reindex-pending", status_code=202)
+@dashboard_router.post(
+    "/api/projects/{project_id}/reindex-pending",
+    status_code=202,
+    dependencies=[Depends(verify_local_origin)],
+)
 async def api_reindex_pending(project_id: str, request: Request) -> dict[str, Any]:
     try:
         result = core_dashboard.reindex_pending(request.app.state.ctx, project_id)
-    except ValueError as exc:  # mixed-model / missing root guard
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # Same typed split as /projects (M3): mixed-model → 409, a root that
+        # vanished since registration → 400.
+        status = 409 if isinstance(exc, MixedModelError) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
     return result

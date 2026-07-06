@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -146,6 +147,16 @@ class WatcherManager:
             watch = self._watches.pop(project_id, None)
             if watch is not None and self._observer is not None and watch.handle:
                 self._observer.unschedule(watch.handle)
+            # Drop any buffered state for this project (H2). delete_project
+            # calls this right before removing the projects row; a leftover
+            # bucket would then fail pending_changes' FK on the next flush and,
+            # because the accumulator is only cleared at the end of _flush,
+            # re-raise every tick — wedging flush and auto-reindex for ALL
+            # projects. Safe for a plain unwatch too: unbuffered events just
+            # stop being recorded, which is what disabling the watch means.
+            self._accum.pop(project_id, None)
+            self._seen_since_flush.pop(project_id, None)
+            self._last_event.pop(project_id, None)
 
     def watching(self, project_id: str) -> bool:
         return project_id in self._watches
@@ -223,16 +234,26 @@ class WatcherManager:
         for project_id, bucket in self._accum.items():
             if not bucket:
                 continue
-            state.upsert_pending_changes(
-                self._ctx.conn, project_id, list(bucket.items())
-            )
-            seen = self._seen_since_flush.get(project_id, 0)
-            state.bump_watcher_stats(
-                self._ctx.conn,
-                project_id,
-                events_seen=seen,
-                events_coalesced=max(0, seen - len(bucket)),
-            )
+            # Per-project fault isolation (H2): a project deleted between
+            # buffering and flush trips pending_changes' FK to projects. Catch
+            # it per bucket and drop that project's events so one dead project
+            # can never wedge the whole flush loop (and _maybe_auto_reindex
+            # after it) on every tick.
+            try:
+                state.upsert_pending_changes(
+                    self._ctx.conn, project_id, list(bucket.items())
+                )
+                seen = self._seen_since_flush.get(project_id, 0)
+                state.bump_watcher_stats(
+                    self._ctx.conn,
+                    project_id,
+                    events_seen=seen,
+                    events_coalesced=max(0, seen - len(bucket)),
+                )
+            except sqlite3.IntegrityError:
+                logger.warning(
+                    "dropping buffered events for removed project %s", project_id
+                )
         self._accum.clear()
         self._seen_since_flush.clear()
 
@@ -254,18 +275,30 @@ class WatcherManager:
         if project is None:
             return
         try:
-            jobs.launch_index_run(
+            result = jobs.launch_index_run(
                 self._ctx,
                 project["root_path"],
                 paths=paths,
                 triggered_by="watcher",
             )
-            state.bump_watcher_stats(self._ctx.conn, project_id, auto_runs=1)
-            logger.info(
-                "auto-reindex launched for %s (%d pending)", project_id, len(paths)
-            )
         except ValueError as exc:
             logger.warning("auto-reindex skipped for %s: %s", project_id, exc)
+            return
+        if result.get("status") == "already_running":
+            # The launch was a no-op — a run is already in flight (H3). If we
+            # let this pass as "fired", the pending files would sit until the
+            # user touches another file. Re-arm the quiet-period trigger so
+            # _maybe_auto_reindex retries after the current run finishes.
+            # Do NOT bump auto_runs: no new run started.
+            self._last_event[project_id] = time.monotonic()
+            logger.info(
+                "auto-reindex deferred for %s: a run is already in flight", project_id
+            )
+            return
+        state.bump_watcher_stats(self._ctx.conn, project_id, auto_runs=1)
+        logger.info(
+            "auto-reindex launched for %s (%d pending)", project_id, len(paths)
+        )
 
 
 class _Handler:

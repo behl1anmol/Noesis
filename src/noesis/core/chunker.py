@@ -78,8 +78,10 @@ def chunk_file(
     chunks: list[Chunk] = []
     for window in _merge(pieces, prefix):
         start, end = window[0].start, window[-1].end
-        first = window[0]
-        named = next((p for p in window if p.named), first)
+        source = next(
+            (p for p in window if p.symbol is not None),
+            next((p for p in window if p.named and p.kind != "comment"), window[0]),
+        )
         chunks.append(
             Chunk(
                 text=data[start:end].decode("utf-8"),
@@ -87,8 +89,8 @@ def chunk_file(
                 start_line=data.count(b"\n", 0, start) + 1,
                 end_line=data.count(b"\n", 0, end - 1) + 1,
                 language=language,
-                node_type=named.kind,
-                symbol_name=first.symbol,
+                node_type=source.kind,
+                symbol_name=source.symbol,
                 file_hash=file_hash,
             )
         )
@@ -102,13 +104,22 @@ def _token_estimate(text: str) -> int:
 
 
 def _nws_prefix(data: bytes) -> list[int]:
-    """prefix[i] = count of non-whitespace bytes in data[:i]."""
+    """prefix[i] = count of non-whitespace characters in data[:i].
+
+    Counted per character (matching _token_estimate's char-based budget) but
+    indexed by byte offset, since piece/line bounds are byte offsets. Every
+    boundary queried lands on a character start; byte positions interior to a
+    multi-byte character are filled monotonically but never read."""
     prefix = [0] * (len(data) + 1)
     total = 0
-    for i, byte in enumerate(data):
-        if byte not in _WS_BYTES:
+    pos = 0
+    for ch in data.decode("utf-8"):
+        nxt = pos + len(ch.encode("utf-8"))
+        if not ch.isspace():
             total += 1
-        prefix[i + 1] = total
+        for j in range(pos + 1, nxt + 1):
+            prefix[j] = total
+        pos = nxt
     return prefix
 
 

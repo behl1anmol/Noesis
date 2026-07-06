@@ -321,6 +321,7 @@ class VectorStore:
                 with_payload=True,
             )
         else:
+            effective_prefetch = max(prefetch_limit, top_k)
             response = self._client.query_points(
                 collection_name=self._collection,
                 prefetch=[
@@ -328,7 +329,7 @@ class VectorStore:
                         query=dense_vector,
                         using=DENSE_VECTOR_NAME,
                         filter=query_filter,
-                        limit=prefetch_limit,
+                        limit=effective_prefetch,
                     ),
                     models.Prefetch(
                         query=models.Document(
@@ -336,7 +337,7 @@ class VectorStore:
                         ),
                         using=SPARSE_VECTOR_NAME,
                         filter=query_filter,
-                        limit=prefetch_limit,
+                        limit=effective_prefetch,
                     ),
                 ],
                 query=models.FusionQuery(fusion=models.Fusion.RRF),

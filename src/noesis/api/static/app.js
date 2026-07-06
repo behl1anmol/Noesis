@@ -369,7 +369,7 @@
 
   function dayKey(d) {
     const p = (n) => String(n).padStart(2, "0");
-    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+    return d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate());
   }
   function dayLabel(key) {
     const d = new Date(key + "T00:00:00");
@@ -386,8 +386,14 @@
       if (t > endT) endT = t;
     });
     const out = [];
-    for (let i = days - 1; i >= 0; i--) {
-      const key = dayKey(new Date(endT - i * 86400000));
+    const d = new Date(endT);
+    const keys = [];
+    for (let i = 0; i < days; i++) {
+      keys.push(dayKey(d));
+      d.setDate(d.getDate() - 1);
+    }
+    keys.reverse();
+    for (const key of keys) {
       out.push(map[key] || { day: key });
     }
     return out;
@@ -732,7 +738,7 @@
         close();
         form.reset();
         previewBox.hidden = true;
-        schedule(indexNow);
+        location.reload();
       } catch (e) { setErr(e.message); }
       submitting = false;
       form.classList.remove("busy");

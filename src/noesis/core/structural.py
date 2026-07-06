@@ -26,7 +26,8 @@ from ast_grep_py import SgRoot
 
 from noesis.core import state
 from noesis.core.config import StructuralSettings
-from noesis.core.discovery import discover_files
+from noesis.core.discovery import DiscoveryConfig, discover_files
+from noesis.core.indexer import discovery_config_for_project
 from noesis.core.languages import LANGUAGE_MAP, detect_language
 
 # Metavariable names are extracted from the pattern text because ast-grep-py
@@ -117,6 +118,7 @@ def _scan_sync(
     paths: list[str] | None,
     max_results: int,
     timeout_s: float,
+    discovery_config: DiscoveryConfig | None,
 ) -> StructuralResult:
     mapping = LANGUAGE_MAP[language]
     single_vars, multi_vars = _meta_var_names(pattern)
@@ -124,7 +126,7 @@ def _scan_sync(
 
     candidates = [
         rel
-        for rel in discover_files(root_path)
+        for rel in discover_files(root_path, discovery_config)
         if detect_language(rel) == language
         and (paths is None or any(rel == p or rel.startswith(p + "/") for p in paths))
     ]
@@ -196,6 +198,7 @@ async def structural_search(
     project = state.get_project(conn, project_id)
     if project is None:
         raise StructuralSearchError("unknown_project", f"unknown project_id {project_id!r}")
+    cfg_discovery = discovery_config_for_project(conn, project_id)
     if language not in LANGUAGE_MAP:
         raise StructuralSearchError(
             "unsupported_language",
@@ -219,4 +222,5 @@ async def structural_search(
         norm_paths,
         limit,
         cfg.timeout_s,
+        cfg_discovery,
     )

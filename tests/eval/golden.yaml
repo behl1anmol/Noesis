@@ -372,6 +372,8 @@ structural_patterns:
       src/noesis/api/routes.py: 7
       # M8 dashboard adapter + ADR-42 register/browse/preview + ADR-43 delete.
       src/noesis/api/dashboard.py: 10
+      # L5: the localhost-CSRF guard raises one 403.
+      src/noesis/api/security.py: 1
 
   - id: sp-07
     pattern: "time.monotonic()"
@@ -380,7 +382,8 @@ structural_patterns:
       src/noesis/core/structural.py: 2
       # M8: live progress clock (jobs) + debounce/quiet clocks (watcher).
       src/noesis/core/jobs.py: 2
-      src/noesis/core/watcher.py: 2
+      # H3 added the re-arm clock in _launch_scoped, bringing watcher to 3.
+      src/noesis/core/watcher.py: 3
 
   - id: sp-08
     pattern: "$LOOP.run_in_executor($$$ARGS)"
