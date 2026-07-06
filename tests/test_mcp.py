@@ -216,7 +216,9 @@ def test_launch_dedups_while_a_run_is_in_flight(ctx, project_dir):
     pid = state.register_project(ctx.conn, str(project_dir), ctx.embedder.model_id)
     running = state.start_run(ctx.conn, pid)  # simulate an in-flight run
     body = jobs.launch_index_run(ctx, str(project_dir))
-    assert body == {"project_id": pid, "run_id": running, "status": "accepted"}
+    # The skip is now distinguishable from a real launch (H3): callers that
+    # scope/retry (the watcher) need to know their launch was a no-op.
+    assert body == {"project_id": pid, "run_id": running, "status": "already_running"}
     assert not ctx.jobs  # no second background task spawned
 
 

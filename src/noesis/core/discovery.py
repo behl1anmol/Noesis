@@ -61,8 +61,8 @@ SECRET_SKIP_PATTERNS: tuple[str, ...] = (
     "*.tfvars",
     "secrets.*",
     "*.secret",
-    ".aws/**",
-    ".ssh/**",
+    "**/.aws/**",
+    "**/.ssh/**",
 )
 
 _SECRET_SPEC = GitIgnoreSpec.from_lines(SECRET_SKIP_PATTERNS)
@@ -161,10 +161,21 @@ def discover_files(root: str | Path, config: DiscoveryConfig | None = None) -> l
         else None
     )
     results: list[str] = []
+    # When following symlinks, os.walk has no cycle/duplicate guard. Track
+    # directory identity (st_dev, st_ino) and prune any dir already walked so
+    # a self-referencing link cannot loop forever and a link into an
+    # already-walked subtree cannot index files twice.
+    visited: set[tuple[int, int]] = set()
 
     for dirpath, dirnames, filenames in os.walk(
         root_path, topdown=True, followlinks=cfg.follow_symlinks
     ):
+        if cfg.follow_symlinks:
+            try:
+                st = os.stat(dirpath)
+                visited.add((st.st_dev, st.st_ino))
+            except OSError:
+                pass
         dir_rel = PurePosixPath(Path(dirpath).relative_to(root_path)).as_posix()
         if dir_rel == ".":
             dir_rel = ""
@@ -182,6 +193,15 @@ def discover_files(root: str | Path, config: DiscoveryConfig | None = None) -> l
                 continue
             if not cfg.follow_symlinks and (Path(dirpath) / d).is_symlink():
                 continue
+            if cfg.follow_symlinks:
+                try:
+                    cst = os.stat(Path(dirpath) / d)
+                except OSError:
+                    kept_dirs.append(d)
+                    continue
+                if (cst.st_dev, cst.st_ino) in visited:
+                    continue
+                visited.add((cst.st_dev, cst.st_ino))
             kept_dirs.append(d)
         dirnames[:] = kept_dirs
 

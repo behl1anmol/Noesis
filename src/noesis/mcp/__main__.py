@@ -14,9 +14,9 @@ from typing import AsyncIterator
 
 from fastmcp import FastMCP
 
-from noesis.app import AppContext, build_runtime_context, close_runtime_context
 from noesis.core.config import load_settings
 from noesis.mcp.server import build_mcp
+from noesis.runtime import AppContext, build_runtime_context, close_runtime_context
 
 
 def main() -> None:
@@ -29,7 +29,7 @@ def main() -> None:
         try:
             yield
         finally:
-            close_runtime_context(ctx_holder[0])
+            await close_runtime_context(ctx_holder[0])
 
     mcp = build_mcp(lambda: ctx_holder[0], lifespan=lifespan)
     mcp.run()  # stdio transport is the FastMCP default

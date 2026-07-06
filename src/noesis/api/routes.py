@@ -14,11 +14,13 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from noesis.api.security import verify_local_origin
 from noesis.core import jobs, state, telemetry
 from noesis.core.retriever import search_code
+from noesis.core.state import MixedModelError
 from noesis.core.structural import StructuralSearchError, structural_search
 from noesis.core.vectorstore import SearchChannel
 
@@ -58,8 +60,13 @@ async def register_and_index(req: RegisterProjectRequest, request: Request) -> d
     ctx = request.app.state.ctx
     try:
         return jobs.launch_index_run(ctx, req.root_path)
-    except ValueError as exc:  # mixed-model guard
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # Typed, not text-matched (M3): the mixed-model guard is a real 409
+        # Conflict ("re-index required"), but a missing/non-directory path is
+        # a 400 Bad Request — mapping both to 409 sent agents down the wrong
+        # recovery path for a typo'd root_path.
+        status = 409 if isinstance(exc, MixedModelError) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.get("/projects")
@@ -76,7 +83,11 @@ async def project_status(project_id: str, request: Request) -> dict[str, Any]:
     return jobs.index_status(ctx, project_id)
 
 
-@router.post("/projects/{project_id}/reindex", status_code=202)
+@router.post(
+    "/projects/{project_id}/reindex",
+    status_code=202,
+    dependencies=[Depends(verify_local_origin)],
+)
 async def reindex(project_id: str, request: Request) -> dict[str, str]:
     ctx = request.app.state.ctx
     project = state.get_project(ctx.conn, project_id)
@@ -84,8 +95,10 @@ async def reindex(project_id: str, request: Request) -> dict[str, str]:
         raise HTTPException(status_code=404, detail="unknown project_id")
     try:
         return jobs.launch_index_run(ctx, project["root_path"])
-    except ValueError as exc:  # mixed-model guard
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # Mixed-model guard → 409; a vanished root_path → 400 (M3).
+        status = 409 if isinstance(exc, MixedModelError) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}")

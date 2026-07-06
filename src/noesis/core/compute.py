@@ -34,9 +34,18 @@ def resolve_device(configured: str | None = None) -> str:
         return configured
     import torch
 
+    try:
+        # A torch build without the mps backend raises AttributeError on the
+        # probe; treat that as "mps not available" so device=None falls
+        # through to cpu instead of crashing every model load (matches
+        # available_devices, PR #10 review).
+        mps_available = torch.backends.mps.is_available()
+    except Exception:  # noqa: BLE001 — availability probe must not raise
+        mps_available = False
+
     if torch.cuda.is_available():
         device = "cuda"
-    elif torch.backends.mps.is_available():
+    elif mps_available:
         device = "mps"
     else:
         device = "cpu"

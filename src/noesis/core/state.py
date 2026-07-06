@@ -8,6 +8,7 @@ functions commit before returning; callers never manage transactions.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -112,7 +113,92 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("projects", "max_file_bytes", "INTEGER"),
     ("projects", "follow_symlinks", "INTEGER NOT NULL DEFAULT 0"),
     ("projects", "extra_ignores", "TEXT"),
+    # H1: working-tree-dirty paths as of the last anchor advance (JSON list).
+    # Re-admitted as candidates on the next run so a file dirty at run N is
+    # re-examined at run N+1 even after being reverted to HEAD.
+    ("projects", "dirty_paths", "TEXT"),
+    # M7: which process owns a run, so crash recovery fails only DEAD runs —
+    # a second process sharing the DB must not mark the first's live run
+    # failed (and thereby disarm the concurrent-run guard).
+    ("index_runs", "owner", "TEXT"),
 )
+
+
+def _boot_token() -> str:
+    """A token stable within one OS boot and different across reboots, so an
+    owner identity survives PID recycling across reboots. Linux exposes it
+    directly; elsewhere we fall back to empty and rely on PID liveness alone
+    (local single-machine service, ADR-25)."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _proc_start_time(pid: int) -> str:
+    """Process start time (clock ticks since boot) from ``/proc/<pid>/stat``
+    field 22 — distinguishes a recycled PID from the original one (PR review).
+    Empty when unavailable (process gone, or non-Linux): liveness then
+    degrades to a bare PID probe with a documented residual race."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return ""
+    # comm (field 2) is parenthesised and may contain spaces/parens, so split
+    # the tail after the final ')': tail[0] is state (field 3), and starttime
+    # (field 22) is therefore tail[19].
+    rparen = data.rfind(b")")
+    if rparen == -1:
+        return ""
+    tail = data[rparen + 2 :].split()
+    if len(tail) < 20:
+        return ""
+    return tail[19].decode("ascii", "replace")
+
+
+# Per-process owner identity: <boot>:<pid>:<starttime>. Computed once — all
+# three components are stable for the life of the process. starttime closes
+# same-boot PID recycling: a reused PID belongs to a process with a different
+# start time, so its stamped runs read as dead.
+_OWNER = f"{_boot_token()}:{os.getpid()}:{_proc_start_time(os.getpid())}"
+
+
+def _owner_alive(owner: str) -> bool:
+    """True if the process that stamped *owner* is still running (M7). A
+    different boot token means a reboot happened → dead. Same boot → probe the
+    PID with signal 0, then confirm the live process's start time matches, so
+    a PID recycled within one boot is not mistaken for the original owner."""
+    parts = owner.split(":")
+    if len(parts) < 2:
+        return False
+    boot, pid_s = parts[0], parts[1]
+    start = parts[2] if len(parts) > 2 else ""
+    if boot != _boot_token():
+        return False
+    try:
+        pid = int(pid_s)
+    except ValueError:
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # exists but owned by another user — /proc/<pid>/stat still readable
+    except OSError:
+        return False
+    # PID exists: guard against same-boot recycling. If we recorded a start
+    # time and the live process reports a different one, the original owner is
+    # dead and its PID was reused → treat as dead. If either is unavailable
+    # (non-Linux), fall back to "alive" (the documented residual race).
+    if start:
+        current = _proc_start_time(pid)
+        if current and current != start:
+            return False
+    return True
 
 
 class MixedModelError(ValueError):
@@ -163,13 +249,31 @@ def register_project(
         return row["id"]
     project_id = uuid.uuid4().hex
     now = _now()
-    conn.execute(
-        "INSERT INTO projects (id, root_path, embedding_model, created_at, updated_at)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (project_id, resolved, embedding_model, now, now),
-    )
-    conn.commit()
-    return project_id
+    try:
+        conn.execute(
+            "INSERT INTO projects (id, root_path, embedding_model, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (project_id, resolved, embedding_model, now, now),
+        )
+        conn.commit()
+        return project_id
+    except sqlite3.IntegrityError:
+        # Concurrent registration of the same root_path lost the UNIQUE race
+        # (L4). Return the winner's id idempotently instead of surfacing a raw
+        # IntegrityError, re-checking the model just as the fast path does.
+        conn.rollback()
+        row = conn.execute(
+            "SELECT id, embedding_model FROM projects WHERE root_path = ?", (resolved,)
+        ).fetchone()
+        if row is None:
+            raise
+        if row["embedding_model"] != embedding_model:
+            raise MixedModelError(
+                f"project at {resolved} is indexed with model "
+                f"{row['embedding_model']!r}; refusing to serve mixed-model state. "
+                f"Re-register requires a full re-index with {embedding_model!r}."
+            ) from None
+        return row["id"]
 
 
 def get_project(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row | None:
@@ -183,17 +287,43 @@ def list_projects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def set_last_indexed_commit(
-    conn: sqlite3.Connection, project_id: str, commit: str
+    conn: sqlite3.Connection,
+    project_id: str,
+    commit: str,
+    *,
+    dirty_paths: Iterable[str] | None = None,
 ) -> None:
     """Record the git fast-path anchor. Callers must invoke this only after
     a run completes successfully (§3.2 rule 4) — an anchor from a failed
     run would let the next fast path skip files the failed run never
-    finished indexing."""
-    conn.execute(
-        "UPDATE projects SET last_indexed_commit = ?, updated_at = ? WHERE id = ?",
-        (commit, _now(), project_id),
-    )
+    finished indexing.
+
+    *dirty_paths* (when provided) records the working-tree-dirty set as of
+    this anchor so the next run re-admits them as candidates (H1). Passing
+    an empty iterable clears the stored set; None leaves it untouched."""
+    if dirty_paths is None:
+        conn.execute(
+            "UPDATE projects SET last_indexed_commit = ?, updated_at = ? WHERE id = ?",
+            (commit, _now(), project_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET last_indexed_commit = ?, dirty_paths = ?,"
+            " updated_at = ? WHERE id = ?",
+            (commit, json.dumps(sorted(dirty_paths)), _now(), project_id),
+        )
     conn.commit()
+
+
+def get_dirty_paths(conn: sqlite3.Connection, project_id: str) -> frozenset[str]:
+    """The dirty-path set persisted at the last anchor advance (H1). Empty
+    when unset or the project is unknown."""
+    row = conn.execute(
+        "SELECT dirty_paths FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None or row["dirty_paths"] is None:
+        return frozenset()
+    return frozenset(json.loads(row["dirty_paths"]))
 
 
 def get_file_states(conn: sqlite3.Connection, project_id: str) -> dict[str, str]:
@@ -238,20 +368,32 @@ def delete_files(
 
 
 def fail_orphaned_runs(conn: sqlite3.Connection) -> int:
-    """Mark every 'running' run as failed. Called at process startup: a
-    fresh process has no live index tasks by definition, so any 'running'
-    row is a crash leftover — and the launch guard would otherwise return
-    that dead run id forever, silently no-opping every future launch
-    (PR #10 review). If a second process shares the DB mid-run, its live
-    run gets mislabelled transiently and self-heals: finish_run overwrites
-    the status when that run completes."""
-    cur = conn.execute(
+    """Mark 'running' runs whose OWNING PROCESS IS DEAD as failed. Called at
+    process startup to clear crash leftovers — the launch guard would
+    otherwise return a dead run id forever, silently no-opping every future
+    launch (PR #10 review).
+
+    Owner-gated (M7): in the documented two-process deployment (HTTP + stdio
+    MCP sharing the DB, m6 guide) a starting process must NOT fail the other
+    process's LIVE run — that both loses the run and disarms the
+    concurrent-run guard. Rows with no owner (pre-M7 DBs) predate ownership
+    tracking and are treated as dead."""
+    rows = conn.execute(
+        "SELECT id, owner FROM index_runs WHERE status = 'running'"
+    ).fetchall()
+    dead = [
+        row["id"] for row in rows if not row["owner"] or not _owner_alive(row["owner"])
+    ]
+    if not dead:
+        return 0
+    now = _now()
+    conn.executemany(
         "UPDATE index_runs SET status = 'failed', error = 'interrupted',"
-        " finished_at = ? WHERE status = 'running'",
-        (_now(),),
+        " finished_at = ? WHERE id = ?",
+        [(now, run_id) for run_id in dead],
     )
     conn.commit()
-    return cur.rowcount
+    return len(dead)
 
 
 def start_run(
@@ -259,9 +401,9 @@ def start_run(
 ) -> str:
     run_id = uuid.uuid4().hex
     conn.execute(
-        "INSERT INTO index_runs (id, project_id, status, started_at, triggered_by)"
-        " VALUES (?, ?, 'running', ?, ?)",
-        (run_id, project_id, _now(), triggered_by),
+        "INSERT INTO index_runs (id, project_id, status, started_at, triggered_by,"
+        " owner) VALUES (?, ?, 'running', ?, ?, ?)",
+        (run_id, project_id, _now(), triggered_by, _OWNER),
     )
     conn.commit()
     return run_id

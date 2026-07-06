@@ -138,6 +138,7 @@ async def execute_run(
         # re-examined next run (the safe direction). Every fallback is
         # silent here and logged in gitfast; hash stays the truth.
         head: str | None = None
+        git_info: "gitfast.GitCandidates | None" = None
         candidates: "gitfast.CandidatePathSet | frozenset[str] | None" = None
         if paths is not None:
             candidates = frozenset(paths)
@@ -156,6 +157,19 @@ async def execute_run(
                 # Full walk this run, but still record HEAD (on success) so
                 # the next run has an anchor to fast-path from (rule 4).
                 head = gitfast.resolve_head(root_path)
+
+        # H1: re-admit files that were working-tree-dirty at the last anchor
+        # advance. If such a file was reverted to HEAD since, neither the diff
+        # nor `git status` surfaces it now, yet its stored hash is the stale
+        # dirty content — carrying it forward forever. Unioning the persisted
+        # dirty set only widens the candidate set (rule 1 safe) and forces a
+        # re-hash that detects the revert.
+        if candidates is not None:
+            prior_dirty = state.get_dirty_paths(conn, project_id)
+            if prior_dirty:
+                candidates = gitfast.CandidatePathSet(
+                    set(candidates) | set(prior_dirty)
+                )
 
         fast_path_active = git_fast_path and candidates is not None
 
@@ -238,7 +252,17 @@ async def execute_run(
         # the failed files' state rows are stale, and anchoring past them
         # would let the next fast path carry them forward as unchanged.
         if head is not None and not file_errors:
-            state.set_last_indexed_commit(conn, project_id, head)
+            # Persist the working-tree-dirty set with the anchor (H1). The
+            # fast path already captured it at run start (git_info); a
+            # full-walk run re-queries `git status` here.
+            new_dirty = (
+                git_info.dirty_paths
+                if git_info is not None
+                else (gitfast.status_dirty_paths(root_path) or frozenset())
+            )
+            state.set_last_indexed_commit(
+                conn, project_id, head, dirty_paths=new_dirty
+            )
         return IndexResult(
             project_id=project_id,
             run_id=run_id,

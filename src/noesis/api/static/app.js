@@ -369,25 +369,40 @@
 
   function dayKey(d) {
     const p = (n) => String(n).padStart(2, "0");
-    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+    return d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate());
   }
   function dayLabel(key) {
-    const d = new Date(key + "T00:00:00");
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    // Parse the key as UTC and format in UTC so the label names the same
+    // calendar day as the (UTC) key, for viewers on any offset.
+    const d = new Date(key + "T00:00:00Z");
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
   }
 
-  // Continuous last-N-days axis; missing days become zero rows.
+  // Continuous last-N-days axis; missing days become zero rows. Everything is
+  // in UTC to match the server's UTC day buckets (substr(ts,1,10)); mixing a
+  // local base/step with UTC keys shifted the axis off by a day east of UTC
+  // and could dup/skip a day across DST boundaries.
   function fillDays(perDay, days) {
     const map = {};
-    let endT = new Date().setHours(0, 0, 0, 0);
+    let endT = new Date().setUTCHours(0, 0, 0, 0);
     (perDay || []).forEach((r) => {
       map[r.day] = r;
-      const t = new Date(r.day + "T00:00:00").getTime();
+      const t = new Date(r.day + "T00:00:00Z").getTime();
       if (t > endT) endT = t;
     });
     const out = [];
-    for (let i = days - 1; i >= 0; i--) {
-      const key = dayKey(new Date(endT - i * 86400000));
+    const d = new Date(endT);
+    const keys = [];
+    for (let i = 0; i < days; i++) {
+      keys.push(dayKey(d));
+      d.setUTCDate(d.getUTCDate() - 1);
+    }
+    keys.reverse();
+    for (const key of keys) {
       out.push(map[key] || { day: key });
     }
     return out;
@@ -732,7 +747,7 @@
         close();
         form.reset();
         previewBox.hidden = true;
-        schedule(indexNow);
+        location.reload();
       } catch (e) { setErr(e.message); }
       submitting = false;
       form.classList.remove("busy");

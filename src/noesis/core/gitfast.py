@@ -86,10 +86,15 @@ class GitCandidates:
     ``candidates`` holds project-root-relative POSIX paths (same shape as
     discovery output); ``head_commit`` is the HEAD sha the diff was taken
     against — the anchor to store once the run completes (rule 4).
+    ``dirty_paths`` is the working-tree-dirty subset (staged + unstaged +
+    untracked, project-relative) — persisted with the anchor so a file
+    dirty at run N stays a candidate at run N+1 even after being reverted
+    to HEAD (H1).
     """
 
     candidates: CandidatePathSet
     head_commit: str
+    dirty_paths: frozenset[str] = frozenset()
 
 
 def _git(root: str | Path, *args: str) -> subprocess.CompletedProcess[bytes] | None:
@@ -172,10 +177,31 @@ def compute_candidates(root: str | Path, anchor: str) -> GitCandidates | None:
     if status is None or status.returncode != 0:
         return _fallback("git status failed")
 
-    paths = _parse_diff_z(diff.stdout) | _parse_status_z(status.stdout)
+    diff_paths = _parse_diff_z(diff.stdout)
+    status_paths = _parse_status_z(status.stdout)
     return GitCandidates(
-        candidates=CandidatePathSet(_strip_prefix(paths, prefix)), head_commit=head
+        candidates=CandidatePathSet(_strip_prefix(diff_paths | status_paths, prefix)),
+        head_commit=head,
+        dirty_paths=frozenset(_strip_prefix(status_paths, prefix)),
     )
+
+
+def status_dirty_paths(root: str | Path) -> frozenset[str] | None:
+    """Working-tree-dirty paths (staged + unstaged + untracked), project-root
+    relative. Persisted alongside the anchor on a full-walk run so the H1
+    revert case is covered even when no git diff was computed. Returns None
+    when *root* is not a usable git worktree (caller stores no dirty set)."""
+    proc = _git(root, "rev-parse", "--show-prefix")
+    if proc is None or proc.returncode != 0:
+        return None
+    lines = os.fsdecode(proc.stdout).splitlines()
+    prefix = lines[0] if lines else ""
+    status = _git(
+        root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"
+    )
+    if status is None or status.returncode != 0:
+        return None
+    return frozenset(_strip_prefix(_parse_status_z(status.stdout), prefix))
 
 
 def _fallback(reason: str) -> None:

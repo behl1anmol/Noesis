@@ -295,6 +295,13 @@ def test_orphaned_running_runs_failed_and_unblock_launch(client, repo):
     ctx = client.app.state.ctx
     pid = state.register_project(ctx.conn, repo, ctx.embedder.model_id)
     dead_run = state.start_run(ctx.conn, pid)  # simulates a crash leftover
+    # Owner-gated recovery (M7) only fails runs whose process is dead; stamp
+    # this row with an owner from a different boot so it reads as a genuine
+    # crash leftover rather than this live test process's run.
+    ctx.conn.execute(
+        "UPDATE index_runs SET owner = ? WHERE id = ?", ("dead-boot:1", dead_run)
+    )
+    ctx.conn.commit()
     assert state.fail_orphaned_runs(ctx.conn) == 1
     row = ctx.conn.execute(
         "SELECT status, error FROM index_runs WHERE id = ?", (dead_run,)

@@ -13,125 +13,31 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from sqlite3 import Connection
 from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastmcp.utilities.lifespan import combine_lifespans
-from qdrant_client import QdrantClient
 
 from noesis.api.dashboard import STATIC_DIR, dashboard_router
 from noesis.api.routes import router
-from noesis.core import state
-from noesis.core.config import Settings, StructuralSettings, load_settings
-from noesis.core.embedder import Embedder, LocalSTEmbedder
-from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
-from noesis.core.vectorstore import VectorStore
+from noesis.core.config import Settings, load_settings
 from noesis.mcp import build_mcp
+from noesis.runtime import (
+    AppContext,
+    build_runtime_context,
+    close_runtime_context,
+)
 
-
-@dataclass
-class AppContext:
-    """Core resources shared by all adapters. ``reranker`` is None when
-    ``reranker.enabled=false`` — the kill switch (§3.3) removes the model
-    entirely; ``rerank_candidates`` is the fused-candidate depth reranked
-    per request (config ``reranker.candidates``)."""
-
-    conn: Connection
-    store: VectorStore
-    embedder: Embedder
-    reranker: Reranker | None = None
-    rerank_candidates: int = 50
-    structural: StructuralSettings = field(default_factory=StructuralSettings)
-    git_fast_path: bool = True
-    jobs: dict[str, asyncio.Task] = field(default_factory=dict)
-    # M8 (ADR-40): live run progress (jobs.run_progress reads it) and the
-    # watcher manager, both owned by the lifespan.
-    progress: dict[str, dict] = field(default_factory=dict)
-    watcher: object | None = None
-    # Effective device pins from config.toml, if any — the dashboard's
-    # device setting defers to them (operator config wins over UI state).
-    # Both tracked: a reranker-only pin must also block the UI, or
-    # set_compute_device would silently override it (PR #10 review).
-    config_device_pin: str | None = None
-    config_reranker_device_pin: str | None = None
-
-
-async def build_runtime_context(cfg: Settings) -> AppContext:
-    """Construct production core resources from settings. Shared by the
-    FastAPI lifespan and the stdio MCP entry point (noesis.mcp.__main__) —
-    one build path, so the two transports cannot diverge on wiring."""
-    # Same persistent fastembed cache default as noesis.prefetch —
-    # without it, the BM25 assets land in the system tmp dir and
-    # get re-fetched after a reboot (runtime network, ADR-25-adjacent).
-    import os
-
-    from noesis.prefetch import FASTEMBED_CACHE_DEFAULT, FASTEMBED_CACHE_ENV
-
-    os.environ.setdefault(FASTEMBED_CACHE_ENV, FASTEMBED_CACHE_DEFAULT)
-    conn = state.connect(cfg.db_path)
-    state.init_db(conn)
-    # Crash recovery: a fresh process has no live index tasks, so any
-    # 'running' row is a leftover that would jam the launch guard forever.
-    orphaned = state.fail_orphaned_runs(conn)
-    if orphaned:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "marked %d orphaned 'running' index run(s) as failed (interrupted)",
-            orphaned,
-        )
-    # Device precedence (ADR-40): an explicit config.toml pin wins (operator
-    # config is never second-guessed by UI state); otherwise the dashboard's
-    # persisted app_settings choice; otherwise auto-detect (None).
-    stored_device = state.get_setting(conn, "compute_device")
-    if stored_device == "auto":
-        stored_device = None
-    embedder_device = cfg.embedder.device or stored_device
-    reranker_device = cfg.reranker.device or stored_device
-    embedder = LocalSTEmbedder(
-        model_id=cfg.embedder.model,
-        dim=cfg.embedder.dim,
-        batch_size=cfg.embedder.batch_size,
-        device=embedder_device,
-    )
-    store = VectorStore(
-        QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
-    )
-    store.ensure_collection(embedder)
-    reranker: LocalCrossEncoderReranker | None = None
-    if cfg.reranker.enabled:
-        reranker = LocalCrossEncoderReranker(
-            model_id=cfg.reranker.model,
-            batch_size=cfg.reranker.batch_size,
-            device=reranker_device,
-        )
-        if cfg.reranker.preload:
-            await reranker.preload()
-    return AppContext(
-        conn=conn,
-        store=store,
-        embedder=embedder,
-        reranker=reranker,
-        rerank_candidates=cfg.reranker.candidates,
-        structural=cfg.structural,
-        git_fast_path=cfg.git.fast_path,
-        config_device_pin=cfg.embedder.device,
-        config_reranker_device_pin=cfg.reranker.device,
-    )
-
-
-def close_runtime_context(ctx: AppContext) -> None:
-    """Tear down what build_runtime_context created: cancel orphan index
-    jobs, stop model worker threads, close SQLite."""
-    for task in list(ctx.jobs.values()):
-        task.cancel()
-    for resource in (ctx.embedder, ctx.reranker):
-        close = getattr(resource, "close", None)
-        if close is not None:
-            close()
-    ctx.conn.close()
+# AppContext/build_runtime_context/close_runtime_context live in
+# noesis.runtime (L3) and are re-exported here for the many callers (and
+# tests) that import them from noesis.app.
+__all__ = [
+    "AppContext",
+    "build_runtime_context",
+    "close_runtime_context",
+    "create_app",
+    "app",
+]
 
 
 def create_app(settings: Settings | None = None, ctx: AppContext | None = None) -> FastAPI:
@@ -157,10 +63,16 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
         finally:
             app.state.ctx.watcher.stop()
             if ctx is None:
-                close_runtime_context(app.state.ctx)
+                await close_runtime_context(app.state.ctx)
             else:
-                for task in list(app.state.ctx.jobs.values()):
+                # Test-supplied ctx owns its own conn/embedder teardown, but
+                # still await the cancelled index tasks so their run rows are
+                # marked failed before the fixture tears the ctx down (H5).
+                tasks = [t for t in app.state.ctx.jobs.values() if not t.done()]
+                for task in tasks:
                     task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
     # MCP tools resolve the context lazily (per call) from this app's
     # state — the closure is late-bound, and tools can only run after the

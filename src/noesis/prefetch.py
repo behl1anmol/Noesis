@@ -18,13 +18,25 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 # fastembed defaults its cache to the system tmp dir, which evaporates on
 # reboot and would trigger a re-download at runtime. Pin it somewhere
-# persistent unless the operator chose one. app.py sets the same default
-# so prefetch and serving resolve one cache.
+# persistent unless the operator chose one. app.py resolves the SAME default
+# so prefetch and serving share one cache.
 FASTEMBED_CACHE_ENV = "FASTEMBED_CACHE_PATH"
-FASTEMBED_CACHE_DEFAULT = "data/fastembed_cache"
+
+
+def default_fastembed_cache() -> str:
+    """Absolute, cwd-independent default cache dir for fastembed's BM25
+    assets (M8). The previous ``data/fastembed_cache`` default was resolved
+    against the current working directory, so prefetch (run from the repo)
+    and the stdio MCP server (spawned with the agent host's cwd) landed on
+    DIFFERENT caches — the first sparse search then re-downloaded assets at
+    runtime, or failed offline. Anchoring to the user cache dir makes every
+    process on the machine resolve one path regardless of cwd."""
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return str(Path(base).expanduser() / "noesis" / "fastembed")
 
 
 def prefetch_grammars() -> list[str]:
@@ -99,7 +111,7 @@ def prefetch_bm25() -> None:
 
 
 def main() -> int:
-    os.environ.setdefault(FASTEMBED_CACHE_ENV, FASTEMBED_CACHE_DEFAULT)
+    os.environ.setdefault(FASTEMBED_CACHE_ENV, default_fastembed_cache())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--skip-model", action="store_true", help="grammars only, no model weights"
