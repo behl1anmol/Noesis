@@ -397,4 +397,6 @@ structural_patterns:
     pattern: "uuid.uuid4()"
     language: python
     expected:
-      src/noesis/core/state.py: 3
+      # 4 call sites: register_project, upsert_file, start_run, and
+      # try_start_run's atomic BEGIN IMMEDIATE variant (2026-07-10 bug hunt).
+      src/noesis/core/state.py: 4
