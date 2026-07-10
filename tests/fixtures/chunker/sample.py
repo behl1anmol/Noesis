@@ -105,11 +105,15 @@ def render_report(rows: list[dict], *, title: str = "Report") -> str:
         missing = blank_counts.get(column, 0)
         if missing:
             share = 100.0 * missing / len(rows)
-            lines.append(f"note: column {column!r} blank in {missing} rows ({share:.1f}%)")
+            lines.append(
+                f"note: column {column!r} blank in {missing} rows ({share:.1f}%)"
+            )
     widest_column = max(columns, key=lambda column: widths[column])
     narrowest_column = min(columns, key=lambda column: widths[column])
     lines.append(f"widest column: {widest_column!r} ({widths[widest_column]} chars)")
-    lines.append(f"narrowest column: {narrowest_column!r} ({widths[narrowest_column]} chars)")
+    lines.append(
+        f"narrowest column: {narrowest_column!r} ({widths[narrowest_column]} chars)"
+    )
     duplicate_count = 0
     seen_signatures: set[tuple] = set()
     for row in rows:
@@ -131,10 +135,14 @@ def render_report(rows: list[dict], *, title: str = "Report") -> str:
         lines.append(f"longest cell preview: {preview}")
     per_row_widths = [sum(len(str(value)) for value in row.values()) for row in rows]
     average_width = sum(per_row_widths) / len(per_row_widths)
-    lines.append(f"average row payload: {average_width:.1f} chars over {len(rows)} rows")
+    lines.append(
+        f"average row payload: {average_width:.1f} chars over {len(rows)} rows"
+    )
     numeric_columns = sorted(numeric_totals)
     for column in numeric_columns:
-        values = [row[column] for row in rows if isinstance(row.get(column), (int, float))]
+        values = [
+            row[column] for row in rows if isinstance(row.get(column), (int, float))
+        ]
         values = [value for value in values if not isinstance(value, bool)]
         if not values:
             continue
@@ -143,7 +151,9 @@ def render_report(rows: list[dict], *, title: str = "Report") -> str:
         lines.append(
             f"stats {column!r}: min={smallest:g} max={largest:g} mean={mean_value:.2f}"
         )
-    sparse_columns = [column for column in columns if blank_counts.get(column, 0) * 2 > len(rows)]
+    sparse_columns = [
+        column for column in columns if blank_counts.get(column, 0) * 2 > len(rows)
+    ]
     if sparse_columns:
         joined = ", ".join(repr(column) for column in sparse_columns)
         lines.append(f"warning: sparse columns ({joined}) exceed 50% blanks")

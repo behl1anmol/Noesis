@@ -101,9 +101,7 @@ def prefetch_bm25() -> None:
         points=[
             models.PointStruct(
                 id=1,
-                vector={
-                    "bm25": models.Document(text="prefetch", model=BM25_MODEL_ID)
-                },
+                vector={"bm25": models.Document(text="prefetch", model=BM25_MODEL_ID)},
             )
         ],
     )

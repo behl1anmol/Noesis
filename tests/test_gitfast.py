@@ -43,10 +43,14 @@ def git(root: Path, *args: str) -> None:
     subprocess.run(
         (
             "git",
-            "-c", "user.name=test",
-            "-c", "user.email=test@test",
-            "-c", "commit.gpgsign=false",
-            "-C", str(root),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(root),
             *args,
         ),
         check=True,

@@ -87,7 +87,9 @@ def _project_summary(ctx: Any, project: sqlite3.Row) -> dict[str, Any]:
         "chunk_count": counts["chunks"],
         "pending_count": pending,
         "last_indexed_at": None if last_done is None else last_done["finished_at"],
-        "index_age_s": None if last_done is None else _age_seconds(last_done["finished_at"]),
+        "index_age_s": None
+        if last_done is None
+        else _age_seconds(last_done["finished_at"]),
         "last_run": last_run,
         "progress": progress,
     }
@@ -119,9 +121,7 @@ def project_detail(ctx: Any, project_id: str) -> dict[str, Any] | None:
     if project is None:
         return None
     summary = _project_summary(ctx, project)
-    pending = [
-        dict(row) for row in state.list_pending_changes(ctx.conn, project_id)
-    ]
+    pending = [dict(row) for row in state.list_pending_changes(ctx.conn, project_id)]
     runs = [
         dict(row)
         for row in ctx.conn.execute(
@@ -172,7 +172,7 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
                    COALESCE(SUM(files_changed), 0) AS files_changed,
                    COALESCE(SUM(chunks_written), 0) AS chunks_written
             FROM index_runs
-            WHERE {_DAY.format(col='started_at')}
+            WHERE {_DAY.format(col="started_at")}
             GROUP BY day ORDER BY day
             """,
             (cutoff,),
@@ -187,7 +187,7 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
                        THEN (julianday(finished_at) - julianday(started_at)) * 86400.0
                        END) AS avg_duration_s
             FROM index_runs
-            WHERE {_DAY.format(col='started_at')}
+            WHERE {_DAY.format(col="started_at")}
             """,
             (cutoff,),
         ).fetchone()
@@ -204,7 +204,7 @@ def usage(ctx: Any, days: int = 30) -> dict[str, Any]:
                    SUM(CASE WHEN kind = 'structural' THEN 1 ELSE 0 END) AS structural,
                    SUM(CASE WHEN reranked = 1 THEN 1 ELSE 0 END) AS reranked
             FROM query_log
-            WHERE {_DAY.format(col='ts')}
+            WHERE {_DAY.format(col="ts")}
             GROUP BY day ORDER BY day
             """,
             (cutoff,),

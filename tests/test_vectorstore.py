@@ -25,9 +25,7 @@ def dense_search(store, query_vector, project_id, **kw):
     """Dense-only search shim — most tests below assert payload/filter
     behavior that is channel-independent; dense keeps them deterministic
     under FakeEmbedder. Hybrid/sparse behavior has its own tests."""
-    return store.search(
-        project_id, dense_vector=query_vector, channel="dense", **kw
-    )
+    return store.search(project_id, dense_vector=query_vector, channel="dense", **kw)
 
 
 @dataclass
@@ -135,10 +133,16 @@ async def test_project_id_filter_isolates_projects(store: VectorStore):
     embedder = FakeEmbedder(dim=8)
     store.ensure_collection(embedder)
     await index_chunks(
-        store, embedder, "proj1", [make_chunk(file_path="src/one.py", symbol_name="one")]
+        store,
+        embedder,
+        "proj1",
+        [make_chunk(file_path="src/one.py", symbol_name="one")],
     )
     await index_chunks(
-        store, embedder, "proj2", [make_chunk(file_path="src/two.py", symbol_name="two")]
+        store,
+        embedder,
+        "proj2",
+        [make_chunk(file_path="src/two.py", symbol_name="two")],
     )
 
     query = await embedder.embed_query("anything")
@@ -166,9 +170,9 @@ async def test_language_filter(store: VectorStore):
         "src/a.py",
         "src/a.go",
     }
-    assert [h["file_path"] for h in dense_search(store, query, "proj1", language="go")] == [
-        "src/a.go"
-    ]
+    assert [
+        h["file_path"] for h in dense_search(store, query, "proj1", language="go")
+    ] == ["src/a.go"]
 
 
 async def test_deterministic_chunk_id_reupsert_is_idempotent(store: VectorStore):
@@ -211,8 +215,12 @@ async def test_delete_file_chunks_removes_only_that_file(store: VectorStore):
     store.delete_file_chunks("proj1", ["src/gone.py"])
     assert count(store) == 2
     query = await embedder.embed_query("anything")
-    assert [h["file_path"] for h in dense_search(store, query, "proj1")] == ["src/keep.py"]
-    assert [h["file_path"] for h in dense_search(store, query, "proj2")] == ["src/gone.py"]
+    assert [h["file_path"] for h in dense_search(store, query, "proj1")] == [
+        "src/keep.py"
+    ]
+    assert [h["file_path"] for h in dense_search(store, query, "proj2")] == [
+        "src/gone.py"
+    ]
 
 
 async def test_upsert_length_mismatch_raises(store: VectorStore):
@@ -302,20 +310,27 @@ async def test_hybrid_fuses_both_channels(store: VectorStore):
     )
     assert "src/limiter.py" in [h["file_path"] for h in hits]
     # Fused result set respects top_k.
-    assert len(store.search(
-        "proj1", dense_vector=query, query_text="RateLimiter", top_k=3
-    )) <= 3
+    assert (
+        len(
+            store.search("proj1", dense_vector=query, query_text="RateLimiter", top_k=3)
+        )
+        <= 3
+    )
 
 
 async def test_hybrid_respects_project_filter(store: VectorStore):
     embedder = FakeEmbedder(dim=8)
     store.ensure_collection(embedder)
     await index_chunks(
-        store, embedder, "proj1",
+        store,
+        embedder,
+        "proj1",
         [make_chunk(file_path="src/one.py", text="def shared_symbol(): pass\n")],
     )
     await index_chunks(
-        store, embedder, "proj2",
+        store,
+        embedder,
+        "proj2",
         [make_chunk(file_path="src/two.py", text="def shared_symbol(): pass\n")],
     )
     query = await embedder.embed_query("shared_symbol")

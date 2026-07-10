@@ -37,10 +37,7 @@ async def test_nl_query_returns_sane_spans(tmp_path, embedder):
         "    return claims['exp'] > time.time()\n"
     )
     (repo / "geometry.py").write_text(
-        "import math\n"
-        "\n"
-        "def circle_area(radius):\n"
-        "    return math.pi * radius ** 2\n"
+        "import math\n\ndef circle_area(radius):\n    return math.pi * radius ** 2\n"
     )
 
     conn = state.connect(tmp_path / "state.sqlite")

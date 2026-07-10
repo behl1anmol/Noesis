@@ -51,10 +51,7 @@ def project_dir(tmp_path):
         '    """Check JWT expiry before trusting claims."""\n'
         "    return token.expiry > now()\n"
     )
-    (src / "db.py").write_text(
-        "def connect(dsn):\n"
-        "    return Driver(dsn)\n"
-    )
+    (src / "db.py").write_text("def connect(dsn):\n    return Driver(dsn)\n")
     return src
 
 
@@ -145,9 +142,7 @@ async def test_get_index_status_identical_to_rest(rest, mcp, project_dir):
     project_id = await _indexed_project(rest, project_dir)
     rest_body = rest.get(f"/projects/{project_id}/status").json()
     async with Client(mcp) as client:
-        result = await client.call_tool(
-            "get_index_status", {"project_id": project_id}
-        )
+        result = await client.call_tool("get_index_status", {"project_id": project_id})
     assert result.structured_content == rest_body
     assert rest_body["status"] == "done"
 

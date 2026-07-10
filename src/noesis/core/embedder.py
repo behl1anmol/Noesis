@@ -128,7 +128,9 @@ class LocalSTEmbedder:
         self._batch_size = batch_size
         self._load_model = _load_model or self._default_load
         self._queue: queue.PriorityQueue[
-            tuple[int, int, tuple[Callable[[Any], Any], concurrent.futures.Future] | None]
+            tuple[
+                int, int, tuple[Callable[[Any], Any], concurrent.futures.Future] | None
+            ]
         ] = queue.PriorityQueue()
         self._seq = itertools.count()
         self._lock = threading.Lock()

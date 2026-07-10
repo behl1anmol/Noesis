@@ -62,7 +62,9 @@ async def _wait_done(client, run_id, timeout=5.0):
 def test_discovery_language_filter(repo):
     all_files = discover_files(repo)
     assert set(all_files) == {"a.py", "src/d.py", "b.go", "c.md", "big.py"}
-    py_only = discover_files(repo, DiscoveryConfig(include_languages=frozenset(["python"])))
+    py_only = discover_files(
+        repo, DiscoveryConfig(include_languages=frozenset(["python"]))
+    )
     assert set(py_only) == {"a.py", "src/d.py", "big.py"}
 
 
@@ -107,7 +109,10 @@ def test_browse_lists_directories_only(client, repo, tmp_path):
     assert body["parent"] == str(repo.parent.resolve())
     assert [e["name"] for e in body["entries"]] == ["src"]  # only the dir
     # non-existent path → 400
-    assert client.get("/api/browse", params={"path": str(tmp_path / "nope")}).status_code == 400
+    assert (
+        client.get("/api/browse", params={"path": str(tmp_path / "nope")}).status_code
+        == 400
+    )
 
 
 def test_preview_scan_and_filter(client, repo):
@@ -123,9 +128,12 @@ def test_preview_scan_and_filter(client, repo):
     assert py["total_files"] == 3
     assert [b["language"] for b in py["by_language"]] == ["python"]
 
-    assert client.post(
-        "/api/register/preview", json={"root_path": "/no/such/dir"}
-    ).status_code == 400
+    assert (
+        client.post(
+            "/api/register/preview", json={"root_path": "/no/such/dir"}
+        ).status_code
+        == 400
+    )
 
 
 # -- register: add-only vs add+index, config persistence ----------------------
@@ -138,10 +146,10 @@ def test_register_add_only(client, repo):
     )
     assert resp.status_code == 201
     body = resp.json()
-    assert body["run"] is None                    # not indexed
+    assert body["run"] is None  # not indexed
     assert body["project"]["file_count"] == 0
     assert body["project"]["watch_enabled"] is True
-    assert body["project"]["watching"] is True    # watch scheduled live
+    assert body["project"]["watching"] is True  # watch scheduled live
 
 
 def test_register_add_and_index_honors_language_filter(client, repo):
@@ -180,9 +188,10 @@ def test_register_config_survives_later_reindex(client, repo):
 
 
 def test_register_missing_dir_400(client):
-    assert client.post(
-        "/api/register", json={"root_path": "/no/such/dir"}
-    ).status_code == 400
+    assert (
+        client.post("/api/register", json={"root_path": "/no/such/dir"}).status_code
+        == 400
+    )
 
 
 # -- project deletion (ADR-43) ------------------------------------------------

@@ -121,6 +121,7 @@ def connect() -> sqlite3.Connection:
 # sessions / decisions / milestones
 # ---------------------------------------------------------------------------
 
+
 def cmd_init(args: argparse.Namespace) -> None:
     connect().close()
     print(f"devlog initialized at {DB_PATH}")
@@ -160,8 +161,10 @@ def _print_milestone_board(conn: sqlite3.Connection) -> None:
         return
     print("Milestone board:")
     for r in rows:
-        print(f"  {r['id']}: {r['status']}"
-              + (f" — {r['exit_criterion']}" if r["exit_criterion"] else ""))
+        print(
+            f"  {r['id']}: {r['status']}"
+            + (f" — {r['exit_criterion']}" if r["exit_criterion"] else "")
+        )
 
 
 def _print_checkpoint(row: sqlite3.Row | None, *, label: str) -> None:
@@ -206,34 +209,44 @@ def cmd_latest(args: argparse.Namespace) -> None:
         if not dangling:
             print("No dangling (uncleanly-ended) sessions.")
         for d in dangling:
-            print(f"\nWARNING: session {d['id']} (started {d['started_at']}) has no SessionEnd —"
-                  " possible interruption.")
+            print(
+                f"\nWARNING: session {d['id']} (started {d['started_at']}) has no SessionEnd —"
+                " possible interruption."
+            )
             cp = conn.execute(
                 "SELECT * FROM checkpoints WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
                 (d["id"],),
             ).fetchone()
             if cp is None:
-                print("  No checkpoint exists for this session — nothing beyond the plain"
-                      " transcript survived (see CLAUDE.md rule 8 on checkpoint coverage).")
+                print(
+                    "  No checkpoint exists for this session — nothing beyond the plain"
+                    " transcript survived (see CLAUDE.md rule 8 on checkpoint coverage)."
+                )
             else:
                 _print_checkpoint(cp, label="  Last checkpoint")
 
 
 def cmd_session_get(args: argparse.Namespace) -> None:
     conn = connect()
-    row = conn.execute("SELECT * FROM sessions WHERE id = ?", (args.session_id,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM sessions WHERE id = ?", (args.session_id,)
+    ).fetchone()
     if row is None:
         print(json.dumps({"id": args.session_id, "found": False}))
         return
-    print(json.dumps({
-        "id": row["id"],
-        "found": True,
-        "started_at": row["started_at"],
-        "ended_at": row["ended_at"],
-        "summary": row["summary"],
-        "next_steps": row["next_steps"],
-        "blockers": row["blockers"],
-    }))
+    print(
+        json.dumps(
+            {
+                "id": row["id"],
+                "found": True,
+                "started_at": row["started_at"],
+                "ended_at": row["ended_at"],
+                "summary": row["summary"],
+                "next_steps": row["next_steps"],
+                "blockers": row["blockers"],
+            }
+        )
+    )
 
 
 def cmd_decision_add(args: argparse.Namespace) -> None:
@@ -248,12 +261,18 @@ def cmd_decision_add(args: argparse.Namespace) -> None:
 
 def cmd_milestone_set(args: argparse.Namespace) -> None:
     conn = connect()
-    existing = conn.execute("SELECT * FROM milestones WHERE id = ?", (args.milestone_id,)).fetchone()
-    exit_criterion = args.exit_criterion if args.exit_criterion is not None else (
-        existing["exit_criterion"] if existing else None
+    existing = conn.execute(
+        "SELECT * FROM milestones WHERE id = ?", (args.milestone_id,)
+    ).fetchone()
+    exit_criterion = (
+        args.exit_criterion
+        if args.exit_criterion is not None
+        else (existing["exit_criterion"] if existing else None)
     )
-    evidence = args.evidence if args.evidence is not None else (
-        existing["evidence"] if existing else None
+    evidence = (
+        args.evidence
+        if args.evidence is not None
+        else (existing["evidence"] if existing else None)
     )
     conn.execute(
         """INSERT INTO milestones (id, status, exit_criterion, evidence, updated_at)
@@ -271,13 +290,21 @@ def cmd_milestone_set(args: argparse.Namespace) -> None:
 # lessons
 # ---------------------------------------------------------------------------
 
+
 def cmd_lesson_add(args: argparse.Namespace) -> None:
     conn = connect()
     try:
         cur = conn.execute(
             """INSERT INTO lessons (created_at, session_id, category, mistake, lesson, rationale)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (now(), args.session, args.category, args.mistake, args.lesson, args.rationale),
+            (
+                now(),
+                args.session,
+                args.category,
+                args.mistake,
+                args.lesson,
+                args.rationale,
+            ),
         )
         conn.commit()
         print(f"lesson #{cur.lastrowid} added")
@@ -286,38 +313,53 @@ def cmd_lesson_add(args: argparse.Namespace) -> None:
             "SELECT id FROM lessons WHERE category = ? AND mistake = ?",
             (args.category, args.mistake),
         ).fetchone()
-        print(f"A lesson for this exact category+mistake already exists (#{existing['id']}) —"
-              f" run `lesson bump {existing['id']}` instead of adding a duplicate.")
+        print(
+            f"A lesson for this exact category+mistake already exists (#{existing['id']}) —"
+            f" run `lesson bump {existing['id']}` instead of adding a duplicate."
+        )
         sys.exit(1)
 
 
 def cmd_lesson_bump(args: argparse.Namespace) -> None:
     conn = connect()
-    conn.execute("UPDATE lessons SET occurrences = occurrences + 1 WHERE id = ?", (args.lesson_id,))
+    conn.execute(
+        "UPDATE lessons SET occurrences = occurrences + 1 WHERE id = ?",
+        (args.lesson_id,),
+    )
     conn.commit()
-    row = conn.execute("SELECT occurrences FROM lessons WHERE id = ?", (args.lesson_id,)).fetchone()
+    row = conn.execute(
+        "SELECT occurrences FROM lessons WHERE id = ?", (args.lesson_id,)
+    ).fetchone()
     if row is None:
         print(f"no lesson #{args.lesson_id}")
         sys.exit(1)
     print(f"lesson #{args.lesson_id} occurrences -> {row['occurrences']}")
     if row["occurrences"] >= 3:
-        print("Recurred >= 3 times — propose promoting this to a CLAUDE.md hard rule"
-              " (`lesson promote`, human-approved edit).")
+        print(
+            "Recurred >= 3 times — propose promoting this to a CLAUDE.md hard rule"
+            " (`lesson promote`, human-approved edit)."
+        )
 
 
 def cmd_lesson_retire(args: argparse.Namespace) -> None:
     conn = connect()
-    conn.execute("UPDATE lessons SET status = 'retired' WHERE id = ?", (args.lesson_id,))
+    conn.execute(
+        "UPDATE lessons SET status = 'retired' WHERE id = ?", (args.lesson_id,)
+    )
     conn.commit()
     print(f"lesson #{args.lesson_id} retired")
 
 
 def cmd_lesson_promote(args: argparse.Namespace) -> None:
     conn = connect()
-    conn.execute("UPDATE lessons SET status = 'promoted' WHERE id = ?", (args.lesson_id,))
+    conn.execute(
+        "UPDATE lessons SET status = 'promoted' WHERE id = ?", (args.lesson_id,)
+    )
     conn.commit()
-    print(f"lesson #{args.lesson_id} marked promoted — now add it to CLAUDE.md by hand"
-          " (Edit(CLAUDE.md) is permission-gated by design; this command does not write it).")
+    print(
+        f"lesson #{args.lesson_id} marked promoted — now add it to CLAUDE.md by hand"
+        " (Edit(CLAUDE.md) is permission-gated by design; this command does not write it)."
+    )
 
 
 def cmd_render_lessons(args: argparse.Namespace) -> None:
@@ -344,7 +386,9 @@ def cmd_render_lessons(args: argparse.Namespace) -> None:
     if not rows:
         lines.append("_(no active lessons yet)_")
     for r in rows:
-        lines.append(f"## [{r['id']}] {r['category']} (occurrences: {r['occurrences']})")
+        lines.append(
+            f"## [{r['id']}] {r['category']} (occurrences: {r['occurrences']})"
+        )
         lines.append(f"**Mistake:** {r['mistake']}")
         lines.append(f"**Lesson:** {r['lesson']}")
         lines.append(f"**Rationale:** {r['rationale']}")
@@ -353,11 +397,15 @@ def cmd_render_lessons(args: argparse.Namespace) -> None:
     LESSONS_MD_PATH.write_text("\n".join(lines).rstrip() + "\n")
     print(f"rendered {len(rows)} active lesson(s) to {LESSONS_MD_PATH}")
     if len(rows) > LESSON_CAP:
-        print(f"WARNING: {len(rows)} active lessons exceeds the {LESSON_CAP}-lesson cap —"
-              " promote or retire one before adding more (do not silently exceed it).")
+        print(
+            f"WARNING: {len(rows)} active lessons exceeds the {LESSON_CAP}-lesson cap —"
+            " promote or retire one before adding more (do not silently exceed it)."
+        )
 
 
-LESSON_BLOCK_RE = None  # compiled lazily to keep import cost near zero for other subcommands
+LESSON_BLOCK_RE = (
+    None  # compiled lazily to keep import cost near zero for other subcommands
+)
 
 
 def cmd_lessons_import(args: argparse.Namespace) -> None:
@@ -387,7 +435,14 @@ def cmd_lessons_import(args: argparse.Namespace) -> None:
                ON CONFLICT(category, mistake) DO UPDATE SET
                  occurrences=excluded.occurrences, lesson=excluded.lesson, rationale=excluded.rationale
                WHERE excluded.occurrences > lessons.occurrences""",
-            (now(), m["category"], m["mistake"], m["lesson"], m["rationale"], int(m["occurrences"])),
+            (
+                now(),
+                m["category"],
+                m["mistake"],
+                m["lesson"],
+                m["rationale"],
+                int(m["occurrences"]),
+            ),
         )
         imported += 1
     conn.commit()
@@ -398,9 +453,12 @@ def cmd_lessons_import(args: argparse.Namespace) -> None:
 # checkpoints
 # ---------------------------------------------------------------------------
 
+
 def cmd_checkpoint_add(args: argparse.Namespace) -> None:
     if args.trigger not in CHECKPOINT_TRIGGERS:
-        print(f"invalid trigger '{args.trigger}', must be one of {sorted(CHECKPOINT_TRIGGERS)}")
+        print(
+            f"invalid trigger '{args.trigger}', must be one of {sorted(CHECKPOINT_TRIGGERS)}"
+        )
         sys.exit(1)
 
     raw_state = sys.stdin.read() if args.state == "-" else args.state
@@ -418,7 +476,15 @@ def cmd_checkpoint_add(args: argparse.Namespace) -> None:
     cur = conn.execute(
         """INSERT INTO checkpoints (session_id, created_at, trigger, transcript_path, cwd, state_snapshot, notes)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (args.session, now(), args.trigger, args.transcript_path, args.cwd, raw_state, args.notes),
+        (
+            args.session,
+            now(),
+            args.trigger,
+            args.transcript_path,
+            args.cwd,
+            raw_state,
+            args.notes,
+        ),
     )
     conn.commit()
     print(f"checkpoint #{cur.lastrowid} written (trigger={args.trigger})")
@@ -452,18 +518,23 @@ def cmd_checkpoint_list(args: argparse.Namespace) -> None:
         print("no checkpoints found")
         return
     for r in rows:
-        print(f"#{r['id']} session={r['session_id']} trigger={r['trigger']} at={r['created_at']}")
+        print(
+            f"#{r['id']} session={r['session_id']} trigger={r['trigger']} at={r['created_at']}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # CLI wiring
 # ---------------------------------------------------------------------------
 
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="devlog.py")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="create/verify the DB schema").set_defaults(func=cmd_init)
+    sub.add_parser("init", help="create/verify the DB schema").set_defaults(
+        func=cmd_init
+    )
 
     sp = sub.add_parser("session-start", help="record a session start")
     sp.add_argument("session_id")
@@ -478,9 +549,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("latest", help="print last closed session + milestone board")
     sp.add_argument("--include-dangling", action="store_true")
-    sp.add_argument("--exclude-session", default=None,
-                     help="omit this session id from the dangling-session list (e.g. the "
-                          "just-started current session, which is always open at this point)")
+    sp.add_argument(
+        "--exclude-session",
+        default=None,
+        help="omit this session id from the dangling-session list (e.g. the "
+        "just-started current session, which is always open at this point)",
+    )
     sp.set_defaults(func=cmd_latest)
 
     sp = sub.add_parser("session-get", help="print a session's stored fields as JSON")
@@ -543,7 +617,9 @@ def build_parser() -> argparse.ArgumentParser:
     cadd.add_argument("--trigger", required=True, choices=sorted(CHECKPOINT_TRIGGERS))
     cadd.add_argument("--transcript-path", default=None)
     cadd.add_argument("--cwd", default=None)
-    cadd.add_argument("--state", required=True, help="JSON string, or '-' to read JSON from stdin")
+    cadd.add_argument(
+        "--state", required=True, help="JSON string, or '-' to read JSON from stdin"
+    )
     cadd.add_argument("--notes", default=None)
     cadd.set_defaults(func=cmd_checkpoint_add)
 

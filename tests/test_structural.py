@@ -102,15 +102,19 @@ async def test_function_def_pattern_exact_set(conn, project_id):
 
 async def test_import_pattern_exact_set(conn, project_id):
     result = await structural_search(conn, project_id, "import $MOD", "python")
-    got = {(m["file_path"], m["start_line"], m["meta_vars"]["MOD"]) for m in result["matches"]}
+    got = {
+        (m["file_path"], m["start_line"], m["meta_vars"]["MOD"])
+        for m in result["matches"]
+    }
     assert got == {("app/db.py", 1, "sqlite3")}
 
 
 async def test_print_pattern_exact_set(conn, project_id):
     result = await structural_search(conn, project_id, "print($MSG)", "python")
-    assert [(m["file_path"], m["start_line"], m["meta_vars"]["MSG"]) for m in result["matches"]] == [
-        ("app/views.py", 4, "'rendering'")
-    ]
+    assert [
+        (m["file_path"], m["start_line"], m["meta_vars"]["MSG"])
+        for m in result["matches"]
+    ] == [("app/views.py", 4, "'rendering'")]
 
 
 async def test_javascript_pattern_scans_only_that_language(conn, project_id):

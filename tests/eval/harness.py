@@ -95,9 +95,7 @@ def load_golden(path: str | Path) -> list[GoldenQuery]:
                 lines = (int(lines[0]), int(lines[1]))
             relevant.append(RelevantItem(path=item["path"], lines=lines))
         queries.append(
-            GoldenQuery(
-                id=qid, category=category, query=text, relevant=tuple(relevant)
-            )
+            GoldenQuery(id=qid, category=category, query=text, relevant=tuple(relevant))
         )
     return queries
 
@@ -215,9 +213,7 @@ def percentile(values: list[float], pct: float) -> float:
 def _mean_rows(per_query: list[dict[str, Any]], metric_keys: list[str]) -> dict:
     row: dict[str, Any] = {"n_queries": len(per_query)}
     for key in metric_keys:
-        row[key] = (
-            sum(q[key] for q in per_query) / len(per_query) if per_query else 0.0
-        )
+        row[key] = sum(q[key] for q in per_query) / len(per_query) if per_query else 0.0
     latencies = [q["latency_ms"] for q in per_query if "latency_ms" in q]
     row["latency_p50_ms"] = percentile(latencies, 50)
     row["latency_p95_ms"] = percentile(latencies, 95)
@@ -250,9 +246,7 @@ async def evaluate(
     report: dict[str, Any] = {
         "overall": _mean_rows(per_query, metric_keys),
         "categories": {
-            cat: _mean_rows(
-                [q for q in per_query if q["category"] == cat], metric_keys
-            )
+            cat: _mean_rows([q for q in per_query if q["category"] == cat], metric_keys)
             for cat in CATEGORIES
         },
         "queries": per_query,
@@ -298,16 +292,12 @@ def format_table(reports: dict[str, dict[str, Any]]) -> str:
     for cat in (*CATEGORIES, "overall"):
         for channel in channels:
             report = reports[channel]
-            row = (
-                report["overall"] if cat == "overall" else report["categories"][cat]
-            )
+            row = report["overall"] if cat == "overall" else report["categories"][cat]
             cells = " | ".join(
                 f"{row[c]:.1f}" if c in LATENCY_KEYS else f"{row[c]:.3f}"
                 for c in columns
             )
-            lines.append(
-                f"| {cat} | {row['n_queries']} | {channel} | {cells} |"
-            )
+            lines.append(f"| {cat} | {row['n_queries']} | {channel} | {cells} |")
     return "\n".join(lines)
 
 
@@ -328,9 +318,7 @@ def format_delta(
         cha = (
             challenger["overall"] if cat == "overall" else challenger["categories"][cat]
         )
-        base = (
-            baseline["overall"] if cat == "overall" else baseline["categories"][cat]
-        )
+        base = baseline["overall"] if cat == "overall" else baseline["categories"][cat]
         for metric in _METRICS:
             delta = cha[metric] - base[metric]
             lines.append(

@@ -41,7 +41,10 @@ class FakeModel:
             if self._block_first_call:
                 assert self.release.wait(timeout=5.0), "test never released model"
         return np.array(
-            [[float(len(t)), float(i), 0.0, 1.0][: self.dim] for i, t in enumerate(texts)]
+            [
+                [float(len(t)), float(i), 0.0, 1.0][: self.dim]
+                for i, t in enumerate(texts)
+            ]
         )
 
 

@@ -45,7 +45,9 @@ def resolve_base_url(cli_value: str | None) -> str:
     return raw.rstrip("/")
 
 
-def _request(method: str, url: str, body: dict | None, timeout: float) -> tuple[int, dict]:
+def _request(
+    method: str, url: str, body: dict | None, timeout: float
+) -> tuple[int, dict]:
     """Return (status_code, parsed_json). Raises URLError on transport failure.
     HTTP error responses (4xx/5xx) are returned, not raised, so callers can read
     the service's error detail."""
@@ -81,11 +83,16 @@ def register(base_url: str, root_path: str, timeout: float) -> dict:
             file=sys.stderr,
         )
     else:  # 400 and anything else the service rejected
-        print(f"error: service rejected registration ({status}): {detail}", file=sys.stderr)
+        print(
+            f"error: service rejected registration ({status}): {detail}",
+            file=sys.stderr,
+        )
     sys.exit(3)
 
 
-def wait_for_index(base_url: str, project_id: str, timeout: float, interval: float) -> str:
+def wait_for_index(
+    base_url: str, project_id: str, timeout: float, interval: float
+) -> str:
     """Poll status until it leaves ``running``/``never_indexed``. Returns the
     terminal status string."""
     url = f"{base_url}/projects/{project_id}/status"
@@ -108,10 +115,20 @@ def wait_for_index(base_url: str, project_id: str, timeout: float, interval: flo
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("root_path", help="Absolute path to the repository to index.")
-    parser.add_argument("--base-url", default=None, help=f"Noesis base URL (default {DEFAULT_BASE_URL}).")
-    parser.add_argument("--wait", action="store_true", help="Poll until the first index finishes.")
-    parser.add_argument("--timeout", type=float, default=15.0, help="Per-request timeout in seconds.")
-    parser.add_argument("--poll-interval", type=float, default=5.0, help="Seconds between status polls.")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help=f"Noesis base URL (default {DEFAULT_BASE_URL}).",
+    )
+    parser.add_argument(
+        "--wait", action="store_true", help="Poll until the first index finishes."
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=15.0, help="Per-request timeout in seconds."
+    )
+    parser.add_argument(
+        "--poll-interval", type=float, default=5.0, help="Seconds between status polls."
+    )
     args = parser.parse_args()
 
     root = Path(args.root_path).expanduser()

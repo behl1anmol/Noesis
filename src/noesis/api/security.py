@@ -31,7 +31,5 @@ def verify_local_origin(request: Request) -> None:
         if not value:
             continue
         if urlparse(value).hostname not in _LOCAL_HOSTS:
-            raise HTTPException(
-                status_code=403, detail="cross-origin request rejected"
-            )
+            raise HTTPException(status_code=403, detail="cross-origin request rejected")
         return

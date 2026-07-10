@@ -70,10 +70,14 @@ def main() -> None:
         }
 
         checkpoint_args = [
-            "checkpoint", "add",
-            "--session", session_id,
-            "--trigger", args.trigger_hint,
-            "--state", "-",
+            "checkpoint",
+            "add",
+            "--session",
+            session_id,
+            "--trigger",
+            args.trigger_hint,
+            "--state",
+            "-",
         ]
         if transcript_path:
             checkpoint_args += ["--transcript-path", transcript_path]
