@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "noesis",
+  "displayName": "Noesis",
+  "version": "0.1.0",
+  "description": "Connects an agent to the Noesis code-retrieval MCP and ships the noesis-mcp skill (usage guide, tool reference, and helper scripts).",
+  "author": {
+    "name": "Anmol",
+    "email": "behl1anmol@gmail.com"
+  },
+  "homepage": "https://github.com/behl1anmol/Noesis#connecting-an-agent-mcp",
+  "repository": "https://github.com/behl1anmol/Noesis",
+  "license": "MIT",
+  "keywords": ["mcp", "code-search", "retrieval", "rag", "noesis", "ast"],
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "base_url": {
+      "type": "string",
+      "title": "Noesis base URL",
+      "description": "Base URL of the running Noesis service (no trailing slash). The MCP endpoint is this URL + /mcp/. Change only if you run uvicorn on a non-default host or port.",
+      "default": "http://127.0.0.1:8000"
+    }
+  }
+}
