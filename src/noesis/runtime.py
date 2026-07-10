@@ -35,6 +35,11 @@ class AppContext:
     embedder: Embedder
     reranker: Reranker | None = None
     rerank_candidates: int = 50
+    # Outer embed-batch size for index runs (config ``embedder.batch_size``).
+    # The embedder re-batches internally for values below this, but the
+    # indexer's slicing is the effective ceiling — without carrying the
+    # config here, values above the indexer's default were silently capped.
+    embed_batch_size: int = 32
     structural: StructuralSettings = field(default_factory=StructuralSettings)
     git_fast_path: bool = True
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
@@ -108,6 +113,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         embedder=embedder,
         reranker=reranker,
         rerank_candidates=cfg.reranker.candidates,
+        embed_batch_size=cfg.embedder.batch_size,
         structural=cfg.structural,
         git_fast_path=cfg.git.fast_path,
         config_device_pin=cfg.embedder.device,

@@ -85,14 +85,14 @@ def test_handler_passes_source_files(handler_env):
     "rel",
     [
         "node_modules/x/index.js",  # excluded dir
-        ".git/HEAD",                # excluded dir
-        ".env",                     # secret skip-list
-        "uv.lock",                  # generated skip-list
-        "a.py.swp",                 # editor noise
-        "#buffer#",                 # editor noise
-        "4913",                     # vim probe
-        "app.log",                  # root .gitignore
-        "ignored_dir/f.py",         # root .gitignore
+        ".git/HEAD",  # excluded dir
+        ".env",  # secret skip-list
+        "uv.lock",  # generated skip-list
+        "a.py.swp",  # editor noise
+        "#buffer#",  # editor noise
+        "4913",  # vim probe
+        "app.log",  # root .gitignore
+        "ignored_dir/f.py",  # root .gitignore
     ],
 )
 def test_handler_filters(handler_env, rel):
@@ -151,9 +151,7 @@ def test_watch_records_pending_and_auto_reindexes(tmp_path):
                 "SELECT COUNT(*) FROM index_runs"
             ).fetchone()[0]
             (root / "a.py").write_text("x = 2\n")
-            pending = await _poll(
-                lambda: state.list_pending_changes(ctx.conn, pid)
-            )
+            pending = await _poll(lambda: state.list_pending_changes(ctx.conn, pid))
             assert [p["path"] for p in pending] == ["a.py"]
             await asyncio.sleep(0.5)  # well past quiet_s
             assert (
@@ -165,11 +163,11 @@ def test_watch_records_pending_and_auto_reindexes(tmp_path):
             from noesis.core import dashboard as core_dashboard
 
             core_dashboard.set_project_flags(ctx, pid, auto_reindex=True)
-            await _poll(
-                lambda: not state.list_pending_changes(ctx.conn, pid)
-            )
+            await _poll(lambda: not state.list_pending_changes(ctx.conn, pid))
             run = state.get_latest_run(ctx.conn, pid)
-            await _poll(lambda: state.get_latest_run(ctx.conn, pid)["status"] != "running")
+            await _poll(
+                lambda: state.get_latest_run(ctx.conn, pid)["status"] != "running"
+            )
             run = state.get_latest_run(ctx.conn, pid)
             assert run["triggered_by"] == "watcher"
             assert run["files_changed"] == 1  # only a.py was hashed+indexed
@@ -191,7 +189,7 @@ def test_watch_records_pending_and_auto_reindexes(tmp_path):
             # claim the git fast path.
             assert latest["fast_path_used"] == 0
         finally:
-            manager.stop()
+            await manager.stop()
 
     asyncio.run(scenario())
 
@@ -215,6 +213,6 @@ def test_set_watch_unschedules(tmp_path):
             await asyncio.sleep(0.4)
             assert state.list_pending_changes(ctx.conn, pid) == []
         finally:
-            manager.stop()
+            await manager.stop()
 
     asyncio.run(scenario())

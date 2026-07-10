@@ -14,6 +14,7 @@ can supply a context of its own.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Callable, Literal
 
@@ -26,9 +27,7 @@ from noesis.core import retriever
 from noesis.core import structural as structural_mod
 
 
-def build_mcp(
-    get_ctx: Callable[[], Any], *, lifespan: Any | None = None
-) -> FastMCP:
+def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> FastMCP:
     """Create the noesis MCP server. ``get_ctx()`` must return the live
     AppContext (conn, store, embedder, reranker, structural settings) —
     called per tool invocation so the context can be built after the
@@ -151,7 +150,10 @@ def build_mcp(
         indexed snapshot, which may lag the live file.
         """
         ctx = get_ctx()
-        chunk = ctx.store.get_chunk(chunk_id)
+        # Off the event loop: this is a synchronous Qdrant network round
+        # trip (same reason retriever.search_code wraps store.search) — a
+        # slow store must not stall every other in-flight request.
+        chunk = await asyncio.to_thread(ctx.store.get_chunk, chunk_id)
         if chunk is None:
             raise ToolError("unknown chunk_id")
         return chunk

@@ -39,6 +39,7 @@ class _ContextLike(Protocol):
     jobs: dict[str, asyncio.Task]
     progress: dict[str, dict[str, Any]]
     git_fast_path: bool
+    embed_batch_size: int
 
 
 def launch_index_run(
@@ -64,14 +65,20 @@ def launch_index_run(
     if not os.path.isdir(root_path):
         raise ValueError(f"root_path is not an existing directory: {root_path!r}")
     project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
-    latest = state.get_latest_run(ctx.conn, project_id)
-    if latest is not None and latest["status"] == "running":
+    # Atomic check-and-insert (state.try_start_run, BEGIN IMMEDIATE): a plain
+    # read-then-insert is race-free on one event loop but not across the
+    # dual-transport deployment (HTTP + stdio MCP sharing this DB), where two
+    # near-simultaneous launches could both pass the check and race two index
+    # runs onto the same collection.
+    run_id, created = state.try_start_run(
+        ctx.conn, project_id, triggered_by=triggered_by
+    )
+    if not created:
         return {
             "project_id": project_id,
-            "run_id": latest["id"],
+            "run_id": run_id,
             "status": "already_running",
         }
-    run_id = state.start_run(ctx.conn, project_id, triggered_by=triggered_by)
     # Cut point for the pending clear: rows re-dirtied after this survive.
     started_iso = datetime.now(timezone.utc).isoformat()
     ctx.progress[run_id] = {
@@ -97,6 +104,7 @@ def launch_index_run(
                 root_path,
                 project_id,
                 run_id,
+                batch_size=ctx.embed_batch_size,
                 git_fast_path=ctx.git_fast_path,
                 paths=paths,
                 on_progress=_on_progress,

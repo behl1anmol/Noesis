@@ -34,6 +34,13 @@ class DiffResult:
     deleted: tuple[str, ...] = field(default=())
     hashes: Mapping[str, str] = field(default_factory=dict)
     """Current content hash for every discovered file (new/changed/unchanged)."""
+    errored: tuple[tuple[str, str], ...] = field(default=())
+    """(path, error) for files whose hash attempt failed non-fatally (the H7
+    carry-forward). The file's true state is UNKNOWN this run — callers must
+    treat these like per-file failures: never advance the git anchor past
+    them and re-queue them for retry, or a committed-then-errored file is
+    carried forward as unchanged on every future fast-path run (stale
+    forever)."""
 
 
 def partition(
@@ -65,15 +72,12 @@ def partition(
     changed: list[str] = []
     unchanged: list[str] = []
     hashes: dict[str, str] = {}
+    errored: list[tuple[str, str]] = []
     seen: set[str] = set()
 
     for rel in discovered:
         prior_hash = stored.get(rel)
-        if (
-            candidates is not None
-            and prior_hash is not None
-            and rel not in candidates
-        ):
+        if candidates is not None and prior_hash is not None and rel not in candidates:
             seen.add(rel)
             hashes[rel] = prior_hash
             unchanged.append(rel)
@@ -82,13 +86,19 @@ def partition(
             current = hash_file(root / rel)
         except (FileNotFoundError, NotADirectoryError):
             continue  # genuinely vanished mid-run; falls through to deleted
-        except OSError:
+        except OSError as exc:
             # Transient/permission failure (EACCES after a chmod, EIO/ESTALE
             # on a network fs) on a file that still exists — NOT a deletion
             # (H7). Conflating the two would purge a live file's chunks. Carry
-            # the stored hash forward as unchanged so its chunks keep serving
-            # and the next run retries; a file unknown to `stored` we simply
-            # skip this run (nothing to preserve, and it is not "deleted").
+            # the stored hash forward as unchanged so its chunks keep serving;
+            # a file unknown to `stored` we simply skip this run (nothing to
+            # preserve, and it is not "deleted"). Either way the path is
+            # surfaced in `errored`: "the next run retries" holds only if the
+            # caller keeps the git anchor back / re-queues it — under the fast
+            # path a committed file that errored here would otherwise never be
+            # a candidate again and its stale hash would be carried forward on
+            # every future run.
+            errored.append((rel, str(exc) or type(exc).__name__))
             if prior_hash is not None:
                 seen.add(rel)
                 hashes[rel] = prior_hash
@@ -111,4 +121,5 @@ def partition(
         unchanged=tuple(sorted(unchanged)),
         deleted=tuple(deleted),
         hashes=hashes,
+        errored=tuple(errored),
     )

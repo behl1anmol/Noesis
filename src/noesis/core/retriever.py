@@ -46,13 +46,17 @@ async def search_code(
     re-deriving the decision. Skips the query embed entirely for sparse-only
     searches — no reason to queue on the embed worker for a channel that
     won't use the vector."""
-    dense_vector = (
-        await embedder.embed_query(query) if channel != "sparse" else None
-    )
+    dense_vector = await embedder.embed_query(query) if channel != "sparse" else None
     apply_rerank = (
         rerank if rerank is not None else reranker is not None
     ) and reranker is not None
     pool = max(top_k, candidates) if apply_rerank else top_k
+    # Per-channel prefetch stays `candidates` deep even when no reranker
+    # runs: RRF recall depends on each channel's candidate depth, not on how
+    # many fused results the caller keeps. With prefetch collapsed to top_k,
+    # a hit ranked just outside one channel's top_k loses that channel's
+    # RRF contribution entirely and can drop out of the fused top_k.
+    prefetch = max(top_k, candidates)
     hits = await asyncio.to_thread(
         store.search,
         project_id,
@@ -61,7 +65,7 @@ async def search_code(
         top_k=pool,
         language=language,
         channel=channel,
-        prefetch_limit=pool,
+        prefetch_limit=prefetch,
         with_text=apply_rerank,
     )
     if apply_rerank and hits:

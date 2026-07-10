@@ -76,7 +76,9 @@ def chunk_point_id(
 ) -> str:
     """Deterministic point id — re-runs over unchanged content are idempotent."""
     return str(
-        uuid.uuid5(CHUNK_NAMESPACE, f"{project_id}:{file_path}:{start_line}:{file_hash}")
+        uuid.uuid5(
+            CHUNK_NAMESPACE, f"{project_id}:{file_path}:{start_line}:{file_hash}"
+        )
     )
 
 
@@ -127,19 +129,30 @@ class VectorStore:
                     f"and the project file state, then re-index."
                 )
             return
-        self._client.create_collection(
-            collection_name=self._collection,
-            vectors_config={
-                DENSE_VECTOR_NAME: models.VectorParams(
-                    size=embedder.dim, distance=models.Distance.COSINE
-                )
-            },
-            sparse_vectors_config={
-                SPARSE_VECTOR_NAME: models.SparseVectorParams(
-                    modifier=models.Modifier.IDF
-                )
-            },
-        )
+        try:
+            self._client.create_collection(
+                collection_name=self._collection,
+                vectors_config={
+                    DENSE_VECTOR_NAME: models.VectorParams(
+                        size=embedder.dim, distance=models.Distance.COSINE
+                    )
+                },
+                sparse_vectors_config={
+                    SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                        modifier=models.Modifier.IDF
+                    )
+                },
+            )
+        except (UnexpectedResponse, ValueError):
+            # Lost a first-startup race: the co-process (HTTP + stdio MCP
+            # starting together against an empty Qdrant) created the
+            # collection between our exists-check and this create. Not an
+            # error — re-enter to run the same shape verification the
+            # exists branch applies; the winner also creates the indexes.
+            if not self._client.collection_exists(self._collection):
+                raise
+            self.ensure_collection(embedder)
+            return
         # Keyword indexes must exist before the first bulk load (§3.6).
         for field in ("project_id", "language"):
             self._client.create_payload_index(
@@ -159,9 +172,7 @@ class VectorStore:
         ``search`` snippets and the M4 reranker can read chunk content
         without re-opening files."""
         if len(chunks) != len(vectors):
-            raise ValueError(
-                f"got {len(chunks)} chunks but {len(vectors)} vectors"
-            )
+            raise ValueError(f"got {len(chunks)} chunks but {len(vectors)} vectors")
         if not chunks:
             return
         points = [
@@ -193,9 +204,7 @@ class VectorStore:
             )
             for chunk, vector in zip(chunks, vectors)
         ]
-        self._client.upsert(
-            collection_name=self._collection, points=points, wait=True
-        )
+        self._client.upsert(collection_name=self._collection, points=points, wait=True)
 
     def delete_file_chunks(
         self,
@@ -332,9 +341,7 @@ class VectorStore:
                         limit=effective_prefetch,
                     ),
                     models.Prefetch(
-                        query=models.Document(
-                            text=query_text, model=BM25_MODEL_ID
-                        ),
+                        query=models.Document(text=query_text, model=BM25_MODEL_ID),
                         using=SPARSE_VECTOR_NAME,
                         filter=query_filter,
                         limit=effective_prefetch,

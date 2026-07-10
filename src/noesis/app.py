@@ -40,7 +40,9 @@ __all__ = [
 ]
 
 
-def create_app(settings: Settings | None = None, ctx: AppContext | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, ctx: AppContext | None = None
+) -> FastAPI:
     """Build the app. Tests pass a pre-built *ctx* (fake embedder,
     in-memory Qdrant); production builds one from settings."""
     cfg = settings or load_settings()
@@ -61,7 +63,7 @@ def create_app(settings: Settings | None = None, ctx: AppContext | None = None) 
         try:
             yield
         finally:
-            app.state.ctx.watcher.stop()
+            await app.state.ctx.watcher.stop()
             if ctx is None:
                 await close_runtime_context(app.state.ctx)
             else:
