@@ -56,19 +56,28 @@ def main() -> None:
 
     if not summary or not next_steps:
         snap = tail_read_transcript(transcript_path)
-        last_assistant = snap.get("last_assistant_message") or "(no transcript content available)"
+        last_assistant = (
+            snap.get("last_assistant_message") or "(no transcript content available)"
+        )
         if not summary:
             summary = f"{AUTO_TAG} last assistant message: {last_assistant}"
         if not next_steps:
             next_steps = f"{AUTO_TAG} review the transcript tail; no explicit next-steps were recorded."
 
     try:
-        run_devlog("session-end", session_id, "--summary", summary, "--next", next_steps)
+        run_devlog(
+            "session-end", session_id, "--summary", summary, "--next", next_steps
+        )
     except Exception:
         try:
-            run_devlog("session-end", session_id,
-                       "--summary", f"{AUTO_TAG} (devlog session-end also failed once; retried)",
-                       "--next", f"{AUTO_TAG} (see transcript directly)")
+            run_devlog(
+                "session-end",
+                session_id,
+                "--summary",
+                f"{AUTO_TAG} (devlog session-end also failed once; retried)",
+                "--next",
+                f"{AUTO_TAG} (see transcript directly)",
+            )
         except Exception:
             pass
 

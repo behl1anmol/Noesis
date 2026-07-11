@@ -277,9 +277,7 @@ def register_project(
 
 
 def get_project(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM projects WHERE id = ?", (project_id,)
-    ).fetchone()
+    return conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
 
 
 def list_projects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -352,7 +350,15 @@ def upsert_file(
           chunk_count = excluded.chunk_count,
           last_indexed_at = excluded.last_indexed_at
         """,
-        (uuid.uuid4().hex, project_id, path, language, content_hash, chunk_count, _now()),
+        (
+            uuid.uuid4().hex,
+            project_id,
+            path,
+            language,
+            content_hash,
+            chunk_count,
+            _now(),
+        ),
     )
     conn.commit()
 
@@ -409,9 +415,54 @@ def start_run(
     return run_id
 
 
-def get_latest_run(
-    conn: sqlite3.Connection, project_id: str
-) -> sqlite3.Row | None:
+def try_start_run(
+    conn: sqlite3.Connection, project_id: str, *, triggered_by: str = "manual"
+) -> tuple[str, bool]:
+    """Atomically open a run — or return the one already running.
+
+    ``BEGIN IMMEDIATE`` takes SQLite's write lock up front, so the
+    running-check and the insert are a single unit even across processes:
+    the documented dual-transport deployment (HTTP server + stdio MCP on
+    one DB) cannot both pass a read-then-insert guard and race two runs
+    onto the same collection. Stale ``running`` rows whose owning process
+    is dead are failed here (same owner probe as ``fail_orphaned_runs``),
+    so a crashed co-process can never jam the guard until a restart.
+
+    Returns ``(run_id, created)`` — ``created`` False means a live run
+    already exists and ``run_id`` is that run's id.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = conn.execute(
+            "SELECT id, owner FROM index_runs WHERE project_id = ?"
+            " AND status = 'running' ORDER BY started_at DESC, rowid DESC",
+            (project_id,),
+        ).fetchall()
+        alive = [r for r in rows if r["owner"] and _owner_alive(r["owner"])]
+        if alive:
+            conn.rollback()  # nothing written; release the lock
+            return alive[0]["id"], False
+        if rows:  # dead owners: fail them now, exactly like fail_orphaned_runs
+            now = _now()
+            conn.executemany(
+                "UPDATE index_runs SET status = 'failed', error = 'interrupted',"
+                " finished_at = ? WHERE id = ?",
+                [(now, r["id"]) for r in rows],
+            )
+        run_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO index_runs (id, project_id, status, started_at,"
+            " triggered_by, owner) VALUES (?, ?, 'running', ?, ?, ?)",
+            (run_id, project_id, _now(), triggered_by, _OWNER),
+        )
+        conn.commit()
+        return run_id, True
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def get_latest_run(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row | None:
     """Most recent index run for a project — the M6 ``get_index_status``
     surface. Ordered by started_at (ISO-8601 UTC, lexicographically
     sortable); ties broken by rowid (insertion order)."""

@@ -47,7 +47,7 @@
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "uv run ruff format --quiet $CLAUDE_FILE_PATH || true" }
+          { "type": "command", "command": "python .claude/hooks/format_edited_file.py" }
         ]
       }
     ],

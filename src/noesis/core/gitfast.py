@@ -205,7 +205,9 @@ def status_dirty_paths(root: str | Path) -> frozenset[str] | None:
 
 
 def _fallback(reason: str) -> None:
-    logger.info("git fast-path unavailable: %s — falling back to full hash-walk", reason)
+    logger.info(
+        "git fast-path unavailable: %s — falling back to full hash-walk", reason
+    )
     return None
 
 

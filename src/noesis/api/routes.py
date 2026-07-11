@@ -56,7 +56,9 @@ async def healthz() -> dict[str, str]:
 
 
 @router.post("/projects", status_code=202)
-async def register_and_index(req: RegisterProjectRequest, request: Request) -> dict[str, str]:
+async def register_and_index(
+    req: RegisterProjectRequest, request: Request
+) -> dict[str, str]:
     ctx = request.app.state.ctx
     try:
         return jobs.launch_index_run(ctx, req.root_path)

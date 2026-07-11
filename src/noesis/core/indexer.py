@@ -147,9 +147,7 @@ async def execute_run(
             project = state.get_project(conn, project_id)
             if project is not None:
                 anchor = project["last_indexed_commit"]
-            git_info = (
-                gitfast.compute_candidates(root_path, anchor) if anchor else None
-            )
+            git_info = gitfast.compute_candidates(root_path, anchor) if anchor else None
             if git_info is not None:
                 head = git_info.head_commit
                 candidates = git_info.candidates
@@ -230,12 +228,33 @@ async def execute_run(
             store.delete_file_chunks(project_id, diff.deleted)
             state.delete_files(conn, project_id, diff.deleted)
 
-        if file_errors:
-            state.record_file_errors(conn, run_id, file_errors)
+        # Hash-time failures (H7 carry-forward) are per-file failures too:
+        # the file's true state is unknown this run, its stored hash may be
+        # stale, and — unlike chunk/embed failures — it never entered
+        # to_index, so without this it would be invisible to every guard
+        # below and silently stranded by the next fast path.
+        hash_errors = [(path, f"hash failed: {msg}") for path, msg in diff.errored]
+        if file_errors or hash_errors:
+            state.record_file_errors(conn, run_id, [*file_errors, *hash_errors])
         # Partial failure is still a completed run (ADR-41); a run where
         # every file failed is not "done" by any honest reading — likely an
         # infrastructure problem (store/embedder down) wearing per-file dress.
-        all_failed = bool(to_index) and len(file_errors) == len(to_index)
+        # Two distinct total-failure shapes: every chunk/embed attempt failed
+        # (existing check), or every hash attempt failed and nothing else in
+        # the whole discovered set is in a known-good state (PR #14 review) —
+        # a whole-tree permission/network-fs outage, where every candidate
+        # lands in hash_errors and `to_index` stays empty, so the chunk/embed
+        # check alone would never see it and the run would report "done"
+        # despite indexing nothing. `verified + skipped == 0` (not just
+        # `verified == 0`) is required: under the git fast path a single
+        # transient failure on a narrow one-file candidate set also leaves
+        # verified at 0, but the rest of the tree is legitimately healthy via
+        # `skipped` (fast-path carry-forward, never in doubt) — that stays a
+        # contained per-file failure, not a run-wide outage.
+        chunk_embed_all_failed = bool(to_index) and len(file_errors) == len(to_index)
+        hash_all_failed = bool(hash_errors) and diff.verified + diff.skipped == 0
+        all_failed = chunk_embed_all_failed or hash_all_failed
+        total_failed = len(file_errors) + len(hash_errors)
         state.finish_run(
             conn,
             run_id,
@@ -244,14 +263,16 @@ async def execute_run(
             files_changed=len(to_index),
             chunks_written=chunks_written,
             fast_path_used=fast_path_active,
-            candidate_count=len(candidates) if fast_path_active and candidates is not None else None,
-            files_failed=len(file_errors),
-            error=f"all {len(file_errors)} files failed" if all_failed else None,
+            candidate_count=len(candidates)
+            if fast_path_active and candidates is not None
+            else None,
+            files_failed=total_failed,
+            error=f"all {total_failed} files failed" if all_failed else None,
         )
         # A run with failed files must not advance the git anchor either:
         # the failed files' state rows are stale, and anchoring past them
         # would let the next fast path carry them forward as unchanged.
-        if head is not None and not file_errors:
+        if head is not None and not file_errors and not hash_errors:
             # Persist the working-tree-dirty set with the anchor (H1). The
             # fast path already captured it at run start (git_info); a
             # full-walk run re-queries `git status` here.
@@ -260,9 +281,7 @@ async def execute_run(
                 if git_info is not None
                 else (gitfast.status_dirty_paths(root_path) or frozenset())
             )
-            state.set_last_indexed_commit(
-                conn, project_id, head, dirty_paths=new_dirty
-            )
+            state.set_last_indexed_commit(conn, project_id, head, dirty_paths=new_dirty)
         return IndexResult(
             project_id=project_id,
             run_id=run_id,
@@ -271,9 +290,11 @@ async def execute_run(
             files_deleted=len(diff.deleted),
             chunks_written=chunks_written,
             fast_path_used=fast_path_active,
-            candidate_count=len(candidates) if fast_path_active and candidates is not None else None,
-            files_failed=len(file_errors),
-            failed_paths=tuple(path for path, _ in file_errors),
+            candidate_count=len(candidates)
+            if fast_path_active and candidates is not None
+            else None,
+            files_failed=total_failed,
+            failed_paths=tuple(path for path, _ in (*file_errors, *hash_errors)),
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

@@ -148,7 +148,11 @@ async def test_sparse_channel_skips_query_embed_with_rerank():
     store = StubStore(fusion_hits())
     embedder = FakeEmbedder()
     result = await search_code(
-        store, embedder, "validate token", "p1", channel="sparse",
+        store,
+        embedder,
+        "validate token",
+        "p1",
+        channel="sparse",
         reranker=FakeReranker(),
     )
     assert embedder.query_calls == []

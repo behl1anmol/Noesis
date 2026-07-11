@@ -30,10 +30,14 @@ def _git(root: Path, *args: str) -> None:
     subprocess.run(
         (
             "git",
-            "-c", "user.name=test",
-            "-c", "user.email=test@test",
-            "-c", "commit.gpgsign=false",
-            "-C", str(root),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(root),
             *args,
         ),
         check=True,
@@ -95,7 +99,9 @@ async def test_h1_reverted_dirty_file_reindexed_on_fast_path(tmp_path: Path) -> 
 # --- H7: an unreadable-but-present file is not a deletion --------------------
 
 
-def test_h7_transient_oserror_preserves_stored_hash(tmp_path: Path, monkeypatch) -> None:
+def test_h7_transient_oserror_preserves_stored_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
     (tmp_path / "live.py").write_text("x\n")
     (tmp_path / "ok.py").write_text("y\n")
     stored = {"live.py": "STORED_HASH", "ok.py": "OLD_HASH"}
@@ -147,9 +153,7 @@ def test_m7_dead_owner_run_is_failed(tmp_path: Path) -> None:
     conn = _state_conn(tmp_path)
     pid = state.register_project(conn, tmp_path, "m")
     run = state.start_run(conn, pid)
-    conn.execute(
-        "UPDATE index_runs SET owner=? WHERE id=?", ("dead-boot:1", run)
-    )
+    conn.execute("UPDATE index_runs SET owner=? WHERE id=?", ("dead-boot:1", run))
     conn.commit()
     assert state.fail_orphaned_runs(conn) == 1
     row = conn.execute(

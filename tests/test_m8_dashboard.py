@@ -77,7 +77,9 @@ def test_pending_changes_upsert_and_scoped_clear(ctx, project_dir):
     state.upsert_pending_changes(ctx.conn, pid, [("a.py", "modified")])
     cut = ctx.conn.execute("SELECT detected_at FROM pending_changes").fetchone()[0]
     # Re-dirty after the cut: the clear at `cut` must NOT remove the row.
-    state.upsert_pending_changes(ctx.conn, pid, [("a.py", "deleted"), ("b.py", "created")])
+    state.upsert_pending_changes(
+        ctx.conn, pid, [("a.py", "deleted"), ("b.py", "created")]
+    )
     state.clear_pending_changes(ctx.conn, pid, paths=["a.py"], before=cut)
     remaining = {r["path"] for r in state.list_pending_changes(ctx.conn, pid)}
     assert remaining == {"a.py", "b.py"}  # a.py survived (re-dirtied later)
@@ -114,7 +116,12 @@ def test_scoped_run_hashes_only_candidates(ctx, project_dir):
     pid, rid = indexer.prepare_run(ctx.conn, ctx.embedder, str(project_dir))
     scoped = asyncio.run(
         indexer.execute_run(
-            ctx.conn, ctx.store, ctx.embedder, str(project_dir), pid, rid,
+            ctx.conn,
+            ctx.store,
+            ctx.embedder,
+            str(project_dir),
+            pid,
+            rid,
             paths=["auth.py"],
         )
     )
@@ -127,16 +134,25 @@ def test_scoped_run_hashes_only_candidates(ctx, project_dir):
     assert follow.files_indexed == 1  # exactly db.py
 
 
-def test_scoped_run_detects_deletions_and_never_advances_anchor(ctx, project_dir, tmp_path):
+def test_scoped_run_detects_deletions_and_never_advances_anchor(
+    ctx, project_dir, tmp_path
+):
     import os
     import subprocess
 
     def git(*args):
         subprocess.run(
-            ["git", *args], cwd=project_dir, check=True, capture_output=True,
-            env={**os.environ,
-                 "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+            ["git", *args],
+            cwd=project_dir,
+            check=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            },
         )
 
     git("init", "-q")
@@ -156,7 +172,12 @@ def test_scoped_run_detects_deletions_and_never_advances_anchor(ctx, project_dir
     _, rid = indexer.prepare_run(ctx.conn, ctx.embedder, str(project_dir))
     scoped = asyncio.run(
         indexer.execute_run(
-            ctx.conn, ctx.store, ctx.embedder, str(project_dir), pid, rid,
+            ctx.conn,
+            ctx.store,
+            ctx.embedder,
+            str(project_dir),
+            pid,
+            rid,
             paths=["auth.py"],
         )
     )
@@ -197,7 +218,8 @@ def test_per_file_error_contained(ctx, project_dir, monkeypatch):
 
 def test_all_files_failed_marks_run_failed(ctx, project_dir, monkeypatch):
     monkeypatch.setattr(
-        indexer, "chunk_file",
+        indexer,
+        "chunk_file",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("total loss")),
     )
     result = asyncio.run(
@@ -213,7 +235,12 @@ def test_progress_callback_and_run_progress(ctx, project_dir):
     pid, rid = indexer.prepare_run(ctx.conn, ctx.embedder, str(project_dir))
     asyncio.run(
         indexer.execute_run(
-            ctx.conn, ctx.store, ctx.embedder, str(project_dir), pid, rid,
+            ctx.conn,
+            ctx.store,
+            ctx.embedder,
+            str(project_dir),
+            pid,
+            rid,
             on_progress=lambda d, t, c: seen.append((d, t, c)),
         )
     )
@@ -222,7 +249,9 @@ def test_progress_callback_and_run_progress(ctx, project_dir):
     import time as _time
 
     ctx.progress["r1"] = {
-        "files_done": 5, "files_to_index": 20, "chunks_written": 40,
+        "files_done": 5,
+        "files_to_index": 20,
+        "chunks_written": 40,
         "monotonic_start": _time.monotonic() - 10.0,
     }
     prog = jobs.run_progress(ctx, "r1")
@@ -272,7 +301,9 @@ def test_device_endpoint(client):
     resp = client.post("/api/settings/device", json={"device": "cpu"})
     assert resp.status_code == 200
     assert resp.json()["setting"] == "cpu"
-    assert client.post("/api/settings/device", json={"device": "tpu"}).status_code == 400
+    assert (
+        client.post("/api/settings/device", json={"device": "tpu"}).status_code == 400
+    )
 
 
 def test_device_config_pin_blocks_dashboard(tmp_path):
@@ -327,9 +358,7 @@ def test_search_logs_metadata_only(client, project_dir):
 def test_usage_aggregation(client, project_dir):
     body = client.post("/projects", json={"root_path": str(project_dir)}).json()
     asyncio.run(_wait_done(client, body["run_id"]))
-    client.post(
-        "/search", json={"query": "q", "project_id": body["project_id"]}
-    )
+    client.post("/search", json={"query": "q", "project_id": body["project_id"]})
     usage = client.get("/api/usage").json()
     assert usage["index_activity"]["total_runs"] == 1
     assert usage["search_usage"]["total_queries"] == 1

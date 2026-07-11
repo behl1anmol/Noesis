@@ -150,7 +150,9 @@ class _IgnoreStack:
         return decision
 
 
-def discover_files(root: str | Path, config: DiscoveryConfig | None = None) -> list[str]:
+def discover_files(
+    root: str | Path, config: DiscoveryConfig | None = None
+) -> list[str]:
     """Return sorted, POSIX-style relative paths of indexable files under *root*."""
     cfg = config or DiscoveryConfig()
     root_path = Path(root).resolve()

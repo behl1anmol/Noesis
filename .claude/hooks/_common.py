@@ -52,7 +52,9 @@ def run_devlog(*args: str, input_text: str | None = None, check: bool = True) ->
     return result.stdout
 
 
-def tail_read_transcript(transcript_path: str | None, max_lines: int = 50) -> dict[str, Any]:
+def tail_read_transcript(
+    transcript_path: str | None, max_lines: int = 50
+) -> dict[str, Any]:
     """Bounded tail-read of a transcript JSONL file for a mechanical, cheap
     state snapshot — never a full-file parse, never an LLM call (hooks can't
     invoke the model synchronously).
@@ -105,13 +107,23 @@ def tail_read_transcript(transcript_path: str | None, max_lines: int = 50) -> di
         content = message.get("content")
         if isinstance(content, list):
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use" and len(tool_calls) < 5:
-                    tool_calls.append({
-                        "tool": block.get("name"),
-                        "target": _tool_target(block.get("input")),
-                    })
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and len(tool_calls) < 5
+                ):
+                    tool_calls.append(
+                        {
+                            "tool": block.get("name"),
+                            "target": _tool_target(block.get("input")),
+                        }
+                    )
 
-        if len(tool_calls) >= 5 and summary["last_user_message"] and summary["last_assistant_message"]:
+        if (
+            len(tool_calls) >= 5
+            and summary["last_user_message"]
+            and summary["last_assistant_message"]
+        ):
             break
 
     summary["recent_tool_calls"] = tool_calls[:5]
@@ -126,7 +138,9 @@ def _extract_text(message: dict[str, Any]) -> str | None:
         parts = [
             block.get("text")
             for block in content
-            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and block.get("text")
         ]
         if parts:
             return " ".join(parts)

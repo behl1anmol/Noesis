@@ -93,9 +93,12 @@ def test_line_overlap_required_when_lines_given():
 
 
 def test_dedupe_keeps_best_rank_and_counts_file_once():
-    assert [r["file_path"] for r in dedupe_by_path(
-        [result("a.py", 1, 5), result("b.py"), result("a.py", 50, 60)]
-    )] == ["a.py", "b.py"]
+    assert [
+        r["file_path"]
+        for r in dedupe_by_path(
+            [result("a.py", 1, 5), result("b.py"), result("a.py", 50, 60)]
+        )
+    ] == ["a.py", "b.py"]
     # Two chunks of the same relevant file are one retrieval, not two.
     relevant = (RelevantItem("a.py"), RelevantItem("b.py"))
     scores = score_query([result("a.py", 1, 5), result("a.py", 9, 20)], relevant)
@@ -103,7 +106,10 @@ def test_dedupe_keeps_best_rank_and_counts_file_once():
 
 
 def test_two_relevant_greedy_credit():
-    relevant = (RelevantItem("a.py", lines=(1, 10)), RelevantItem("a.py", lines=(50, 60)))
+    relevant = (
+        RelevantItem("a.py", lines=(1, 10)),
+        RelevantItem("a.py", lines=(50, 60)),
+    )
     # One deduped result can credit only one of two same-file items.
     scores = score_query([result("a.py", 1, 60)], relevant)
     assert scores["recall@10"] == 0.5
@@ -250,9 +256,7 @@ async def test_golden_set_gate_numbers(corpus):
             "dense": await evaluate(channel_fn("dense"), golden),
             "sparse": await evaluate(channel_fn("sparse"), golden),
             "hybrid": await evaluate(channel_fn("hybrid"), golden),
-            "hybrid+rerank": await evaluate(
-                channel_fn("hybrid", rerank=True), golden
-            ),
+            "hybrid+rerank": await evaluate(channel_fn("hybrid", rerank=True), golden),
         }
     finally:
         reranker.close()

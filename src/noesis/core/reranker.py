@@ -84,8 +84,7 @@ class FakeReranker:
         if not query_tokens:
             return [0.0 for _ in texts]
         return [
-            len(query_tokens & self._tokens(text)) / len(query_tokens)
-            for text in texts
+            len(query_tokens & self._tokens(text)) / len(query_tokens) for text in texts
         ]
 
 

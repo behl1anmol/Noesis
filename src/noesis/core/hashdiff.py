@@ -34,6 +34,30 @@ class DiffResult:
     deleted: tuple[str, ...] = field(default=())
     hashes: Mapping[str, str] = field(default_factory=dict)
     """Current content hash for every discovered file (new/changed/unchanged)."""
+    errored: tuple[tuple[str, str], ...] = field(default=())
+    """(path, error) for files whose hash attempt failed non-fatally (the H7
+    carry-forward). The file's true state is UNKNOWN this run — callers must
+    treat these like per-file failures: never advance the git anchor past
+    them and re-queue them for retry, or a committed-then-errored file is
+    carried forward as unchanged on every future fast-path run (stale
+    forever)."""
+    verified: int = 0
+    """Count of files where ``hash_file`` actually succeeded this run
+    (whether the result landed in new/changed/unchanged). NOT the same as
+    ``len(unchanged)``: an errored file with a prior hash is also carried
+    into ``unchanged`` (H7), so ``unchanged`` alone cannot tell a real
+    outage (every hash attempt failing) from ordinary steady state (nothing
+    changed)."""
+    skipped: int = 0
+    """Count of files carried forward as unchanged purely because the git
+    fast path excluded them (not a candidate) — a deliberate, healthy skip,
+    never hashed and never in doubt. Distinct from ``verified`` because a
+    caller judging "did this run make zero real progress" must not count a
+    narrow candidate set (fast path correctly skipping most of the tree) as
+    equivalent to a whole-tree hashing outage: ``verified + skipped == 0``
+    together with ``errored`` is a real "nothing in the whole discovered set
+    is in a known-good state" signal; ``verified == 0`` alone is not, since
+    it is the fast path's steady-state norm."""
 
 
 def partition(
@@ -65,30 +89,36 @@ def partition(
     changed: list[str] = []
     unchanged: list[str] = []
     hashes: dict[str, str] = {}
+    errored: list[tuple[str, str]] = []
     seen: set[str] = set()
+    verified = 0
+    skipped = 0
 
     for rel in discovered:
         prior_hash = stored.get(rel)
-        if (
-            candidates is not None
-            and prior_hash is not None
-            and rel not in candidates
-        ):
+        if candidates is not None and prior_hash is not None and rel not in candidates:
             seen.add(rel)
             hashes[rel] = prior_hash
             unchanged.append(rel)
+            skipped += 1
             continue
         try:
             current = hash_file(root / rel)
         except (FileNotFoundError, NotADirectoryError):
             continue  # genuinely vanished mid-run; falls through to deleted
-        except OSError:
+        except OSError as exc:
             # Transient/permission failure (EACCES after a chmod, EIO/ESTALE
             # on a network fs) on a file that still exists — NOT a deletion
             # (H7). Conflating the two would purge a live file's chunks. Carry
-            # the stored hash forward as unchanged so its chunks keep serving
-            # and the next run retries; a file unknown to `stored` we simply
-            # skip this run (nothing to preserve, and it is not "deleted").
+            # the stored hash forward as unchanged so its chunks keep serving;
+            # a file unknown to `stored` we simply skip this run (nothing to
+            # preserve, and it is not "deleted"). Either way the path is
+            # surfaced in `errored`: "the next run retries" holds only if the
+            # caller keeps the git anchor back / re-queues it — under the fast
+            # path a committed file that errored here would otherwise never be
+            # a candidate again and its stale hash would be carried forward on
+            # every future run.
+            errored.append((rel, str(exc) or type(exc).__name__))
             if prior_hash is not None:
                 seen.add(rel)
                 hashes[rel] = prior_hash
@@ -96,6 +126,7 @@ def partition(
             continue
         seen.add(rel)
         hashes[rel] = current
+        verified += 1
         prior = stored.get(rel)
         if prior is None:
             new.append(rel)
@@ -111,4 +142,7 @@ def partition(
         unchanged=tuple(sorted(unchanged)),
         deleted=tuple(deleted),
         hashes=hashes,
+        errored=tuple(errored),
+        verified=verified,
+        skipped=skipped,
     )

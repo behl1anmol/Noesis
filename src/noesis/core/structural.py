@@ -197,7 +197,9 @@ async def structural_search(
     cfg = settings or StructuralSettings()
     project = state.get_project(conn, project_id)
     if project is None:
-        raise StructuralSearchError("unknown_project", f"unknown project_id {project_id!r}")
+        raise StructuralSearchError(
+            "unknown_project", f"unknown project_id {project_id!r}"
+        )
     cfg_discovery = discovery_config_for_project(conn, project_id)
     if language not in LANGUAGE_MAP:
         raise StructuralSearchError(
@@ -210,7 +212,9 @@ async def structural_search(
     # Requests may lower the configured cap, never raise it; a non-positive
     # value (REST validates ge=1, but core has other callers — MCP in M6)
     # clamps to 1 rather than silently returning nothing.
-    limit = cfg.max_results if max_results is None else min(max_results, cfg.max_results)
+    limit = (
+        cfg.max_results if max_results is None else min(max_results, cfg.max_results)
+    )
     limit = max(1, limit)
 
     return await asyncio.get_running_loop().run_in_executor(

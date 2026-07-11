@@ -41,8 +41,14 @@ def _get(url: str, timeout: float):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--base-url", default=None, help=f"Noesis base URL (default {DEFAULT_BASE_URL}).")
-    parser.add_argument("--timeout", type=float, default=10.0, help="Per-request timeout in seconds.")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help=f"Noesis base URL (default {DEFAULT_BASE_URL}).",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=10.0, help="Per-request timeout in seconds."
+    )
     args = parser.parse_args()
 
     base_url = resolve_base_url(args.base_url)
@@ -77,12 +83,16 @@ def main() -> None:
 
     if not projects:
         print("  [WARN] no projects registered.")
-        print("         Register one: scripts/register_project.py <abs-repo-path> --wait")
+        print(
+            "         Register one: scripts/register_project.py <abs-repo-path> --wait"
+        )
         sys.exit(0)
 
     print(f"  [ OK ] {len(projects)} project(s) registered:")
     for p in projects:
-        print(f"         - id={p.get('id')}  root={p.get('root_path')}  model={p.get('embedding_model')}")
+        print(
+            f"         - id={p.get('id')}  root={p.get('root_path')}  model={p.get('embedding_model')}"
+        )
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from _common import read_hook_input  # noqa: E402
 # and specific — patterns that a prefix-glob permission entry can't already
 # catch, not an attempt at an exhaustive denylist.
 
+
 def _is_force_push(command: str) -> bool:
     # --force-with-lease is the safe, reviewed variant; strip it out first so
     # the bare --force/-f check below doesn't false-positive on the sub-match
@@ -43,10 +44,22 @@ def _is_force_push(command: str) -> bool:
 
 
 DANGEROUS_PATTERNS: list[tuple[object, str]] = [
-    (re.compile(r"\brm\s+-rf\b").search, "rm -rf anywhere in the command, including inside a chain (e.g. `a && rm -rf ...`)"),
-    (_is_force_push, "force push (git push --force / -f; --force-with-lease is allowed)"),
-    (re.compile(r"\bgit\s+reset\s+--hard\b").search, "git reset --hard (discards uncommitted work)"),
-    (re.compile(r"\bsudo\b").search, "sudo — this project should never need elevated privileges"),
+    (
+        re.compile(r"\brm\s+-rf\b").search,
+        "rm -rf anywhere in the command, including inside a chain (e.g. `a && rm -rf ...`)",
+    ),
+    (
+        _is_force_push,
+        "force push (git push --force / -f; --force-with-lease is allowed)",
+    ),
+    (
+        re.compile(r"\bgit\s+reset\s+--hard\b").search,
+        "git reset --hard (discards uncommitted work)",
+    ),
+    (
+        re.compile(r"\bsudo\b").search,
+        "sudo — this project should never need elevated privileges",
+    ),
     (re.compile(r"\bdd\s+if=").search, "dd if=... (raw disk/device write)"),
     (re.compile(r"\bmkfs\b").search, "mkfs (filesystem format)"),
     (re.compile(r"\bchmod\s+-R\s+777\b").search, "recursive chmod 777"),
@@ -61,14 +74,18 @@ def main() -> None:
 
     for predicate, reason in DANGEROUS_PATTERNS:
         if predicate(command):
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": f"guard_bash.py: blocked — {reason}. "
-                                                 f"Command: {command[:200]}",
-                }
-            }))
+            print(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": f"guard_bash.py: blocked — {reason}. "
+                            f"Command: {command[:200]}",
+                        }
+                    }
+                )
+            )
             return
 
     # No match: emit nothing, let the normal permission flow decide.

@@ -29,10 +29,7 @@ def project_dir(tmp_path):
         '    """Check JWT expiry before trusting claims."""\n'
         "    return token.expiry > now()\n"
     )
-    (src / "db.py").write_text(
-        "def connect(dsn):\n"
-        "    return Driver(dsn)\n"
-    )
+    (src / "db.py").write_text("def connect(dsn):\n    return Driver(dsn)\n")
     return src
 
 
@@ -115,7 +112,9 @@ def test_project_status_and_reindex_roundtrip(client, project_dir):
     # Incremental: nothing changed between the two runs.
     assert run["status"] == "done"
     assert run["files_changed"] == 0
-    assert client.get(f"/projects/{project_id}/status").json()["run_id"] == again["run_id"]
+    assert (
+        client.get(f"/projects/{project_id}/status").json()["run_id"] == again["run_id"]
+    )
 
 
 def test_project_status_unknown_404(client):
@@ -176,7 +175,11 @@ def test_search_without_reranker_states_not_reranked(client, project_dir):
     for payload in ({}, {"rerank": True}):
         resp = client.post(
             "/search",
-            json={"query": "validate token", "project_id": body["project_id"], **payload},
+            json={
+                "query": "validate token",
+                "project_id": body["project_id"],
+                **payload,
+            },
         )
         assert resp.status_code == 200
         assert resp.json()["reranked"] is False

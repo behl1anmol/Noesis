@@ -43,9 +43,7 @@ def project(tmp_path):
 @pytest.mark.parametrize("gp", PATTERNS, ids=[p.id for p in PATTERNS])
 async def test_structural_pattern_exact_counts(project, gp):
     conn, pid = project
-    result = await structural_search(
-        conn, pid, gp.pattern, gp.language, paths=["src"]
-    )
+    result = await structural_search(conn, pid, gp.pattern, gp.language, paths=["src"])
     got: dict[str, int] = {}
     for m in result["matches"]:
         got[m["file_path"]] = got.get(m["file_path"], 0) + 1

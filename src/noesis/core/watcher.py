@@ -113,17 +113,25 @@ class WatcherManager:
                 if pending:
                     self._launch_scoped(row["id"], [p["path"] for p in pending])
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         # Stop the observer first (no new events), then drain what already
         # reached the queue and flush the accumulator — otherwise up to one
         # debounce window of events is dropped across a clean restart, and
         # start()'s catch-up only ever sees flushed rows (PR #10 review).
+        # Async: the observer join is a blocking thread join (up to 5 s on a
+        # slow dispatch) that must not stall the event loop mid-shutdown,
+        # and the cancelled consumer must be awaited or the loop can tear
+        # down while it is still pending ("Task was destroyed…").
         if self._observer is not None:
             self._observer.stop()
-            self._observer.join(timeout=5)
+            await asyncio.to_thread(self._observer.join, 5)
             self._observer = None
         if self._consumer is not None:
             self._consumer.cancel()
+            try:
+                await self._consumer
+            except asyncio.CancelledError:
+                pass
             self._consumer = None
         while True:
             try:
@@ -296,9 +304,7 @@ class WatcherManager:
             )
             return
         state.bump_watcher_stats(self._ctx.conn, project_id, auto_runs=1)
-        logger.info(
-            "auto-reindex launched for %s (%d pending)", project_id, len(paths)
-        )
+        logger.info("auto-reindex launched for %s (%d pending)", project_id, len(paths))
 
 
 class _Handler:
@@ -312,7 +318,9 @@ class _Handler:
         etype = event.event_type
         if etype == "moved":
             self._emit(event.src_path, "deleted", is_dir=event.is_directory)
-            self._emit(getattr(event, "dest_path", ""), "created", is_dir=event.is_directory)
+            self._emit(
+                getattr(event, "dest_path", ""), "created", is_dir=event.is_directory
+            )
             return
         if etype not in ("created", "modified", "deleted"):
             return  # opened/closed/closed_no_write etc.

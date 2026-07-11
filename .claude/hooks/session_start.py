@@ -43,8 +43,10 @@ def main() -> None:
         try:
             run_devlog("session-start", session_id)
         except Exception:
-            sections.append("(failed to record session-start in devlog — dev/devlog.sqlite"
-                             " may be missing or unwritable)")
+            sections.append(
+                "(failed to record session-start in devlog — dev/devlog.sqlite"
+                " may be missing or unwritable)"
+            )
 
     try:
         latest_args = ["latest", "--include-dangling"]
@@ -52,20 +54,33 @@ def main() -> None:
             latest_args += ["--exclude-session", session_id]
         sections.append(run_devlog(*latest_args).strip())
     except Exception:
-        sections.append("(devlog latest failed — dev/devlog.sqlite may be missing or corrupt;"
-                         " run `python .claude/scripts/devlog.py init`)")
+        sections.append(
+            "(devlog latest failed — dev/devlog.sqlite may be missing or corrupt;"
+            " run `python .claude/scripts/devlog.py init`)"
+        )
 
     if source == "compact" and session_id:
         try:
-            checkpoint_text = run_devlog("checkpoint", "latest", "--session", session_id).strip()
-            sections.append("Compaction just occurred; state immediately prior to it:\n" + checkpoint_text)
+            checkpoint_text = run_devlog(
+                "checkpoint", "latest", "--session", session_id
+            ).strip()
+            sections.append(
+                "Compaction just occurred; state immediately prior to it:\n"
+                + checkpoint_text
+            )
         except Exception:
-            sections.append("Compaction just occurred, but no checkpoint could be retrieved for this session.")
+            sections.append(
+                "Compaction just occurred, but no checkpoint could be retrieved for this session."
+            )
 
     try:
         if not LESSONS_MD.exists():
             run_devlog("render-lessons")
-        lessons_text = LESSONS_MD.read_text().strip() if LESSONS_MD.exists() else "(no lessons file found)"
+        lessons_text = (
+            LESSONS_MD.read_text().strip()
+            if LESSONS_MD.exists()
+            else "(no lessons file found)"
+        )
         sections.append(lessons_text)
     except Exception:
         sections.append("(failed to load dev/LESSONS.md)")
