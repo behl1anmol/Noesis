@@ -225,10 +225,27 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
-    for table, column, ddl_type in _MIGRATIONS:
-        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+    # Migrations run single-writer: the dual-transport deployment (HTTP +
+    # stdio MCP on one DB) can call init_db concurrently, and an unguarded
+    # check-then-ALTER races — the loser's ALTER raises 'duplicate column
+    # name', a schema error busy_timeout cannot retry, aborting that
+    # process's startup. BEGIN IMMEDIATE serializes the loop (the second
+    # writer's table_info re-read then sees the committed column and
+    # skips); the except is a backstop for a pre-lock writer running older
+    # code, where skipping is correct — the column exists.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for table, column, ddl_type in _MIGRATIONS:
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc):
+                        raise
+    except BaseException:
+        conn.rollback()
+        raise
     conn.commit()
 
 

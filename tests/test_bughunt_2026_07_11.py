@@ -246,3 +246,54 @@ def test_cwd_config_toml_remains_a_dev_override(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     assert load_settings().qdrant.collection == "dev_chunks"
+
+
+# --- 4. concurrent init_db must not crash on the migration race --------------
+
+
+def test_concurrent_init_db_survives_migration_race(tmp_path):
+    """Dual-transport startup (HTTP + stdio MCP) can run init_db on the same
+    pre-migration DB simultaneously. Simulate the loser's view: writer A has
+    ALTERed a migration column but not committed while B runs init_db — B's
+    table_info read (WAL snapshot) says the column is absent, and pre-fix
+    B's own ALTER then hit 'duplicate column name' (a schema error
+    busy_timeout can't retry) and aborted B's startup."""
+    import threading
+
+    db = tmp_path / "state.sqlite"
+    setup = state.connect(db)
+    setup.executescript(state._SCHEMA)  # pre-migration: no watch_enabled etc.
+    setup.commit()
+    setup.close()
+
+    writer = state.connect(db)
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute(
+        "ALTER TABLE projects ADD COLUMN watch_enabled INTEGER NOT NULL DEFAULT 0"
+    )
+
+    errors: list[BaseException] = []
+
+    def loser() -> None:
+        conn_b = state.connect(db)
+        try:
+            state.init_db(conn_b)  # blocks on writer's lock, then must not crash
+        except BaseException as exc:  # noqa: BLE001 — recorded for the assert
+            errors.append(exc)
+        finally:
+            conn_b.close()
+
+    thread = threading.Thread(target=loser)
+    thread.start()
+    time.sleep(1.0)  # let B pass its schema read and block on the lock
+    writer.commit()
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+    assert not errors, f"concurrent init_db crashed: {errors!r}"
+
+    # Whoever won, the schema must be complete.
+    check = state.connect(db)
+    cols = {row[1] for row in check.execute("PRAGMA table_info(projects)")}
+    assert {"watch_enabled", "auto_reindex"} <= cols
+    check.close()
+    writer.close()
