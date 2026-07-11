@@ -190,3 +190,59 @@ def test_total_embed_outage_still_marks_run_failed(tmp_path):
     run_row = state.get_latest_run(conn, result.project_id)
     assert run_row["status"] == "failed"
     assert run_row["error"] == "all 2 files failed"
+
+
+# --- 3. db_path/config resolution must not depend on the process cwd ---------
+
+
+def test_default_db_path_is_anchored_and_cwd_independent(tmp_path, monkeypatch):
+    """Two processes launched from different cwds (uvicorn from the repo,
+    stdio MCP from the agent host's cwd) must resolve the SAME state DB."""
+    from noesis.core.config import load_settings
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.delenv("NOESIS_CONFIG", raising=False)
+
+    cwd_a = tmp_path / "repo-checkout"
+    cwd_b = tmp_path / "agent-host-cwd"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+
+    monkeypatch.chdir(cwd_a)
+    db_a = load_settings().db_path
+    monkeypatch.chdir(cwd_b)
+    db_b = load_settings().db_path
+
+    assert db_a == db_b == tmp_path / "xdg-data" / "noesis" / "noesis.sqlite"
+    assert db_a.is_absolute()
+
+
+def test_noesis_config_env_points_at_the_config_file(tmp_path, monkeypatch):
+    """$NOESIS_CONFIG lets a host that can't control its cwd pin the config;
+    a relative db_path inside resolves against the config file's directory,
+    not the cwd."""
+    from noesis.core.config import load_settings
+
+    cfg_dir = tmp_path / "custom"
+    cfg_dir.mkdir()
+    (cfg_dir / "my.toml").write_text('db_path = "state/db.sqlite"\n')
+    monkeypatch.setenv("NOESIS_CONFIG", str(cfg_dir / "my.toml"))
+    monkeypatch.chdir(tmp_path)  # cwd is elsewhere on purpose
+
+    settings = load_settings()
+
+    assert settings.db_path == cfg_dir / "state" / "db.sqlite"
+
+
+def test_cwd_config_toml_remains_a_dev_override(tmp_path, monkeypatch):
+    """Running from a checkout that carries a config.toml keeps working —
+    the cwd file is a deliberate override, looked up before the XDG path."""
+    from noesis.core.config import load_settings
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.delenv("NOESIS_CONFIG", raising=False)
+    (tmp_path / "config.toml").write_text('[qdrant]\ncollection = "dev_chunks"\n')
+    monkeypatch.chdir(tmp_path)
+
+    assert load_settings().qdrant.collection == "dev_chunks"

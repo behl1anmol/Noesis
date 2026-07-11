@@ -62,11 +62,15 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
     # Same persistent fastembed cache default as noesis.prefetch —
     # without it, the BM25 assets land in the system tmp dir and
     # get re-fetched after a reboot (runtime network, ADR-25-adjacent).
+    import logging
     import os
 
     from noesis.prefetch import FASTEMBED_CACHE_ENV, default_fastembed_cache
 
     os.environ.setdefault(FASTEMBED_CACHE_ENV, default_fastembed_cache())
+    # Log the resolved DB so a divergence between the HTTP and stdio
+    # transports (each logs its own path at startup) is visible, not silent.
+    logging.getLogger(__name__).info("state db: %s", cfg.db_path)
     conn = state.connect(cfg.db_path)
     state.init_db(conn)
     # Crash recovery: mark runs whose owning process is dead as failed, so a

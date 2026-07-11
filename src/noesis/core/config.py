@@ -3,15 +3,44 @@
 M2 added ``[embedder]`` and ``[qdrant]`` plus the state-DB path; M4 added
 ``[reranker]``; M5 adds ``[structural]``; M7 adds ``[git]``. Everything has
 a working default so the service runs with no config file at all.
+
+Path defaults are anchored, never cwd-relative: the HTTP server (run from a
+checkout) and the stdio MCP server (spawned with the agent host's cwd) must
+resolve the SAME state DB, or the MCP tools silently answer "unknown
+project_id" for every project registered via the dashboard. Same failure
+class — and same cure — as prefetch.default_fastembed_cache.
 """
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_QUERY_URL = "http://127.0.0.1:6333"
+
+# Explicit config-file override for hosts that can't control their cwd
+# (e.g. an agent host's MCP server entry): NOESIS_CONFIG=/path/to/config.toml
+CONFIG_ENV = "NOESIS_CONFIG"
+
+
+def default_db_path() -> Path:
+    """Absolute, cwd-independent default location for the state DB
+    (user data dir, ``~/.local/share/noesis/noesis.sqlite``)."""
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base).expanduser() / "noesis" / "noesis.sqlite"
+
+
+def default_config_path() -> Path:
+    """Config lookup when neither an explicit path nor $NOESIS_CONFIG is
+    given: ``./config.toml`` when present (deliberate dev override for
+    running from a checkout), else the anchored user config dir."""
+    cwd_cfg = Path("config.toml")
+    if cwd_cfg.is_file():
+        return cwd_cfg
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base).expanduser() / "noesis" / "config.toml"
 
 
 @dataclass(frozen=True)
@@ -71,7 +100,7 @@ class QdrantSettings:
 
 @dataclass(frozen=True)
 class Settings:
-    db_path: Path = Path("data/noesis.sqlite")
+    db_path: Path = field(default_factory=default_db_path)
     embedder: EmbedderSettings = field(default_factory=EmbedderSettings)
     reranker: RerankerSettings = field(default_factory=RerankerSettings)
     structural: StructuralSettings = field(default_factory=StructuralSettings)
@@ -87,8 +116,16 @@ def _require_bool(value: object, key: str) -> bool:
     return value
 
 
-def load_settings(config_path: str | Path = "config.toml") -> Settings:
-    """Load settings from *config_path*, falling back to defaults per key."""
+def load_settings(config_path: str | Path | None = None) -> Settings:
+    """Load settings, falling back to defaults per key.
+
+    Resolution order: explicit *config_path* → ``$NOESIS_CONFIG`` →
+    ``./config.toml`` (dev override) → ``$XDG_CONFIG_HOME/noesis/config.toml``.
+    A relative ``db_path`` inside the file resolves against the file's own
+    directory, never the process cwd — the cwd belongs to whoever spawned us.
+    """
+    if config_path is None:
+        config_path = os.environ.get(CONFIG_ENV) or default_config_path()
     path = Path(config_path)
     if not path.is_file():
         return Settings()
@@ -99,8 +136,15 @@ def load_settings(config_path: str | Path = "config.toml") -> Settings:
     stru = raw.get("structural", {})
     git = raw.get("git", {})
     qdr = raw.get("qdrant", {})
+    raw_db = raw.get("db_path")
+    if raw_db is None:
+        db_path = default_db_path()
+    else:
+        db_path = Path(raw_db).expanduser()
+        if not db_path.is_absolute():
+            db_path = (path.resolve().parent / db_path).resolve()
     return Settings(
-        db_path=Path(raw.get("db_path", Settings.db_path)).expanduser(),
+        db_path=db_path,
         embedder=EmbedderSettings(
             model=emb.get("model", EmbedderSettings.model),
             dim=int(emb.get("dim", EmbedderSettings.dim)),
