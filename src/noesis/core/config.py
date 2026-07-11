@@ -126,7 +126,12 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     """
     if config_path is None:
         config_path = os.environ.get(CONFIG_ENV) or default_config_path()
-    path = Path(config_path)
+    # expanduser first: an MCP host commonly sets NOESIS_CONFIG (or passes an
+    # explicit path) as a literal "~/..." that no shell expanded. Without this
+    # the is_file() check misses the real config and silently falls back to
+    # zero-config defaults — reopening the default DB and reintroducing the
+    # exact silent divergence ADR-44 closes.
+    path = Path(config_path).expanduser()
     if not path.is_file():
         return Settings()
     with open(path, "rb") as fh:

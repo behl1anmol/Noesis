@@ -235,6 +235,28 @@ def test_noesis_config_env_points_at_the_config_file(tmp_path, monkeypatch):
     assert settings.db_path == cfg_dir / "state" / "db.sqlite"
 
 
+def test_noesis_config_with_literal_tilde_is_expanded(tmp_path, monkeypatch):
+    """An MCP host commonly sets NOESIS_CONFIG as a literal "~/..." that no
+    shell expanded. It must be expanduser'd before the is_file() check, or
+    the real config is missed and load_settings silently falls back to
+    zero-config defaults — reopening the default DB (PR #15 review, P2)."""
+    from noesis.core.config import load_settings
+
+    fake_home = tmp_path / "home"
+    cfg_dir = fake_home / ".config" / "noesis"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.toml").write_text('[qdrant]\ncollection = "pinned_chunks"\n')
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))  # Windows parity
+    monkeypatch.setenv("NOESIS_CONFIG", "~/.config/noesis/config.toml")
+    monkeypatch.chdir(tmp_path)
+
+    # Pre-fix: the literal "~" never resolved, is_file() was False, and this
+    # returned the default collection instead of the operator-pinned one.
+    assert load_settings().qdrant.collection == "pinned_chunks"
+
+
 def test_cwd_config_toml_remains_a_dev_override(tmp_path, monkeypatch):
     """Running from a checkout that carries a config.toml keeps working —
     the cwd file is a deliberate override, looked up before the XDG path."""
