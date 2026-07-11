@@ -13,11 +13,23 @@ One test (or pair) per confirmed finding, in severity order:
    and replaced instead of jamming the guard.
 4. (low) `[embedder] batch_size` reaches execute_run from the context.
 5. (low) ensure_collection survives losing a concurrent first create.
+
+PR #14 review (automated) added two more, appended at the end of this file:
+
+6. A whole-tree hash outage (every candidate errors) must mark the run
+   failed, not done — the original fix (finding 1 above) only guarded the
+   chunk/embed failure path, not a total hash-stage outage.
+7. The PostToolUse format hook must read the edited path from stdin JSON,
+   not the undocumented $CLAUDE_FILE_PATH env var.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -277,3 +289,106 @@ def test_ensure_collection_survives_losing_create_race(monkeypatch):
     calls["n"] = 0
     with pytest.raises(ValueError, match="refusing mixed-model"):
         loser.ensure_collection(FakeEmbedder(dim=16))
+
+
+# --- 6. whole-tree hash outage must fail the run, not report done ------------
+
+
+def test_total_hash_outage_marks_run_failed(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    (root / "b.py").write_text("y = 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = asyncio.run(run())
+    assert first.files_indexed == 2  # clean baseline run
+
+    def always_broken(path):
+        raise OSError("simulated permission/network outage")
+
+    monkeypatch.setattr(hashdiff, "hash_file", always_broken)
+    second = asyncio.run(run())
+
+    # Pre-fix: to_index was empty (nothing hashed successfully) and the
+    # all_failed check only looked at file_errors, so this reported "done"
+    # despite indexing nothing — the outage was invisible to callers like
+    # register_project.py --wait.
+    assert second.files_failed == 2
+    assert set(second.failed_paths) == {"a.py", "b.py"}
+    run_row = state.get_latest_run(conn, second.project_id)
+    assert run_row["status"] == "failed"
+    assert run_row["error"] == "all 2 files failed"
+
+
+def test_partial_hash_outage_does_not_false_positive(tmp_path, monkeypatch):
+    """A real success (b.py's legitimate change) must not be masked by an
+    unrelated hash error elsewhere — the all_failed check must not fire on
+    partial failure, only total failure."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    (root / "b.py").write_text("y = 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = asyncio.run(run())
+    pid = first.project_id
+
+    real_hash = hashdiff.hash_file
+
+    def flaky(path):
+        if Path(path).name == "a.py":
+            raise OSError("transient")
+        return real_hash(path)
+
+    monkeypatch.setattr(hashdiff, "hash_file", flaky)
+    (root / "b.py").write_text("y = 3\n")
+    second = asyncio.run(run())
+
+    assert second.files_failed == 1
+    assert second.files_indexed == 1  # b.py's real change still landed
+    run_row = state.get_latest_run(conn, pid)
+    assert run_row["status"] == "done"
+
+
+# --- 7. format hook reads stdin JSON, not $CLAUDE_FILE_PATH -------------------
+
+
+def test_format_hook_reads_path_from_stdin_json(tmp_path, monkeypatch):
+    hook = (
+        Path(__file__).resolve().parents[1]
+        / ".claude"
+        / "hooks"
+        / "format_edited_file.py"
+    )
+    target = tmp_path / "messy.py"
+    target.write_text("x=1\n")
+    payload = json.dumps({"tool_input": {"file_path": str(target)}})
+
+    # $CLAUDE_FILE_PATH deliberately unset/wrong: the hook must not depend
+    # on it (that was the review finding — the env var isn't documented and
+    # evaluates empty on at least one harness, making the old guard a
+    # permanent no-op).
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_FILE_PATH"}
+    result = subprocess.run(
+        [sys.executable, str(hook)],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert result.returncode == 0
+    assert target.read_text() == "x = 1\n"

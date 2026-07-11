@@ -668,5 +668,13 @@ async def test_partition_equivalence_full_vs_candidates(tmp_path: Path) -> None:
     assert fast.unchanged == full.unchanged
     assert fast.deleted == full.deleted == ("beta.py",)
     assert dict(fast.hashes) == dict(full.hashes)
-    assert fast == full
+    assert fast.errored == full.errored == ()
+    # verified/skipped intentionally differ: candidacy only shrinks the
+    # hashing WORK (rule 1), it never changes the classification above —
+    # the full walk hashes (and thus "verifies") every unchanged file too,
+    # while the fast path correctly skips non-candidates without hashing
+    # them (bug-hunt PR #14 review: that skip/verify split is what lets a
+    # whole-tree hash outage be told apart from a narrow candidate set).
+    assert full.skipped == 0 and full.verified > fast.verified
+    assert fast.skipped > 0
     conn.close()

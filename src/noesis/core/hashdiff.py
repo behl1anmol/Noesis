@@ -41,6 +41,23 @@ class DiffResult:
     them and re-queue them for retry, or a committed-then-errored file is
     carried forward as unchanged on every future fast-path run (stale
     forever)."""
+    verified: int = 0
+    """Count of files where ``hash_file`` actually succeeded this run
+    (whether the result landed in new/changed/unchanged). NOT the same as
+    ``len(unchanged)``: an errored file with a prior hash is also carried
+    into ``unchanged`` (H7), so ``unchanged`` alone cannot tell a real
+    outage (every hash attempt failing) from ordinary steady state (nothing
+    changed)."""
+    skipped: int = 0
+    """Count of files carried forward as unchanged purely because the git
+    fast path excluded them (not a candidate) — a deliberate, healthy skip,
+    never hashed and never in doubt. Distinct from ``verified`` because a
+    caller judging "did this run make zero real progress" must not count a
+    narrow candidate set (fast path correctly skipping most of the tree) as
+    equivalent to a whole-tree hashing outage: ``verified + skipped == 0``
+    together with ``errored`` is a real "nothing in the whole discovered set
+    is in a known-good state" signal; ``verified == 0`` alone is not, since
+    it is the fast path's steady-state norm."""
 
 
 def partition(
@@ -74,6 +91,8 @@ def partition(
     hashes: dict[str, str] = {}
     errored: list[tuple[str, str]] = []
     seen: set[str] = set()
+    verified = 0
+    skipped = 0
 
     for rel in discovered:
         prior_hash = stored.get(rel)
@@ -81,6 +100,7 @@ def partition(
             seen.add(rel)
             hashes[rel] = prior_hash
             unchanged.append(rel)
+            skipped += 1
             continue
         try:
             current = hash_file(root / rel)
@@ -106,6 +126,7 @@ def partition(
             continue
         seen.add(rel)
         hashes[rel] = current
+        verified += 1
         prior = stored.get(rel)
         if prior is None:
             new.append(rel)
@@ -122,4 +143,6 @@ def partition(
         deleted=tuple(deleted),
         hashes=hashes,
         errored=tuple(errored),
+        verified=verified,
+        skipped=skipped,
     )

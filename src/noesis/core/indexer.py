@@ -239,7 +239,22 @@ async def execute_run(
         # Partial failure is still a completed run (ADR-41); a run where
         # every file failed is not "done" by any honest reading — likely an
         # infrastructure problem (store/embedder down) wearing per-file dress.
-        all_failed = bool(to_index) and len(file_errors) == len(to_index)
+        # Two distinct total-failure shapes: every chunk/embed attempt failed
+        # (existing check), or every hash attempt failed and nothing else in
+        # the whole discovered set is in a known-good state (PR #14 review) —
+        # a whole-tree permission/network-fs outage, where every candidate
+        # lands in hash_errors and `to_index` stays empty, so the chunk/embed
+        # check alone would never see it and the run would report "done"
+        # despite indexing nothing. `verified + skipped == 0` (not just
+        # `verified == 0`) is required: under the git fast path a single
+        # transient failure on a narrow one-file candidate set also leaves
+        # verified at 0, but the rest of the tree is legitimately healthy via
+        # `skipped` (fast-path carry-forward, never in doubt) — that stays a
+        # contained per-file failure, not a run-wide outage.
+        chunk_embed_all_failed = bool(to_index) and len(file_errors) == len(to_index)
+        hash_all_failed = bool(hash_errors) and diff.verified + diff.skipped == 0
+        all_failed = chunk_embed_all_failed or hash_all_failed
+        total_failed = len(file_errors) + len(hash_errors)
         state.finish_run(
             conn,
             run_id,
@@ -251,8 +266,8 @@ async def execute_run(
             candidate_count=len(candidates)
             if fast_path_active and candidates is not None
             else None,
-            files_failed=len(file_errors) + len(hash_errors),
-            error=f"all {len(file_errors)} files failed" if all_failed else None,
+            files_failed=total_failed,
+            error=f"all {total_failed} files failed" if all_failed else None,
         )
         # A run with failed files must not advance the git anchor either:
         # the failed files' state rows are stale, and anchoring past them
@@ -278,7 +293,7 @@ async def execute_run(
             candidate_count=len(candidates)
             if fast_path_active and candidates is not None
             else None,
-            files_failed=len(file_errors) + len(hash_errors),
+            files_failed=total_failed,
             failed_paths=tuple(path for path, _ in (*file_errors, *hash_errors)),
         )
     except BaseException as exc:

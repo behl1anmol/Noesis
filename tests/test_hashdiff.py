@@ -56,4 +56,5 @@ def test_rerun_is_idempotent(tmp_path: Path) -> None:
     write(tmp_path, "a.py", "a")
     first = partition(tmp_path, ["a.py"], {})
     second = partition(tmp_path, ["a.py"], dict(first.hashes))
-    assert second == DiffResult(unchanged=("a.py",), hashes=first.hashes)
+    # No `candidates` arg (full walk): a.py is actually hashed, not skipped.
+    assert second == DiffResult(unchanged=("a.py",), hashes=first.hashes, verified=1)
