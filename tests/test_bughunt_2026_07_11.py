@@ -296,6 +296,48 @@ def test_nan_rerank_score_ranks_last_not_random(tmp_path):
     assert not any(math.isnan(s) for s in scores)
 
 
+# --- 6. asset cache-buster must track the assets, not the import time --------
+
+
+def test_asset_ver_tracks_static_mtime_across_renders(tmp_path):
+    """Swapping app.js/style.css in place (deploy without restart) must
+    change the ?v= token the next page render serves — asserted at the
+    layer the user's browser sees (the HTML), per lesson 9."""
+    import os
+    import re
+
+    from fastapi.testclient import TestClient
+
+    from noesis.api.dashboard import STATIC_DIR
+    from noesis.app import create_app
+
+    conn = state.connect(tmp_path / "state.sqlite")
+    state.init_db(conn)
+    embedder = FakeEmbedder(dim=8)
+    store = VectorStore(QdrantClient(":memory:"))
+    store.ensure_collection(embedder)
+
+    from noesis.runtime import AppContext
+
+    app_js = STATIC_DIR / "app.js"
+    stat = app_js.stat()
+    try:
+        with TestClient(
+            create_app(ctx=AppContext(conn=conn, store=store, embedder=embedder))
+        ) as tc:
+            first = re.search(r"app\.js\?v=(\d+)", tc.get("/").text)
+            assert first, "asset_ver token missing from dashboard HTML"
+            os.utime(app_js, (stat.st_atime, stat.st_mtime + 10))
+            second = re.search(r"app\.js\?v=(\d+)", tc.get("/").text)
+            assert second
+            assert second.group(1) != first.group(1), (
+                "stale cache-buster: asset changed on disk but the page "
+                "still serves the old ?v= token"
+            )
+    finally:
+        os.utime(app_js, (stat.st_atime, stat.st_mtime))
+
+
 # --- 4. concurrent init_db must not crash on the migration race --------------
 
 

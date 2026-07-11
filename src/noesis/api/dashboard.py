@@ -31,7 +31,10 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 def _asset_version() -> str:
     """Cache-busting token from the static assets' latest mtime. Appended to
     the app.js/style.css URLs so a browser can never serve a stale script
-    after a redeploy — the query string changes, forcing a fresh fetch."""
+    after a redeploy — the query string changes, forcing a fresh fetch.
+    Called per render (two stat() calls a page load), never cached at
+    import: an in-place asset swap without a process restart must still
+    change the token, or the promise above is exactly the bug."""
     latest = 0.0
     for name in ("app.js", "style.css"):
         try:
@@ -42,8 +45,9 @@ def _asset_version() -> str:
 
 
 # Global so every template (base.html and all it extends) sees it without
-# each handler threading it through the response context.
-templates.env.globals["asset_ver"] = _asset_version()
+# each handler threading it through the response context. The function
+# itself, not its value — templates invoke {{ asset_ver() }} per render.
+templates.env.globals["asset_ver"] = _asset_version
 
 dashboard_router = APIRouter()
 
