@@ -26,9 +26,8 @@ PR #14 review (automated) added two more, appended at the end of this file:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -366,29 +365,62 @@ def test_partial_hash_outage_does_not_false_positive(tmp_path, monkeypatch):
 # --- 7. format hook reads stdin JSON, not $CLAUDE_FILE_PATH -------------------
 
 
-def test_format_hook_reads_path_from_stdin_json(tmp_path, monkeypatch):
-    hook = (
+def _load_format_hook():
+    """Import format_edited_file.py by path (it's repo tooling, not part of
+    the noesis package)."""
+    import importlib.util
+
+    hook_path = (
         Path(__file__).resolve().parents[1]
         / ".claude"
         / "hooks"
         / "format_edited_file.py"
     )
+    spec = importlib.util.spec_from_file_location("format_edited_file", hook_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_format_hook_reads_path_from_stdin_json(tmp_path, monkeypatch):
+    """The hook must resolve its target from the stdin JSON payload
+    (tool_input.file_path), not $CLAUDE_FILE_PATH — that env var isn't a
+    documented PostToolUse variable and evaluated empty on at least one
+    harness, making the old guard a permanent no-op (PR #14 review).
+
+    Runs the hook in-process with subprocess.run mocked, rather than
+    shelling out and checking real formatting output: `ruff` isn't a
+    declared project dependency (only formatter-availability, not this
+    hook's stdin-parsing logic, would be under test), so an end-to-end
+    assertion on reformatted content is only as reliable as the CI
+    runner's incidental global tool installs — it passed locally where
+    ruff happens to be on PATH and failed in CI where it isn't.
+    """
+    hook = _load_format_hook()
     target = tmp_path / "messy.py"
     target.write_text("x=1\n")
     payload = json.dumps({"tool_input": {"file_path": str(target)}})
 
-    # $CLAUDE_FILE_PATH deliberately unset/wrong: the hook must not depend
-    # on it (that was the review finding — the env var isn't documented and
-    # evaluates empty on at least one harness, making the old guard a
-    # permanent no-op).
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_FILE_PATH"}
-    result = subprocess.run(
-        [sys.executable, str(hook)],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=env,
-        cwd=str(Path(__file__).resolve().parents[1]),
+    monkeypatch.delenv("CLAUDE_FILE_PATH", raising=False)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(hook.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    hook.main()
+
+    assert len(calls) == 1
+    assert calls[0][-1] == str(target)  # resolved from stdin JSON, not env
+    assert calls[0][:4] == ["uv", "run", "ruff", "format"]
+
+
+def test_format_hook_skips_non_python_files(monkeypatch):
+    hook = _load_format_hook()
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"tool_input": {"file_path": "notes.md"}}))
     )
-    assert result.returncode == 0
-    assert target.read_text() == "x = 1\n"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(hook.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    hook.main()
+
+    assert calls == []
