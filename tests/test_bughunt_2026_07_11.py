@@ -248,6 +248,54 @@ def test_cwd_config_toml_remains_a_dev_override(tmp_path, monkeypatch):
     assert load_settings().qdrant.collection == "dev_chunks"
 
 
+# --- 5. a NaN rerank score must not corrupt the returned ordering ------------
+
+
+def test_nan_rerank_score_ranks_last_not_random(tmp_path):
+    """A cross-encoder can emit NaN (fp16 overflow, degenerate text). NaN
+    breaks the sort's total order — every comparison is False — so pre-fix
+    the 'sorted' order was arbitrary and could slice away the genuinely
+    best hit. NaN must rank last; finite scores keep exact order."""
+    import math
+
+    from noesis.core.retriever import search_code
+
+    hits = [
+        {
+            "file_path": f"f{i}.py",
+            "start_line": 1,
+            "end_line": 5,
+            "language": "python",
+            "symbol_name": None,
+            "score": 0.5,
+            "snippet": f"t{i}",
+            "text": f"t{i}",
+        }
+        for i in range(3)
+    ]
+
+    class StubStore:
+        def search(self, project_id, **kwargs):
+            return [dict(h) for h in hits]
+
+    class NaNReranker:
+        model_id = "nan-stub"
+
+        async def rerank(self, query, texts):
+            return [0.9, float("nan"), 0.95]
+
+    result = asyncio.run(
+        search_code(
+            StubStore(), FakeEmbedder(), "q", "p1", reranker=NaNReranker(), top_k=2
+        )
+    )
+
+    scores = [h["rerank_score"] for h in result["hits"]]
+    assert scores[0] == 0.95, f"best finite hit lost: {scores}"
+    assert scores[1] == 0.9
+    assert not any(math.isnan(s) for s in scores)
+
+
 # --- 4. concurrent init_db must not crash on the migration race --------------
 
 
