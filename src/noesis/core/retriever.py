@@ -21,6 +21,7 @@ candidates, not ground truth — callers read the live file before acting.
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any
 
 from .embedder import Embedder
@@ -70,8 +71,15 @@ async def search_code(
     )
     if apply_rerank and hits:
         scores = await reranker.rerank(query, [hit["text"] for hit in hits])
-        # Stable sort: fusion order breaks rerank-score ties.
-        order = sorted(range(len(hits)), key=lambda i: scores[i], reverse=True)
+        # Stable sort: fusion order breaks rerank-score ties. NaN (fp16
+        # overflow / degenerate text) sorts as -inf: any NaN in the key
+        # breaks the total order and silently permutes the whole ranking —
+        # guarded here so it covers every Reranker implementation.
+        order = sorted(
+            range(len(hits)),
+            key=lambda i: -math.inf if math.isnan(scores[i]) else scores[i],
+            reverse=True,
+        )
         hits = [hits[i] | {"rerank_score": scores[i]} for i in order[:top_k]]
     for hit in hits:
         hit.pop("text", None)

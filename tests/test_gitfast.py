@@ -617,7 +617,8 @@ async def test_anchor_advances_after_successful_fast_run(tmp_path: Path) -> None
 
 @requires_git
 async def test_anchor_not_updated_on_failed_run(tmp_path: Path) -> None:
-    """§3.2 rule 4: a failed run must not advance last_indexed_commit."""
+    """§3.2 rule 4: a run with failed files must not advance
+    last_indexed_commit."""
     repo = tmp_path / "repo"
     build_git_repo(repo)
     conn, store, embedder = make_env(tmp_path)
@@ -629,14 +630,16 @@ async def test_anchor_not_updated_on_failed_run(tmp_path: Path) -> None:
     assert git_head(repo) != anchor
 
     # Since ADR-41 (M8), a per-file embed failure is contained rather than
-    # propagated; with every changed file failing, the run is marked
-    # 'failed' without raising. The property under test is unchanged:
-    # a failed run must not move the anchor.
+    # propagated; since the 2026-07-11 hunt, one contained failure on a
+    # narrow fast-path candidate set over an otherwise-healthy tree
+    # (skipped > 0) reports "done" with files_failed — same as the hash
+    # path. The property under test is unchanged either way: a run with
+    # failed files must not move the anchor.
     result2 = await index_project(conn, store, ExplodingEmbedder(dim=8), str(repo))
     assert result2.files_failed == 1
 
     run_row = state.get_latest_run(conn, result1.project_id)
-    assert run_row["status"] == "failed"
+    assert run_row["status"] == "done"
     assert anchor_of(conn, result1.project_id) == anchor
     conn.close()
 

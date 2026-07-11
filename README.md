@@ -277,10 +277,15 @@ HTTP (CI enforces both).
 ## Configuration
 
 Noesis runs with **zero config** — every setting has a working default. To override,
-create a `config.toml` in the working directory:
+create `~/.config/noesis/config.toml` (or a `config.toml` in the working directory
+when running from a checkout, or point `NOESIS_CONFIG` at a file):
 
 ```toml
-db_path = "data/noesis.sqlite"
+# State DB. Default: ~/.local/share/noesis/noesis.sqlite — anchored, never
+# cwd-relative, so the HTTP server and the stdio MCP server always share one
+# DB no matter where each was launched from. A relative path here resolves
+# against this file's directory.
+db_path = "~/.local/share/noesis/noesis.sqlite"
 
 [embedder]
 model = "nomic-ai/CodeRankEmbed"

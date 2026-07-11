@@ -9,6 +9,7 @@ priority so live queries preempt indexing (§3.8).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -147,14 +148,23 @@ async def execute_run(
             project = state.get_project(conn, project_id)
             if project is not None:
                 anchor = project["last_indexed_commit"]
-            git_info = gitfast.compute_candidates(root_path, anchor) if anchor else None
+            # Heavy sync spans (git subprocesses, tree walk, hashing, file
+            # IO, Qdrant round-trips) run via to_thread throughout this
+            # function: the run shares the event loop with live queries and
+            # must never starve them (§3.8). Quick state.* calls stay on the
+            # loop — the shared sqlite conn is serialized either way.
+            git_info = (
+                await asyncio.to_thread(gitfast.compute_candidates, root_path, anchor)
+                if anchor
+                else None
+            )
             if git_info is not None:
                 head = git_info.head_commit
                 candidates = git_info.candidates
             else:
                 # Full walk this run, but still record HEAD (on success) so
                 # the next run has an anchor to fast-path from (rule 4).
-                head = gitfast.resolve_head(root_path)
+                head = await asyncio.to_thread(gitfast.resolve_head, root_path)
 
         # H1: re-admit files that were working-tree-dirty at the last anchor
         # advance. If such a file was reverted to HEAD since, neither the diff
@@ -175,9 +185,13 @@ async def execute_run(
         # (ADR-42), so manual/watcher/reindex runs all apply the same filter.
         if discovery_config is None:
             discovery_config = discovery_config_for_project(conn, project_id)
-        discovered = discover_files(root_path, discovery_config)
+        discovered = await asyncio.to_thread(
+            discover_files, root_path, discovery_config
+        )
         stored = state.get_file_states(conn, project_id)
-        diff = hashdiff.partition(root_path, discovered, stored, candidates=candidates)
+        diff = await asyncio.to_thread(
+            hashdiff.partition, root_path, discovered, stored, candidates=candidates
+        )
 
         chunks_written = 0
         file_errors: list[tuple[str, str]] = []
@@ -188,11 +202,15 @@ async def execute_run(
             # out of date so the next run retries it. Exception, not
             # BaseException: cancellation must still abort the run.
             try:
-                text = _read_text(root_path, rel)
+                text = await asyncio.to_thread(_read_text, root_path, rel)
                 language = detect_language(rel)
                 file_hash = diff.hashes[rel]
-                chunks = chunk_file(
-                    text, language=language, file_path=rel, file_hash=file_hash
+                chunks = await asyncio.to_thread(
+                    chunk_file,
+                    text,
+                    language=language,
+                    file_path=rel,
+                    file_hash=file_hash,
                 )
                 if chunks:
                     vectors: list[list[float]] = []
@@ -201,15 +219,24 @@ async def execute_run(
                         vectors.extend(
                             await embedder.embed_documents([c.text for c in batch])
                         )
-                    store.upsert_chunks(
-                        project_id, chunks, vectors, embedding_model=embedder.model_id
+                    await asyncio.to_thread(
+                        store.upsert_chunks,
+                        project_id,
+                        chunks,
+                        vectors,
+                        embedding_model=embedder.model_id,
                     )
                 # New points first, stale points after: chunk ids embed the file
                 # hash, so old content lives at different ids and must be pruned —
                 # but only once the replacement is searchable. A failure above
                 # leaves the old chunks serving; a failure below leaves brief
                 # duplicates that the next (self-healing) run prunes.
-                store.delete_file_chunks(project_id, [rel], exclude_file_hash=file_hash)
+                await asyncio.to_thread(
+                    store.delete_file_chunks,
+                    project_id,
+                    [rel],
+                    exclude_file_hash=file_hash,
+                )
                 state.upsert_file(
                     conn,
                     project_id,
@@ -225,7 +252,7 @@ async def execute_run(
                 on_progress(done, len(to_index), chunks_written)
 
         if diff.deleted:
-            store.delete_file_chunks(project_id, diff.deleted)
+            await asyncio.to_thread(store.delete_file_chunks, project_id, diff.deleted)
             state.delete_files(conn, project_id, diff.deleted)
 
         # Hash-time failures (H7 carry-forward) are per-file failures too:
@@ -251,7 +278,21 @@ async def execute_run(
         # verified at 0, but the rest of the tree is legitimately healthy via
         # `skipped` (fast-path carry-forward, never in doubt) — that stays a
         # contained per-file failure, not a run-wide outage.
-        chunk_embed_all_failed = bool(to_index) and len(file_errors) == len(to_index)
+        #
+        # The chunk/embed check needs the same remainder guard: every file in
+        # to_index hashed successfully (each is counted in `verified`), so the
+        # known-good remainder is `verified - len(to_index) + skipped`. With a
+        # non-zero remainder, "every attempted file failed" is a scoped run's
+        # one edited file hitting a transient embed/store error while the rest
+        # of the tree is provably healthy — contained per ADR-41, not an
+        # outage. Only when nothing outside to_index is in a known-good state
+        # does total chunk/embed failure mean the infrastructure is down.
+        known_good_remainder = diff.verified - len(to_index) + diff.skipped
+        chunk_embed_all_failed = (
+            bool(to_index)
+            and len(file_errors) == len(to_index)
+            and known_good_remainder == 0
+        )
         hash_all_failed = bool(hash_errors) and diff.verified + diff.skipped == 0
         all_failed = chunk_embed_all_failed or hash_all_failed
         total_failed = len(file_errors) + len(hash_errors)
@@ -276,11 +317,13 @@ async def execute_run(
             # Persist the working-tree-dirty set with the anchor (H1). The
             # fast path already captured it at run start (git_info); a
             # full-walk run re-queries `git status` here.
-            new_dirty = (
-                git_info.dirty_paths
-                if git_info is not None
-                else (gitfast.status_dirty_paths(root_path) or frozenset())
-            )
+            if git_info is not None:
+                new_dirty = git_info.dirty_paths
+            else:
+                new_dirty = (
+                    await asyncio.to_thread(gitfast.status_dirty_paths, root_path)
+                    or frozenset()
+                )
             state.set_last_indexed_commit(conn, project_id, head, dirty_paths=new_dirty)
         return IndexResult(
             project_id=project_id,
