@@ -110,3 +110,83 @@ async def test_execute_run_does_not_starve_the_event_loop(tmp_path):
     # embedder, no tick at all). Generous margin for CI jitter.
     assert gaps, "event loop starved: heartbeat never ticked during the run"
     assert max(gaps) < 0.4, f"event loop starved: max heartbeat gap {max(gaps):.3f}s"
+
+
+# --- 2. one contained embed error must not mark a healthy run "failed" -------
+
+
+class ExplodingEmbedder(FakeEmbedder):
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("embed outage")
+
+
+def _index(conn, store, embedder, root, **kwargs):
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, **kwargs
+        )
+
+    return asyncio.run(run())
+
+
+def test_scoped_single_file_embed_failure_stays_done(tmp_path):
+    """Watcher-scoped rerun of one edited file: a transient embed error on
+    that file is a contained per-file failure — the other file is healthy
+    via `skipped`, so the run must finish "done", mirroring the hash-path
+    guard from PR #14 (indexer.py's own stated principle)."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    (root / "b.py").write_text("y = 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    first = _index(conn, store, embedder, root, git_fast_path=False)
+    assert first.files_indexed == 2
+
+    (root / "a.py").write_text("x = 99\n")
+    second = _index(conn, store, ExplodingEmbedder(dim=8), root, paths=["a.py"])
+
+    assert second.files_failed == 1
+    assert second.failed_paths == ("a.py",)
+    run_row = state.get_latest_run(conn, second.project_id)
+    assert run_row["status"] == "done"  # pre-fix: "failed" / "all 1 files failed"
+    assert run_row["error"] is None
+
+
+def test_full_walk_single_file_embed_failure_stays_done(tmp_path):
+    """Same containment on a full walk: one changed file failing to embed
+    among N-1 verified-unchanged files is partial failure (ADR-41), not a
+    run-wide outage."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    (root / "b.py").write_text("y = 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    first = _index(conn, store, embedder, root, git_fast_path=False)
+    assert first.files_indexed == 2
+
+    (root / "a.py").write_text("x = 99\n")
+    second = _index(conn, store, ExplodingEmbedder(dim=8), root, git_fast_path=False)
+
+    assert second.files_failed == 1
+    run_row = state.get_latest_run(conn, second.project_id)
+    assert run_row["status"] == "done"
+
+
+def test_total_embed_outage_still_marks_run_failed(tmp_path):
+    """The real-outage shape is preserved: a first index where every file
+    fails to embed has no known-good remainder and must stay "failed"."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    (root / "b.py").write_text("y = 2\n")
+    conn, store, _ = make_env(tmp_path)
+
+    result = _index(conn, store, ExplodingEmbedder(dim=8), root, git_fast_path=False)
+
+    assert result.files_failed == 2
+    run_row = state.get_latest_run(conn, result.project_id)
+    assert run_row["status"] == "failed"
+    assert run_row["error"] == "all 2 files failed"

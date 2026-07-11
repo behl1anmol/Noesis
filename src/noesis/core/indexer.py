@@ -278,7 +278,21 @@ async def execute_run(
         # verified at 0, but the rest of the tree is legitimately healthy via
         # `skipped` (fast-path carry-forward, never in doubt) — that stays a
         # contained per-file failure, not a run-wide outage.
-        chunk_embed_all_failed = bool(to_index) and len(file_errors) == len(to_index)
+        #
+        # The chunk/embed check needs the same remainder guard: every file in
+        # to_index hashed successfully (each is counted in `verified`), so the
+        # known-good remainder is `verified - len(to_index) + skipped`. With a
+        # non-zero remainder, "every attempted file failed" is a scoped run's
+        # one edited file hitting a transient embed/store error while the rest
+        # of the tree is provably healthy — contained per ADR-41, not an
+        # outage. Only when nothing outside to_index is in a known-good state
+        # does total chunk/embed failure mean the infrastructure is down.
+        known_good_remainder = diff.verified - len(to_index) + diff.skipped
+        chunk_embed_all_failed = (
+            bool(to_index)
+            and len(file_errors) == len(to_index)
+            and known_good_remainder == 0
+        )
         hash_all_failed = bool(hash_errors) and diff.verified + diff.skipped == 0
         all_failed = chunk_embed_all_failed or hash_all_failed
         total_failed = len(file_errors) + len(hash_errors)
