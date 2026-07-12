@@ -16,9 +16,17 @@ from qdrant_client import QdrantClient
 
 from noesis.app import AppContext
 from noesis.core import indexer, state
+from noesis.core import watcher as watcher_mod
 from noesis.core.embedder import FakeEmbedder
 from noesis.core.vectorstore import VectorStore
-from noesis.core.watcher import WatcherManager, _Handler, _ProjectWatch
+from noesis.core.watcher import (
+    WatcherManager,
+    _fstype_for,
+    _Handler,
+    _inotify_blind_fstype,
+    _ProjectWatch,
+    _pruned_scandir,
+)
 
 
 def make_ctx(tmp_path) -> AppContext:
@@ -190,6 +198,142 @@ def test_watch_records_pending_and_auto_reindexes(tmp_path):
             assert latest["fast_path_used"] == 0
         finally:
             await manager.stop()
+
+    asyncio.run(scenario())
+
+
+# -- filesystem-aware observer selection (9p/WSL2 fix) --------------------------
+
+_MOUNTS = (
+    "/dev/sda1 / ext4 rw,relatime 0 0\n"
+    "tmpfs /tmp tmpfs rw 0 0\n"
+    "C:\\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\\;uid=1000 0 0\n"
+    "D:\\134 /mnt/d 9p rw,noatime,aname=drvfs;path=D:\\;uid=1000 0 0\n"
+    "//srv/share /media/share cifs rw 0 0\n"
+    "host:/export /media/nfs nfs4 rw 0 0\n"
+    "user@box:/ /media/ssh fuse.sshfs rw 0 0\n"
+    "/dev/sdb1 /mnt/my\\040share btrfs rw 0 0\n"
+    "malformed-line\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("path", "fstype"),
+    [
+        ("/mnt/d/Projects/X", "9p"),
+        ("/mnt/d", "9p"),
+        ("/mnt/dd/x", "ext4"),  # prefix boundary: /mnt/dd is NOT under /mnt/d
+        ("/home/user/x", "ext4"),
+        ("/media/share/code", "cifs"),
+        ("/media/nfs/code", "nfs4"),
+        ("/media/ssh/code", "fuse.sshfs"),
+        ("/mnt/my share/f", "btrfs"),  # octal-escaped mountpoint
+    ],
+)
+def test_fstype_for_longest_prefix(path, fstype):
+    assert _fstype_for(path, _MOUNTS) == fstype
+
+
+def test_fstype_for_no_match():
+    assert _fstype_for("/x", "malformed\nshort line\n") is None
+
+
+def test_inotify_blind_fstype_platform_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(watcher_mod.sys, "platform", "darwin")
+    assert _inotify_blind_fstype(tmp_path) is None
+
+
+def test_inotify_blind_fstype_degrades_on_read_error(tmp_path, monkeypatch):
+    def boom(self, *args, **kwargs):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(watcher_mod.Path, "read_text", boom)
+    assert _inotify_blind_fstype(tmp_path) is None
+
+
+def test_pruned_scandir_skips_excluded_dirs(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / ".venv" / "lib.py").write_text("y = 1\n")
+    names = {e.name for e in _pruned_scandir(str(tmp_path))}
+    assert "src" in names and "a.py" in names
+    assert ".venv" not in names  # excluded dir never yielded → never descended
+    assert "node_modules" not in names
+
+
+def test_schedule_picks_polling_observer(tmp_path, monkeypatch):
+    from watchdog.observers.polling import PollingObserverVFS
+
+    monkeypatch.setattr(watcher_mod, "_inotify_blind_fstype", lambda root: "9p")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+
+    async def scenario():
+        ctx = make_ctx(tmp_path)
+        pid = state.register_project(ctx.conn, root, ctx.embedder.model_id)
+        state.set_project_flags(ctx.conn, pid, watch_enabled=True)
+        manager = WatcherManager(
+            ctx, debounce_s=0.05, quiet_s=0.2, poll_interval_s=0.1
+        )
+        manager.start()
+        try:
+            assert isinstance(manager._polling_observer, PollingObserverVFS)
+            assert manager._observer is None  # native thread never spawned
+            assert manager._watches[pid].observer is manager._polling_observer
+            assert manager.mode(pid) == "polling"
+            # Events flow end-to-end through the polling path.
+            (root / "a.py").write_text("x = 2\n")
+            pending = await _poll(lambda: state.list_pending_changes(ctx.conn, pid))
+            assert [p["path"] for p in pending] == ["a.py"]
+        finally:
+            await manager.stop()
+        assert manager._polling_observer is None and manager._observer is None
+
+    asyncio.run(scenario())
+
+
+def test_mixed_observers_unschedule_their_own(tmp_path, monkeypatch):
+    polled_root = tmp_path / "polled"
+    native_root = tmp_path / "native"
+    for r in (polled_root, native_root):
+        r.mkdir()
+        (r / "a.py").write_text("x = 1\n")
+    monkeypatch.setattr(
+        watcher_mod,
+        "_inotify_blind_fstype",
+        lambda root: "9p" if root == polled_root else None,
+    )
+
+    async def scenario():
+        ctx = make_ctx(tmp_path)
+        polled = state.register_project(ctx.conn, polled_root, ctx.embedder.model_id)
+        native = state.register_project(ctx.conn, native_root, ctx.embedder.model_id)
+        for pid in (polled, native):
+            state.set_project_flags(ctx.conn, pid, watch_enabled=True)
+        manager = WatcherManager(
+            ctx, debounce_s=0.05, quiet_s=0.2, poll_interval_s=0.1
+        )
+        manager.start()
+        try:
+            assert manager._observer is not None
+            assert manager._polling_observer is not None
+            assert manager.mode(polled) == "polling"
+            assert manager.mode(native) == "native"
+            # Unschedule each from its owning observer — the wrong observer
+            # would raise KeyError here.
+            manager.set_watch(polled, False)
+            manager.set_watch(native, False)
+            assert manager.mode(polled) is None
+            for r in (polled_root, native_root):
+                (r / "a.py").write_text("x = 2\n")
+            await asyncio.sleep(0.5)
+            assert state.list_pending_changes(ctx.conn, polled) == []
+            assert state.list_pending_changes(ctx.conn, native) == []
+        finally:
+            await manager.stop()  # both observers alive → both stopped
 
     asyncio.run(scenario())
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from noesis.core.config import RerankerSettings, load_settings
+from noesis.core.config import RerankerSettings, WatcherSettings, load_settings
 
 
 def test_defaults_without_config_file(tmp_path):
     settings = load_settings(tmp_path / "missing.toml")
     assert settings.reranker == RerankerSettings()
+    assert settings.watcher == WatcherSettings()
+    assert settings.watcher.poll_interval_s == 1.0
     assert settings.reranker.enabled is False  # pre-gate default (Finding 2)
     assert settings.reranker.candidates == 50
     # device defaults to auto-detect (None) for both model runners.
@@ -42,3 +44,9 @@ def test_partial_reranker_section_keeps_defaults(tmp_path):
     assert reranker.enabled is True
     assert reranker.candidates == 50
     assert reranker.model == "BAAI/bge-reranker-v2-m3"
+
+
+def test_watcher_section_parsed(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[watcher]\npoll_interval_s = 2.5\n")
+    assert load_settings(cfg).watcher.poll_interval_s == 2.5

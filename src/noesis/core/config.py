@@ -93,6 +93,16 @@ class GitSettings:
 
 
 @dataclass(frozen=True)
+class WatcherSettings:
+    """§3.7 ``[watcher]``. ``poll_interval_s`` is the PollingObserver
+    snapshot cadence used only for watched roots on inotify-blind
+    filesystems (9p/cifs/nfs/fuse/…, e.g. WSL2's ``/mnt/c``); roots watched
+    natively via inotify never poll and ignore it."""
+
+    poll_interval_s: float = 1.0
+
+
+@dataclass(frozen=True)
 class QdrantSettings:
     url: str = DEFAULT_QUERY_URL
     collection: str = "noesis_chunks"
@@ -105,6 +115,7 @@ class Settings:
     reranker: RerankerSettings = field(default_factory=RerankerSettings)
     structural: StructuralSettings = field(default_factory=StructuralSettings)
     git: GitSettings = field(default_factory=GitSettings)
+    watcher: WatcherSettings = field(default_factory=WatcherSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
 
 
@@ -140,6 +151,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     rrk = raw.get("reranker", {})
     stru = raw.get("structural", {})
     git = raw.get("git", {})
+    wat = raw.get("watcher", {})
     qdr = raw.get("qdrant", {})
     raw_db = raw.get("db_path")
     if raw_db is None:
@@ -175,6 +187,11 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         git=GitSettings(
             fast_path=_require_bool(
                 git.get("fast_path", GitSettings.fast_path), "git.fast_path"
+            ),
+        ),
+        watcher=WatcherSettings(
+            poll_interval_s=float(
+                wat.get("poll_interval_s", WatcherSettings.poll_interval_s)
             ),
         ),
         qdrant=QdrantSettings(
