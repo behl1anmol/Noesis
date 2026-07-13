@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -21,6 +23,8 @@ from .discovery import DiscoveryConfig, discover_files
 from .embedder import Embedder
 from .languages import detect_language
 from .vectorstore import VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -134,6 +138,7 @@ async def execute_run(
     if paths is not None:
         git_fast_path = False
     try:
+        run_started = time.perf_counter()
         # Git fast-path (§3.2): capture HEAD and the candidate set BEFORE
         # discovery/hashing — anything committed after this point is simply
         # re-examined next run (the safe direction). Every fallback is
@@ -185,8 +190,17 @@ async def execute_run(
         # (ADR-42), so manual/watcher/reindex runs all apply the same filter.
         if discovery_config is None:
             discovery_config = discovery_config_for_project(conn, project_id)
+        # Discovery walks the whole tree and binary-sniffs each file; on large
+        # or network-mounted trees this alone is slow and, until now, silent.
+        disc_started = time.perf_counter()
         discovered = await asyncio.to_thread(
             discover_files, root_path, discovery_config
+        )
+        logger.info(
+            "index run %s: discovery took=%.1fs discovered=%d",
+            run_id,
+            time.perf_counter() - disc_started,
+            len(discovered),
         )
         stored = state.get_file_states(conn, project_id)
         diff = await asyncio.to_thread(
@@ -196,6 +210,22 @@ async def execute_run(
         chunks_written = 0
         file_errors: list[tuple[str, str]] = []
         to_index = [*diff.new, *diff.changed]
+        # Start milestone: counts only, no paths or content (ADR-25).
+        logger.info(
+            "index run %s: project=%s to_index=%d (new=%d changed=%d deleted=%d) "
+            "discovered=%d",
+            run_id,
+            project_id,
+            len(to_index),
+            len(diff.new),
+            len(diff.changed),
+            len(diff.deleted),
+            len(discovered),
+        )
+        # Throttle progress lines: the larger of every-50-files and every-10%,
+        # so a big repo logs ~10 lines, not thousands. Empty to_index skips the
+        # loop entirely, so the /0 case never arises.
+        progress_step = max(50, (len(to_index) + 9) // 10)
         for done, rel in enumerate(to_index, start=1):
             # Per-file failure containment (ADR-41): a bad file is recorded
             # and skipped — its old chunks keep serving, its state row stays
@@ -248,8 +278,20 @@ async def execute_run(
                 chunks_written += len(chunks)
             except Exception as exc:  # noqa: BLE001 — contained per ADR-41
                 file_errors.append((rel, str(exc) or type(exc).__name__))
+                # Path at DEBUG only: it can reveal repo structure if logs are
+                # pasted into a bug report (telemetry.py precedent). Never the
+                # file contents.
+                logger.debug("index run %s: file %s failed: %s", run_id, rel, exc)
             if on_progress is not None:
                 on_progress(done, len(to_index), chunks_written)
+            if done % progress_step == 0 or done == len(to_index):
+                logger.info(
+                    "index run %s: %d/%d files chunks=%d",
+                    run_id,
+                    done,
+                    len(to_index),
+                    chunks_written,
+                )
 
         if diff.deleted:
             await asyncio.to_thread(store.delete_file_chunks, project_id, diff.deleted)
@@ -325,6 +367,25 @@ async def execute_run(
                     or frozenset()
                 )
             state.set_last_indexed_commit(conn, project_id, head, dirty_paths=new_dirty)
+        # Completion milestone: counts + duration, so a finished run is visible
+        # even when the dashboard isn't being watched. errors is a count; the
+        # failed paths themselves stay at DEBUG (ADR-25 exposure).
+        logger.info(
+            "index run %s finished: status=%s files_indexed=%d chunks=%d errors=%d "
+            "took=%.1fs",
+            run_id,
+            "failed" if all_failed else "done",
+            len(to_index) - len(file_errors),
+            chunks_written,
+            total_failed,
+            time.perf_counter() - run_started,
+        )
+        if total_failed:
+            logger.debug(
+                "index run %s failed paths: %s",
+                run_id,
+                ", ".join(path for path, _ in (*file_errors, *hash_errors)),
+            )
         return IndexResult(
             project_id=project_id,
             run_id=run_id,

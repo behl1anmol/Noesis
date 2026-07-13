@@ -21,12 +21,16 @@ candidates, not ground truth — callers read the live file before acting.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+import time
 from typing import Any
 
 from .embedder import Embedder
 from .reranker import Reranker
 from .vectorstore import SearchChannel, VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 async def search_code(
@@ -47,7 +51,9 @@ async def search_code(
     re-deriving the decision. Skips the query embed entirely for sparse-only
     searches — no reason to queue on the embed worker for a channel that
     won't use the vector."""
+    t0 = time.perf_counter()
     dense_vector = await embedder.embed_query(query) if channel != "sparse" else None
+    t_embed = time.perf_counter()
     apply_rerank = (
         rerank if rerank is not None else reranker is not None
     ) and reranker is not None
@@ -69,6 +75,7 @@ async def search_code(
         prefetch_limit=prefetch,
         with_text=apply_rerank,
     )
+    t_search = time.perf_counter()
     if apply_rerank and hits:
         scores = await reranker.rerank(query, [hit["text"] for hit in hits])
         # Stable sort: fusion order breaks rerank-score ties. NaN (fp16
@@ -81,6 +88,20 @@ async def search_code(
             reverse=True,
         )
         hits = [hits[i] | {"rerank_score": scores[i]} for i in order[:top_k]]
+    # Per-query stage timing at DEBUG (INFO stays clean; telemetry.py remains
+    # the metadata source of truth). No query text or hit content — counts,
+    # channel, and durations only (ADR-25).
+    logger.debug(
+        "search: project=%s channel=%s hits=%d reranked=%s "
+        "embed=%.3fs search=%.3fs rerank=%.3fs",
+        project_id,
+        channel,
+        len(hits),
+        apply_rerank,
+        t_embed - t0,
+        t_search - t_embed,
+        time.perf_counter() - t_search,
+    )
     for hit in hits:
         hit.pop("text", None)
     return {"hits": hits, "reranked": apply_rerank}

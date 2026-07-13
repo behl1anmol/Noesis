@@ -25,6 +25,7 @@ import concurrent.futures
 import logging
 import queue
 import threading
+import time
 from typing import Any, Callable, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,24 @@ class LocalCrossEncoderReranker:
         # Explicit device resolution, not ST's device=None auto-detect, which
         # was seen running this cross-encoder on CPU with a T4 idle (lesson 4).
         self._resolved_device = resolve_device(self._device)
-        return CrossEncoder(self._model_id, device=self._resolved_device)
+        # Frame the load like the embedder: the cross-encoder is ~2.3GB and on
+        # a cold cache blocks for minutes with no other output. model_id +
+        # device only — no query or chunk text (ADR-25).
+        logger.info(
+            "loading reranker model %s on %s "
+            "(first run may download weights; can take minutes)",
+            self._model_id,
+            self._resolved_device,
+        )
+        started = time.perf_counter()
+        model = CrossEncoder(self._model_id, device=self._resolved_device)
+        logger.info(
+            "reranker model %s ready on %s took=%.1fs",
+            self._model_id,
+            self._resolved_device,
+            time.perf_counter() - started,
+        )
+        return model
 
     def _worker_loop(self) -> None:
         model: Any = None
