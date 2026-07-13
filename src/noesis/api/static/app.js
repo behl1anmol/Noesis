@@ -142,6 +142,9 @@
     const watching = f("watching");
     if (watching) watching.hidden = !p.watching;
 
+    const watchmode = f("watchmode");
+    if (watchmode) watchmode.hidden = p.watch_mode !== "polling";
+
     const w = root.querySelector('input[data-toggle="watch"]');
     const a = root.querySelector('input[data-toggle="auto"]');
     if (w) w.checked = !!p.watch_enabled;

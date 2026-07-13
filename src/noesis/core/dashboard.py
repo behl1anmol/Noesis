@@ -83,6 +83,9 @@ def _project_summary(ctx: Any, project: sqlite3.Row) -> dict[str, Any]:
         "watch_enabled": bool(project["watch_enabled"]),
         "auto_reindex": bool(project["auto_reindex"]),
         "watching": bool(watcher is not None and watcher.watching(project_id)),
+        # "polling"/"native"/None — the UI tags polled roots (9p/network
+        # mounts) so the degraded change-detection signal is visible.
+        "watch_mode": None if watcher is None else watcher.mode(project_id),
         "file_count": counts["files"],
         "chunk_count": counts["chunks"],
         "pending_count": pending,

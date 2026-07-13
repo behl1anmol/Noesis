@@ -284,13 +284,17 @@ def test_api_state_shape_and_flags_toggle(client, project_dir):
     proj = overview["projects"][0]
     assert proj["file_count"] == 2 and proj["chunk_count"] > 0
     assert proj["watch_enabled"] is False and proj["auto_reindex"] is False
+    assert proj["watch_mode"] is None  # not watched yet
 
     resp = client.post(f"/api/projects/{pid}/flags", json={"watch_enabled": True})
     assert resp.status_code == 200
     assert resp.json()["watch_enabled"] is True
     assert resp.json()["watching"] is True  # live watch scheduled
+    # pytest tmp dirs sit on a native filesystem — no polling fallback here.
+    assert resp.json()["watch_mode"] == "native"
     resp = client.post(f"/api/projects/{pid}/flags", json={"watch_enabled": False})
     assert resp.json()["watching"] is False
+    assert resp.json()["watch_mode"] is None
     assert client.post("/api/projects/nope/flags", json={}).status_code == 404
 
 

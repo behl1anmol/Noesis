@@ -58,7 +58,9 @@ def create_app(
         # so apps with no watched projects pay one asyncio task, nothing more.
         from noesis.core.watcher import WatcherManager
 
-        app.state.ctx.watcher = WatcherManager(app.state.ctx)
+        app.state.ctx.watcher = WatcherManager(
+            app.state.ctx, poll_interval_s=cfg.watcher.poll_interval_s
+        )
         app.state.ctx.watcher.start()
         try:
             yield

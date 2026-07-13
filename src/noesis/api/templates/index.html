@@ -107,6 +107,8 @@
               </label>
               <span class="live-dot" data-f="watching" {% if not p.watching %}hidden{% endif %}
                     title="Watcher is running"></span>
+              <span class="chip chip-idle" data-f="watchmode" {% if p.watch_mode != 'polling' %}hidden{% endif %}
+                    title="This filesystem does not deliver inotify events; changes are detected by polling">polling</span>
               <label class="switch{{ '' if p.watch_enabled else ' is-disabled' }}" data-f="autolabel"
                      title="{{ 'Reindex automatically when watched files change' if p.watch_enabled else 'Enable Watch to use auto-reindex' }}">
                 <input type="checkbox" data-toggle="auto" {{ 'checked' if p.auto_reindex else '' }}
