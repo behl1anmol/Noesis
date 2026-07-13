@@ -80,7 +80,11 @@ def _unescape_mount(field: str) -> str:
     i = 0
     while i < len(field):
         ch = field[i]
-        if ch == "\\" and i + 3 < len(field) and field[i + 1 : i + 4].isdigit():
+        if (
+            ch == "\\"
+            and i + 3 < len(field)
+            and all(c in "01234567" for c in field[i + 1 : i + 4])
+        ):
             try:
                 out.append(chr(int(field[i + 1 : i + 4], 8)))
                 i += 4
@@ -143,7 +147,14 @@ def _pruned_scandir(path: str | None) -> Iterator[os.DirEntry[str]]:
     slips through (secrets, generated files, .gitignore matches)."""
     with os.scandir(path) as it:  # DirectorySnapshot always passes a real dir
         for entry in it:
-            if entry.name in EXCLUDED_DIRS and entry.is_dir(follow_symlinks=False):
+            # DirectorySnapshot.walk recurses on ``stat(path)`` (os.stat, which
+            # follows symlinks), so a *symlinked* .venv/node_modules is walked
+            # into. Prune on symlink-or-dir, not is_dir(follow_symlinks=False):
+            # the latter is False for a symlink and would let the multi-minute
+            # 9p walk this pruning exists to prevent slip straight back in.
+            if entry.name in EXCLUDED_DIRS and (
+                entry.is_symlink() or entry.is_dir(follow_symlinks=False)
+            ):
                 continue
             yield entry
 
@@ -197,6 +208,10 @@ class WatcherManager:
         self.poll_interval_s = poll_interval_s
         self._observer: Any = None
         self._polling_observer: Any = None
+        # root path -> inotify-blind fstype (or None). Caches the /proc/mounts
+        # read + one-time warning so toggling watch on/off on the same root
+        # neither re-reads /proc/mounts nor re-logs.
+        self._fstype_cache: dict[str, str | None] = {}
         self._watches: dict[str, _ProjectWatch] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue()
@@ -317,7 +332,20 @@ class WatcherManager:
         per-interval stat-walk of a project's ``.venv`` over 9p takes minutes
         and hangs the dashboard. Per-project .gitignore/secret filtering stays
         post-hoc in ``_Handler`` (it is not a walk-cost problem)."""
-        fstype = _inotify_blind_fstype(root)
+        key = str(root)
+        if key in self._fstype_cache:
+            fstype = self._fstype_cache[key]
+        else:
+            fstype = _inotify_blind_fstype(root)
+            self._fstype_cache[key] = fstype
+            if fstype is not None:
+                logger.warning(
+                    "root %s is on a %s filesystem where inotify delivers no "
+                    "events; falling back to polling every %.1fs",
+                    root,
+                    fstype,
+                    self.poll_interval_s,
+                )
         if fstype is not None:
             if self._polling_observer is None:
                 from watchdog.observers.polling import PollingObserverVFS
@@ -329,13 +357,6 @@ class WatcherManager:
                 )
                 self._polling_observer.daemon = True
                 self._polling_observer.start()
-            logger.warning(
-                "root %s is on a %s filesystem where inotify delivers no "
-                "events; falling back to polling every %.1fs",
-                root,
-                fstype,
-                self.poll_interval_s,
-            )
             return self._polling_observer
         if self._observer is None:
             from watchdog.observers import Observer

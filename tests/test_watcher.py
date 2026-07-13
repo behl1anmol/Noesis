@@ -263,6 +263,20 @@ def test_pruned_scandir_skips_excluded_dirs(tmp_path):
     assert "node_modules" not in names
 
 
+def test_pruned_scandir_skips_symlinked_excluded_dirs(tmp_path):
+    # DirectorySnapshot recurses via os.stat (follows symlinks), so a *symlinked*
+    # excluded dir would be walked into — the multi-minute 9p hang this prune
+    # exists to prevent. It must be pruned even though it's a symlink, not a dir.
+    real = tmp_path / "real_venv"
+    real.mkdir()
+    (real / "lib.py").write_text("y = 1\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".venv").symlink_to(real, target_is_directory=True)
+    names = {e.name for e in _pruned_scandir(str(tmp_path))}
+    assert "src" in names
+    assert ".venv" not in names  # symlinked excluded dir pruned → never descended
+
+
 def test_schedule_picks_polling_observer(tmp_path, monkeypatch):
     from watchdog.observers.polling import PollingObserverVFS
 
