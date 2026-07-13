@@ -98,10 +98,15 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         batch_size=cfg.embedder.batch_size,
         device=embedder_device,
     )
+    log = logging.getLogger(__name__)
+    # A silent hang here (Qdrant down/unreachable) is a common false "bug"
+    # report — name what we're waiting on before the blocking round-trips.
+    log.info("connecting to Qdrant at %s", cfg.qdrant.url)
     store = VectorStore(
         QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
     )
     store.ensure_collection(embedder)
+    log.info("Qdrant collection %s ready", cfg.qdrant.collection)
     reranker: LocalCrossEncoderReranker | None = None
     if cfg.reranker.enabled:
         reranker = LocalCrossEncoderReranker(
@@ -110,7 +115,11 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
             device=reranker_device,
         )
         if cfg.reranker.preload:
+            # preload() forces the ~2.3GB model load now; embedder/reranker
+            # loads log their own start/ready lines (core.embedder/reranker).
+            log.info("preloading reranker model (may take a while)")
             await reranker.preload()
+    log.info("runtime ready")
     return AppContext(
         conn=conn,
         store=store,

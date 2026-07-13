@@ -19,9 +19,13 @@ import asyncio
 import concurrent.futures
 import hashlib
 import itertools
+import logging
 import queue
 import threading
+import time
 from typing import Any, Callable, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -166,9 +170,26 @@ class LocalSTEmbedder:
         # ST's auto-detect, which was seen returning CPU on a cuda box
         # (lesson 4). The resolved value is recorded for benchmark provenance.
         self._resolved_device = resolve_device(self._device)
-        return SentenceTransformer(
+        # Frame the load: on a cold cache this blocks for minutes downloading
+        # weights with no other output (the single silent stall M-users read as
+        # a hang). model_id + device only — no code or query text (ADR-25).
+        logger.info(
+            "loading embedding model %s on %s "
+            "(first run may download weights; can take minutes)",
+            self._model_id,
+            self._resolved_device,
+        )
+        started = time.perf_counter()
+        model = SentenceTransformer(
             self._model_id, trust_remote_code=True, device=self._resolved_device
         )
+        logger.info(
+            "embedding model %s ready on %s took=%.1fs",
+            self._model_id,
+            self._resolved_device,
+            time.perf_counter() - started,
+        )
+        return model
 
     def _worker_loop(self) -> None:
         model: Any = None

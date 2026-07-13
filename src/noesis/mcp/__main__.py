@@ -15,11 +15,17 @@ from typing import AsyncIterator
 from fastmcp import FastMCP
 
 from noesis.core.config import load_settings
+from noesis.logging_config import configure_logging
 from noesis.mcp.server import build_mcp
 from noesis.runtime import AppContext, build_runtime_context, close_runtime_context
 
 
 def main() -> None:
+    # Configure logging first — stderr only, never stdout, which carries this
+    # process's JSON-RPC stream. propagate=False so a host root handler bound
+    # to stdout can't receive these records and corrupt the protocol
+    # (noesis.logging_config).
+    configure_logging(propagate=False)
     cfg = load_settings()
     ctx_holder: list[AppContext] = []
 

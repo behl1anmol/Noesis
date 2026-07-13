@@ -21,6 +21,7 @@ from fastmcp.utilities.lifespan import combine_lifespans
 from noesis.api.dashboard import STATIC_DIR, dashboard_router
 from noesis.api.routes import router
 from noesis.core.config import Settings, load_settings
+from noesis.logging_config import configure_logging
 from noesis.mcp import build_mcp
 from noesis.runtime import (
     AppContext,
@@ -45,6 +46,10 @@ def create_app(
 ) -> FastAPI:
     """Build the app. Tests pass a pre-built *ctx* (fake embedder,
     in-memory Qdrant); production builds one from settings."""
+    # Configure logging before any runtime work so startup/model-load/index
+    # lines are actually emitted (the noesis loggers have no handler otherwise
+    # and default to WARNING — see noesis.logging_config). Idempotent.
+    configure_logging()
     cfg = settings or load_settings()
 
     @asynccontextmanager
