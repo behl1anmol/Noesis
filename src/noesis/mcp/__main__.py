@@ -21,9 +21,11 @@ from noesis.runtime import AppContext, build_runtime_context, close_runtime_cont
 
 
 def main() -> None:
-    # Configure logging first — and note it goes to stderr only, never stdout,
-    # which carries this process's JSON-RPC stream (noesis.logging_config).
-    configure_logging()
+    # Configure logging first — stderr only, never stdout, which carries this
+    # process's JSON-RPC stream. propagate=False so a host root handler bound
+    # to stdout can't receive these records and corrupt the protocol
+    # (noesis.logging_config).
+    configure_logging(propagate=False)
     cfg = load_settings()
     ctx_holder: list[AppContext] = []
 

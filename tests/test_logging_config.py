@@ -44,6 +44,21 @@ def test_configure_logging_attaches_single_stderr_handler(monkeypatch):
     assert log.propagate is True
 
 
+def test_propagate_defaults_true_and_can_be_disabled(monkeypatch):
+    monkeypatch.delenv(lc.LEVEL_ENV, raising=False)
+    # Default keeps propagation so pytest caplog (root handler) still captures.
+    log = lc.configure_logging()
+    assert log.propagate is True
+    # stdio MCP opts out: an already-configured logger must still flip, so a
+    # root handler bound to stdout never receives noesis records (P2 review).
+    log = lc.configure_logging(propagate=False)
+    assert log.propagate is False
+    # ...and the stderr handler is not duplicated by the second call.
+    assert len(_noesis_handlers(log)) == 1
+    # restore for other tests that rely on the default
+    lc.configure_logging(propagate=True)
+
+
 def test_configure_logging_is_idempotent(monkeypatch):
     monkeypatch.delenv(lc.LEVEL_ENV, raising=False)
     log = logging.getLogger("noesis")

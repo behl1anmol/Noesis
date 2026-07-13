@@ -13,9 +13,11 @@ Design constraints:
   stdout corrupts it (CLAUDE.md rule 2, ``noesis.mcp.__main__``). We pin
   ``sys.stderr`` explicitly rather than relying on the implicit default.
 - **No new runtime deps** (CLAUDE.md rule 3): stdlib ``logging`` + ``json``.
-- **``propagate`` stays True** on the ``noesis`` logger so pytest's ``caplog``
-  (a handler on the *root* logger) still captures records — the existing
-  ``tests/test_reranker.py`` caplog assertions depend on this.
+- **``propagate`` defaults True** on the ``noesis`` logger so pytest's
+  ``caplog`` (a handler on the *root* logger) still captures records — the
+  existing ``tests/test_reranker.py`` caplog assertions depend on this. The
+  stdio MCP entry point passes ``propagate=False`` so records can never reach
+  a root handler bound to stdout and corrupt its JSON-RPC stream.
 - This module only sets up transport/format. The content rule (ADR-25: never
   log query text or file contents) is enforced at the individual call sites.
 """
@@ -68,12 +70,27 @@ def _make_formatter() -> logging.Formatter:
     return _JsonFormatter() if fmt == "json" else logging.Formatter(_TEXT_FORMAT)
 
 
-def configure_logging() -> logging.Logger:
+def configure_logging(propagate: bool = True) -> logging.Logger:
     """Idempotently configure the ``noesis`` logger. Safe to call repeatedly:
-    the level and formatter are refreshed from the environment on every call,
-    but at most one handler is ever attached."""
+    the level, formatter, and propagation are refreshed from the environment /
+    arguments on every call, but at most one handler is ever attached.
+
+    ``propagate`` controls whether records also bubble to the root logger.
+    The default (True) is required for the HTTP app and the test suite, where
+    pytest's ``caplog`` handler sits on the root logger. The stdio MCP entry
+    point (``noesis.mcp.__main__``) passes ``propagate=False``: its own
+    ``stderr`` handler still emits every line, but a root handler bound to
+    **stdout** (e.g. a host's bootstrap/sitecustomize handler) would otherwise
+    receive these records too and corrupt the JSON-RPC stream that shares
+    stdout. stderr-only is the whole point in that process.
+    """
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(_resolve_level(os.environ.get(LEVEL_ENV)))
+    # Set on every call, before the idempotent early-return, so a later
+    # configure_logging(propagate=False) can still flip an already-configured
+    # logger (the stdio entry point runs after app import may have configured
+    # it with the default True).
+    logger.propagate = propagate
     formatter = _make_formatter()
 
     for handler in logger.handlers:
@@ -85,5 +102,4 @@ def configure_logging() -> logging.Logger:
     handler._noesis_tag = _HANDLER_TAG  # type: ignore[attr-defined]
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    # propagate deliberately left at its default (True) — see module docstring.
     return logger
