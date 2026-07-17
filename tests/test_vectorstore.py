@@ -368,3 +368,50 @@ async def test_search_channel_argument_validation(store: VectorStore):
         store.search("proj1", dense_vector=[0.0] * 8, channel="sparse")
     with pytest.raises(ValueError, match="query_text"):
         store.search("proj1", dense_vector=[0.0] * 8, channel="hybrid")
+
+
+async def test_count_project_points_isolates_projects(store: VectorStore):
+    embedder = FakeEmbedder(dim=8)
+    store.ensure_collection(embedder)
+    await index_chunks(
+        store,
+        embedder,
+        "proj1",
+        [
+            make_chunk(file_path="src/one.py", start_line=1),
+            make_chunk(file_path="src/one.py", start_line=20),
+        ],
+    )
+    await index_chunks(
+        store, embedder, "proj2", [make_chunk(file_path="src/two.py")]
+    )
+    assert store.count_project_points("proj1") == 2
+    assert store.count_project_points("proj2") == 1
+    assert store.count_project_points("proj-unknown") == 0
+
+
+async def test_per_file_point_counts(store: VectorStore):
+    embedder = FakeEmbedder(dim=8)
+    store.ensure_collection(embedder)
+    await index_chunks(
+        store,
+        embedder,
+        "proj1",
+        [
+            make_chunk(file_path="src/a.py", start_line=1),
+            make_chunk(file_path="src/a.py", start_line=30),
+            make_chunk(file_path="src/b.py", start_line=1),
+        ],
+    )
+    # A different project's points must not leak into the per-file tally.
+    await index_chunks(
+        store, embedder, "proj2", [make_chunk(file_path="src/a.py")]
+    )
+    assert store.per_file_point_counts("proj1") == {"src/a.py": 2, "src/b.py": 1}
+
+
+async def test_ensure_collection_returns_true_only_on_create(store: VectorStore):
+    embedder = FakeEmbedder(dim=8)
+    assert store.ensure_collection(embedder) is True
+    # Already exists with a matching shape → not created by this call.
+    assert store.ensure_collection(embedder) is False
