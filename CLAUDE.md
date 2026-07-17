@@ -38,7 +38,7 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
    cutoff that happens mid-turn before either of those events fires — treat
    an unclosed prior session with no checkpoint as exactly that: assume
    nothing beyond the plain transcript survived, and ask before reconstructing
-   intent. Use /checkpoint to force a save point before a risky step; /resume
+   intent. Use /checkpoint to force a save point before a risky step; /devlog-resume
    to recall the latest one mid-conversation. Never edit dev/devlog.sqlite
    directly — go through devlog.py.
 
