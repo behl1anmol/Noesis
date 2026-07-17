@@ -127,6 +127,27 @@ def _require_bool(value: object, key: str) -> bool:
     return value
 
 
+def _require_positive_int(value: object, key: str) -> int:
+    n = int(value)
+    if n <= 0:
+        raise ValueError(f"config field {key!r} must be > 0, got {n!r}")
+    return n
+
+
+def _require_positive_float(value: object, key: str) -> float:
+    x = float(value)
+    if x <= 0:
+        raise ValueError(f"config field {key!r} must be > 0, got {x!r}")
+    return x
+
+
+def _require_non_negative_int(value: object, key: str) -> int:
+    n = int(value)
+    if n < 0:
+        raise ValueError(f"config field {key!r} must be >= 0, got {n!r}")
+    return n
+
+
 def load_settings(config_path: str | Path | None = None) -> Settings:
     """Load settings, falling back to defaults per key.
 
@@ -164,8 +185,13 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         db_path=db_path,
         embedder=EmbedderSettings(
             model=emb.get("model", EmbedderSettings.model),
-            dim=int(emb.get("dim", EmbedderSettings.dim)),
-            batch_size=int(emb.get("batch_size", EmbedderSettings.batch_size)),
+            dim=_require_positive_int(
+                emb.get("dim", EmbedderSettings.dim), "embedder.dim"
+            ),
+            batch_size=_require_positive_int(
+                emb.get("batch_size", EmbedderSettings.batch_size),
+                "embedder.batch_size",
+            ),
             device=emb.get("device", EmbedderSettings.device),
         ),
         reranker=RerankerSettings(
@@ -176,13 +202,25 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             preload=_require_bool(
                 rrk.get("preload", RerankerSettings.preload), "reranker.preload"
             ),
-            candidates=int(rrk.get("candidates", RerankerSettings.candidates)),
-            batch_size=int(rrk.get("batch_size", RerankerSettings.batch_size)),
+            candidates=_require_non_negative_int(
+                rrk.get("candidates", RerankerSettings.candidates),
+                "reranker.candidates",
+            ),
+            batch_size=_require_positive_int(
+                rrk.get("batch_size", RerankerSettings.batch_size),
+                "reranker.batch_size",
+            ),
             device=rrk.get("device", RerankerSettings.device),
         ),
         structural=StructuralSettings(
-            max_results=int(stru.get("max_results", StructuralSettings.max_results)),
-            timeout_s=float(stru.get("timeout_s", StructuralSettings.timeout_s)),
+            max_results=_require_positive_int(
+                stru.get("max_results", StructuralSettings.max_results),
+                "structural.max_results",
+            ),
+            timeout_s=_require_positive_float(
+                stru.get("timeout_s", StructuralSettings.timeout_s),
+                "structural.timeout_s",
+            ),
         ),
         git=GitSettings(
             fast_path=_require_bool(
@@ -190,8 +228,9 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             ),
         ),
         watcher=WatcherSettings(
-            poll_interval_s=float(
-                wat.get("poll_interval_s", WatcherSettings.poll_interval_s)
+            poll_interval_s=_require_positive_float(
+                wat.get("poll_interval_s", WatcherSettings.poll_interval_s),
+                "watcher.poll_interval_s",
             ),
         ),
         qdrant=QdrantSettings(

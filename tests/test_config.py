@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from noesis.core.config import RerankerSettings, WatcherSettings, load_settings
 
 
@@ -50,3 +52,17 @@ def test_watcher_section_parsed(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text("[watcher]\npoll_interval_s = 2.5\n")
     assert load_settings(cfg).watcher.poll_interval_s == 2.5
+
+
+def test_zero_batch_size_rejected(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[embedder]\nbatch_size = 0\n")
+    with pytest.raises(ValueError, match="embedder.batch_size"):
+        load_settings(cfg)
+
+
+def test_zero_poll_interval_rejected(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[watcher]\npoll_interval_s = 0\n")
+    with pytest.raises(ValueError, match="watcher.poll_interval_s"):
+        load_settings(cfg)
