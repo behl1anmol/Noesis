@@ -16,6 +16,8 @@ FakeEmbedder + execute_run driven directly on the test loop.
 from __future__ import annotations
 
 import logging
+import subprocess
+from pathlib import Path
 
 import pytest
 from qdrant_client import QdrantClient, models
@@ -24,6 +26,25 @@ from noesis.core import jobs, state
 from noesis.core.embedder import FakeEmbedder
 from noesis.core.indexer import execute_run
 from noesis.core.vectorstore import VectorStore
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(root),
+            *args,
+        ),
+        check=True,
+        capture_output=True,
+    )
 
 
 @pytest.fixture()
@@ -234,3 +255,32 @@ async def test_index_status_exposes_drift(ctx, repo):
     assert status["drift"] is True
     assert status["vector_count"] == 0
     assert status["expected_chunks"] > 0
+
+
+# --- 9. Drift heal under a live git fast path (PR #20 review finding #1) ------
+
+
+async def test_drift_self_heal_with_git_fast_path(ctx, repo):
+    """The `candidates is not None and drifted` union branch only runs on a
+    full run with an active git fast path — every other drift test uses a
+    non-git fixture where candidates stays None. Commit the repo so run 2
+    fast-paths off the anchor, then wipe points and confirm the drifted files
+    are still re-embedded through that branch."""
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+
+    project_id, _ = await _index(ctx, repo)
+    expected = state.expected_chunk_total(ctx.conn, project_id)
+    assert expected > 0
+    # First run recorded the anchor, so the next run takes the git fast path.
+    assert state.get_project(ctx.conn, project_id)["last_indexed_commit"]
+
+    ctx.store.delete_project_points(project_id)
+
+    result = await _reindex(ctx, repo, project_id)
+    # fast_path_used True proves candidates was not None on this run — i.e. the
+    # union branch was reachable — and the restored count proves it re-embedded.
+    assert result.fast_path_used is True
+    assert ctx.store.count_project_points(project_id) == expected
+    assert result.chunks_written == expected
