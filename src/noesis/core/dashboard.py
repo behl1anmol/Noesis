@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 
 VALID_DEVICES = ("auto", "cuda", "mps", "cpu")
 
+# How many times delete_project re-checks for a run that a competing launcher
+# (watcher retry, concurrent REST/MCP reindex) started while it was awaiting
+# the previous one. Bounded, not `while True`: a relaunch storm must not wedge
+# the request, and runtime.py's startup sweep reclaims whatever escapes.
+_DELETE_DRAIN_PASSES = 3
+
 
 def _age_seconds(iso_ts: str | None) -> float | None:
     if not iso_ts:
@@ -416,26 +422,58 @@ def set_compute_device(ctx: Any, device: str) -> dict[str, Any]:
     return device_info(ctx)
 
 
-def delete_project(ctx: Any, project_id: str) -> bool:
+async def delete_project(ctx: Any, project_id: str) -> bool:
     """Remove a project's index state entirely (ADR-43): cancel its running
     index task, unschedule its watch, drop its Qdrant points, delete its
     SQLite rows. Touches ONLY derived index state — never the project's
     source tree. Returns False for an unknown project.
 
-    Order matters: task first (a run mid-flight would re-insert file rows
-    and points after the wipe), then the watch (events would recreate
-    pending rows), then points, then rows."""
+    Order matters: the watch goes first, then runs are drained, then points,
+    then rows — everything that could write must be silenced before the wipe.
+
+    The watch is unscheduled *before* the drain because draining awaits, and
+    an await hands the loop back to the watcher's consumer task. Its
+    ``_maybe_auto_reindex`` gates on ``auto_reindex`` alone — never on
+    ``watch_enabled`` — so the instant the cancelled run is marked failed it
+    would happily start a fresh one for this project and that run, never
+    cancelled, would write points after the wipe. ``set_watch(False)`` is
+    what actually disarms it: it drops the project's ``_last_event`` bucket,
+    which is the collection that method iterates.
+
+    The drain loops rather than cancelling once: the watcher is not the only
+    launcher. A concurrent REST/MCP ``reindex`` can win the same window, and
+    a single cancel-then-wipe would sail straight past it. Each pass costs at
+    most one file's upsert, and the bound keeps a pathological relaunch storm
+    from wedging the request — the startup sweep reclaims anything that
+    somehow still slips through.
+
+    The cancelled task is *awaited*, not just cancelled, and that await is
+    only meaningful because indexer.execute_run shields its upsert and waits
+    out the in-flight write before dying: cancelling a task parked on
+    ``await asyncio.to_thread(...)`` otherwise returns at once while the
+    worker thread runs on, landing its points after the wipe and orphaning
+    them under a dead project_id. The two halves are one fix — dropping
+    either reopens the leak. runtime.py's startup sweep is the backstop for
+    the orphans no wipe could prevent (a killed process)."""
     project = state.get_project(ctx.conn, project_id)
     if project is None:
         return False
-    latest = state.get_latest_run(ctx.conn, project_id)
-    if latest is not None and latest["status"] == "running":
-        task = ctx.jobs.get(latest["id"])
-        if task is not None:
-            task.cancel()
     watcher = getattr(ctx, "watcher", None)
     if watcher is not None:
         watcher.set_watch(project_id, False)
+    for _ in range(_DELETE_DRAIN_PASSES):
+        latest = state.get_latest_run(ctx.conn, project_id)
+        if latest is None or latest["status"] != "running":
+            break
+        task = ctx.jobs.get(latest["id"])
+        if task is None:
+            # Marked running but not ours: another transport's process owns
+            # it and we cannot cancel across processes. Wipe anyway — its
+            # points are that process's to orphan, and the startup sweep is
+            # what reclaims them.
+            break
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     ctx.store.delete_project_points(project_id)
     state.delete_project(ctx.conn, project_id)
     logger.info("project %s deleted (%s)", project_id, project["root_path"])

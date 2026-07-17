@@ -266,6 +266,51 @@ class VectorStore:
             wait=True,
         )
 
+    def delete_orphan_points(self, live_project_ids: Iterable[str]) -> int:
+        """Delete points whose project_id is not in *live_project_ids*, and
+        return how many went. Startup-only crash recovery for the collection —
+        the Qdrant-side counterpart of state.fail_orphaned_runs, and the
+        catch-all for orphans no wipe could have prevented: a process killed
+        mid-run, a delete that raced an in-flight write, a run whose upsert
+        outlived the event loop.
+
+        REFUSES to sweep when *live_project_ids* is empty. An empty project
+        table cannot be told apart from a state DB that resolved to the wrong
+        path — the exact misconfiguration the 2026-07-11 hunt found (a
+        cwd-relative db_path silently opening a fresh, empty DB) — and this
+        operation is destructive: on the wrong DB, "no live projects" would
+        read as "delete the entire collection". A sweep skipped here costs a
+        few dead points until a project exists; a sweep run there costs the
+        whole index. Safe under the dual-transport deployment: a project row
+        is committed before its first point is ever written, so a project
+        another process is mid-indexing is never mistaken for an orphan.
+        """
+        live = list(live_project_ids)
+        if not live:
+            return 0
+        # must_not(project_id in live) — the complement of the live set, so a
+        # project registered but never indexed simply matches nothing.
+        orphans = models.Filter(
+            must_not=[
+                models.FieldCondition(
+                    key="project_id", match=models.MatchAny(any=live)
+                )
+            ]
+        )
+        # Counted before the delete: Qdrant's delete result carries no count,
+        # and a silent destructive startup step is exactly what an operator
+        # needs to see in the log.
+        count = self._client.count(
+            collection_name=self._collection, count_filter=orphans, exact=True
+        ).count
+        if count:
+            self._client.delete(
+                collection_name=self._collection,
+                points_selector=models.FilterSelector(filter=orphans),
+                wait=True,
+            )
+        return count
+
     def search(
         self,
         project_id: str,

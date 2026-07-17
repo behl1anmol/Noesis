@@ -158,7 +158,9 @@ async def api_usage(request: Request, days: int = 30) -> dict[str, Any]:
 # -- actions ------------------------------------------------------------------
 
 
-@dashboard_router.post("/api/projects/{project_id}/flags")
+@dashboard_router.post(
+    "/api/projects/{project_id}/flags", dependencies=[Depends(verify_local_origin)]
+)
 async def api_set_flags(
     project_id: str, req: ProjectFlagsRequest, request: Request
 ) -> dict[str, Any]:
@@ -191,7 +193,9 @@ async def api_reindex_pending(project_id: str, request: Request) -> dict[str, An
     return result
 
 
-@dashboard_router.post("/api/settings/device")
+@dashboard_router.post(
+    "/api/settings/device", dependencies=[Depends(verify_local_origin)]
+)
 async def api_set_device(req: DeviceRequest, request: Request) -> dict[str, Any]:
     try:
         return core_dashboard.set_compute_device(request.app.state.ctx, req.device)
@@ -199,9 +203,11 @@ async def api_set_device(req: DeviceRequest, request: Request) -> dict[str, Any]
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@dashboard_router.delete("/api/projects/{project_id}")
+@dashboard_router.delete(
+    "/api/projects/{project_id}", dependencies=[Depends(verify_local_origin)]
+)
 async def api_delete_project(project_id: str, request: Request) -> dict[str, Any]:
-    if not core_dashboard.delete_project(request.app.state.ctx, project_id):
+    if not await core_dashboard.delete_project(request.app.state.ctx, project_id):
         raise HTTPException(status_code=404, detail="unknown project_id")
     return {"project_id": project_id, "deleted": True}
 
@@ -222,7 +228,9 @@ async def api_browse(request: Request, path: str | None = None) -> dict[str, Any
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@dashboard_router.post("/api/register/preview")
+@dashboard_router.post(
+    "/api/register/preview", dependencies=[Depends(verify_local_origin)]
+)
 async def api_register_preview(req: PreviewRequest, request: Request) -> dict[str, Any]:
     try:
         return await core_dashboard.preview_scan(
@@ -237,7 +245,9 @@ async def api_register_preview(req: PreviewRequest, request: Request) -> dict[st
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@dashboard_router.post("/api/register", status_code=201)
+@dashboard_router.post(
+    "/api/register", status_code=201, dependencies=[Depends(verify_local_origin)]
+)
 async def api_register(req: RegisterRequest, request: Request) -> dict[str, Any]:
     try:
         return core_dashboard.register_project(

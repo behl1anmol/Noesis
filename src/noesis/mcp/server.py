@@ -38,8 +38,8 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
 
     @mcp.tool
     async def search_code(
-        query: str,
-        project_id: str,
+        query: str = Field(min_length=1),
+        project_id: str = Field(),
         top_k: int = Field(default=10, ge=1, le=100),
         language: str | None = None,
         channel: Literal["hybrid", "dense", "sparse"] = "hybrid",
@@ -52,6 +52,12 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
         not ground truth — read the live file before acting on a span.
         Use get_chunk(chunk_id) to fetch a hit's full stored text.
         """
+        # min_length rejects "" in validation; whitespace-only survives it and
+        # is the same wasted work (empty BM25 document, dense embed of
+        # nothing), so it is refused here — the REST twin does the same in a
+        # field_validator.
+        if not query.strip():
+            raise ToolError("query must not be blank")
         ctx = get_ctx()
         if state.get_project(ctx.conn, project_id) is None:
             raise ToolError("unknown project_id")

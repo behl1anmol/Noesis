@@ -249,13 +249,28 @@ async def execute_run(
                         vectors.extend(
                             await embedder.embed_documents([c.text for c in batch])
                         )
-                    await asyncio.to_thread(
-                        store.upsert_chunks,
-                        project_id,
-                        chunks,
-                        vectors,
-                        embedding_model=embedder.model_id,
+                    # Shielded, then awaited on cancel: asyncio delivers
+                    # CancelledError at the await while the worker thread runs
+                    # on, so a plain `await asyncio.to_thread(...)` lets an
+                    # abandoned write land after a concurrent delete_project
+                    # wipe — orphaning those points under a dead project_id
+                    # (nothing prunes them; every prune path is scoped to a
+                    # live project). Cancellation still aborts the run; it
+                    # just waits out the one write already in flight.
+                    upsert = asyncio.ensure_future(
+                        asyncio.to_thread(
+                            store.upsert_chunks,
+                            project_id,
+                            chunks,
+                            vectors,
+                            embedding_model=embedder.model_id,
+                        )
                     )
+                    try:
+                        await asyncio.shield(upsert)
+                    except asyncio.CancelledError:
+                        await asyncio.gather(upsert, return_exceptions=True)
+                        raise
                 # New points first, stale points after: chunk ids embed the file
                 # hash, so old content lives at different ids and must be pruned —
                 # but only once the replacement is searchable. A failure above
