@@ -82,12 +82,17 @@ async def search_code(
         # overflow / degenerate text) sorts as -inf: any NaN in the key
         # breaks the total order and silently permutes the whole ranking —
         # guarded here so it covers every Reranker implementation.
+        # NaN is also nulled in the payload below: JSONResponse serializes
+        # with allow_nan=False and would 500 the response.
         order = sorted(
             range(len(hits)),
             key=lambda i: -math.inf if math.isnan(scores[i]) else scores[i],
             reverse=True,
         )
-        hits = [hits[i] | {"rerank_score": scores[i]} for i in order[:top_k]]
+        hits = [
+            hits[i] | {"rerank_score": (None if math.isnan(scores[i]) else scores[i])}
+            for i in order[:top_k]
+        ]
     # Per-query stage timing at DEBUG (INFO stays clean; telemetry.py remains
     # the metadata source of truth). No query text or hit content — counts,
     # channel, and durations only (ADR-25).

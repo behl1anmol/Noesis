@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from noesis.api.security import verify_local_origin
 from noesis.core import jobs, state, telemetry
@@ -32,13 +32,24 @@ class RegisterProjectRequest(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1)
     project_id: str
     top_k: int = Field(default=10, ge=1, le=100)
     language: str | None = None
     channel: SearchChannel = "hybrid"
     # None → server default (reranker availability, config reranker.enabled).
     rerank: bool | None = None
+
+    @field_validator("query")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        # min_length alone lets whitespace through, and a whitespace query is
+        # the same wasted work as an empty one: an empty BM25 document and a
+        # dense embed of nothing. Rejected, not stripped — the caller asked
+        # for something meaningless and should hear so.
+        if not value.strip():
+            raise ValueError("query must not be blank")
+        return value
 
 
 class StructuralSearchRequest(BaseModel):

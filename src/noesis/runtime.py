@@ -107,6 +107,19 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
     )
     store.ensure_collection(embedder)
     log.info("Qdrant collection %s ready", cfg.qdrant.collection)
+    # The Qdrant-side half of the crash recovery above: fail_orphaned_runs
+    # cleans SQLite rows a dead process left behind, this cleans the points
+    # one left behind. Startup is the only safe moment — no run of ours is in
+    # flight yet, and a project row is always committed before its first point
+    # is written, so a project another transport is mid-indexing cannot look
+    # like an orphan. Skipped on an empty project table (see the method).
+    swept = await asyncio.to_thread(
+        store.delete_orphan_points, [row["id"] for row in state.list_projects(conn)]
+    )
+    if swept:
+        log.warning(
+            "swept %d orphaned point(s) belonging to no registered project", swept
+        )
     reranker: LocalCrossEncoderReranker | None = None
     if cfg.reranker.enabled:
         reranker = LocalCrossEncoderReranker(

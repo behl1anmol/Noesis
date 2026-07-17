@@ -416,7 +416,7 @@ def set_compute_device(ctx: Any, device: str) -> dict[str, Any]:
     return device_info(ctx)
 
 
-def delete_project(ctx: Any, project_id: str) -> bool:
+async def delete_project(ctx: Any, project_id: str) -> bool:
     """Remove a project's index state entirely (ADR-43): cancel its running
     index task, unschedule its watch, drop its Qdrant points, delete its
     SQLite rows. Touches ONLY derived index state — never the project's
@@ -424,7 +424,16 @@ def delete_project(ctx: Any, project_id: str) -> bool:
 
     Order matters: task first (a run mid-flight would re-insert file rows
     and points after the wipe), then the watch (events would recreate
-    pending rows), then points, then rows."""
+    pending rows), then points, then rows.
+
+    The cancelled task is *awaited*, not just cancelled, and that await is
+    only meaningful because indexer.execute_run shields its upsert and waits
+    out the in-flight write before dying: cancelling a task parked on
+    ``await asyncio.to_thread(...)`` otherwise returns at once while the
+    worker thread runs on, landing its points after the wipe and orphaning
+    them under a dead project_id. The two halves are one fix — dropping
+    either reopens the leak. runtime.py's startup sweep is the backstop for
+    the orphans no wipe could prevent (a killed process)."""
     project = state.get_project(ctx.conn, project_id)
     if project is None:
         return False
@@ -433,6 +442,7 @@ def delete_project(ctx: Any, project_id: str) -> bool:
         task = ctx.jobs.get(latest["id"])
         if task is not None:
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     watcher = getattr(ctx, "watcher", None)
     if watcher is not None:
         watcher.set_watch(project_id, False)
