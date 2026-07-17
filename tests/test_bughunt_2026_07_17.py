@@ -42,6 +42,7 @@ import asyncio
 import json
 import math
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -328,6 +329,62 @@ async def test_delete_project_waits_out_inflight_upsert(tmp_path, repo):
 
     remaining = inner._client.count(inner.collection_name).count
     assert remaining == 0, f"{remaining} orphaned point(s) survived the delete"
+    assert state.get_project(ctx.conn, project_id) is None
+
+
+class SlowStore:
+    """VectorStore wrapper whose upserts take a beat, so a run launched into
+    the delete's await window is reliably still in flight when the wipe runs."""
+
+    def __init__(self, inner, delay=0.15):
+        self._inner = inner
+        self._delay = delay
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def upsert_chunks(self, *args, **kwargs):
+        time.sleep(self._delay)
+        return self._inner.upsert_chunks(*args, **kwargs)
+
+
+async def test_delete_project_drains_a_run_launched_during_the_await(tmp_path, repo):
+    """PR #18 review (P2): awaiting the cancelled run hands the event loop back
+    to every other launcher. The watcher's _maybe_auto_reindex gates on
+    auto_reindex alone and fires the moment the cancelled run stops being
+    'running'; a concurrent REST/MCP reindex can win the same window. A
+    cancel-once-then-wipe sails straight past that second run, which then
+    writes points after the wipe."""
+    ctx = make_ctx(tmp_path)
+    inner = ctx.store
+    ctx.store = SlowStore(inner)
+
+    launch = jobs.launch_index_run(ctx, str(repo))
+    project_id, run_a = launch["project_id"], launch["run_id"]
+    task_a = ctx.jobs[run_a]
+
+    relaunched: dict = {}
+
+    async def racer():
+        # Exactly what the watcher's retry does: wait for the cancelled run to
+        # stop being 'running', then launch a fresh one for the same project.
+        await asyncio.gather(task_a, return_exceptions=True)
+        relaunched.update(jobs.launch_index_run(ctx, str(repo)))
+
+    racing = asyncio.create_task(racer())
+    await asyncio.sleep(0)  # racer registers on task_a before delete_project does
+
+    assert await core_dashboard.delete_project(ctx, project_id) is True
+    await racing
+    assert relaunched.get("status") == "accepted", "the racing relaunch never started"
+
+    # Let anything still running finish, then look: nothing may have survived.
+    for task in list(ctx.jobs.values()):
+        await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0.3)
+
+    remaining = inner._client.count(inner.collection_name).count
+    assert remaining == 0, f"{remaining} point(s) written by a run started mid-delete"
     assert state.get_project(ctx.conn, project_id) is None
 
 
