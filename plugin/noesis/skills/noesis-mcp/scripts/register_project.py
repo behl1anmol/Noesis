@@ -16,7 +16,8 @@ Examples
 
 Exit codes: 0 success (and index done, if --wait); 2 usage/argument error;
 3 registration rejected by the service; 4 could not reach the service;
-5 index run failed (only reachable with --wait).
+5 index run failed (only reachable with --wait); 6 --max-wait exceeded while
+polling (only reachable with --wait --max-wait).
 """
 
 from __future__ import annotations
@@ -91,11 +92,17 @@ def register(base_url: str, root_path: str, timeout: float) -> dict:
 
 
 def wait_for_index(
-    base_url: str, project_id: str, timeout: float, interval: float
+    base_url: str,
+    project_id: str,
+    timeout: float,
+    interval: float,
+    max_wait: float | None = None,
 ) -> str:
     """Poll status until it leaves ``running``/``never_indexed``. Returns the
-    terminal status string."""
+    terminal status string, or "timeout" if ``max_wait`` seconds elapse first
+    (unset ``max_wait`` polls indefinitely)."""
     url = f"{base_url}/projects/{project_id}/status"
+    start = time.monotonic()
     while True:
         _, payload = _request("GET", url, None, timeout)
         status = payload.get("status", "unknown")
@@ -108,6 +115,14 @@ def wait_for_index(
                     f"{payload.get('chunks_written')} chunks."
                 )
             return status
+        elapsed = time.monotonic() - start
+        if max_wait is not None and elapsed > max_wait:
+            print(
+                f"error: --max-wait {max_wait}s exceeded while polling "
+                f"(last seen status={status}).",
+                file=sys.stderr,
+            )
+            return "timeout"
         print(f"  indexing… status={status}", file=sys.stderr)
         time.sleep(interval)
 
@@ -128,6 +143,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--poll-interval", type=float, default=5.0, help="Seconds between status polls."
+    )
+    parser.add_argument(
+        "--max-wait",
+        type=float,
+        default=None,
+        help="Overall cap in seconds for --wait polling; unset = wait indefinitely.",
     )
     args = parser.parse_args()
 
@@ -152,9 +173,13 @@ def main() -> None:
     print(f"registered: project_id={project_id} run_id={result.get('run_id')}")
 
     if args.wait:
-        status = wait_for_index(base_url, project_id, args.timeout, args.poll_interval)
+        status = wait_for_index(
+            base_url, project_id, args.timeout, args.poll_interval, args.max_wait
+        )
         if status == "failed":
             sys.exit(5)
+        elif status == "timeout":
+            sys.exit(6)
     else:
         print("index started in the background; poll get_index_status (or add --wait).")
 

@@ -369,16 +369,26 @@ class WatcherManager:
     def _enqueue_threadsafe(self, project_id: str, rel: str, event_type: str) -> None:
         """Called from the watchdog event thread — hop onto the loop."""
         if self._loop is not None and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(
-                self._queue.put_nowait, (project_id, rel, event_type)
-            )
+            # loop can close between the check above and this call during
+            # shutdown (observer thread outlives stop()'s join timeout) —
+            # call_soon_threadsafe raises RuntimeError in that window.
+            try:
+                self._loop.call_soon_threadsafe(
+                    self._queue.put_nowait, (project_id, rel, event_type)
+                )
+            except RuntimeError:
+                pass
 
     def _reload_ignore_threadsafe(self, watch: _ProjectWatch) -> None:
         """Reload a project's root .gitignore spec on the event loop — the
         observer event thread does string checks only, no file reads
         (PR #10 review keeps that invariant honest)."""
         if self._loop is not None and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(watch.reload_ignore)
+            # see _enqueue_threadsafe
+            try:
+                self._loop.call_soon_threadsafe(watch.reload_ignore)
+            except RuntimeError:
+                pass
 
     # -- consumer side (event loop) ------------------------------------------
 

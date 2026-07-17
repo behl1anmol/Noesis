@@ -107,6 +107,17 @@ class NaNReranker:
         return [float("nan")] + [float(len(texts) - i) for i in range(1, len(texts))]
 
 
+class InfReranker:
+    """Reranker whose first candidate scores +inf — the same non-finite
+    hazard as NaN, but at the other end of math.isfinite's guard.
+    Remaining candidates score descending so the ordering stays checkable."""
+
+    model_id = "inf-reranker-v1"
+
+    async def rerank(self, query: str, texts: list[str]) -> list[float]:
+        return [float("inf")] + [float(len(texts) - i) for i in range(1, len(texts))]
+
+
 def make_ctx(tmp_path, reranker=None):
     conn = state.connect(tmp_path / "state.sqlite")
     state.init_db(conn)
@@ -134,6 +145,12 @@ def nan_client(tmp_path):
 @pytest.fixture()
 def mcp_nan(tmp_path):
     ctx = make_ctx(tmp_path, reranker=NaNReranker())
+    return build_mcp(lambda: ctx), ctx
+
+
+@pytest.fixture()
+def mcp_inf(tmp_path):
+    ctx = make_ctx(tmp_path, reranker=InfReranker())
     return build_mcp(lambda: ctx), ctx
 
 
@@ -181,6 +198,38 @@ async def test_mcp_nan_rerank_score_is_valid_json(mcp_nan, repo):
     scored = [h["rerank_score"] for h in hits[:-1]]
     assert scored == sorted(scored, reverse=True)
     assert not any(isinstance(s, float) and math.isnan(s) for s in scored)
+
+
+async def test_mcp_inf_rerank_score_is_valid_json(mcp_inf, repo):
+    """Same hazard as NaN, other end of math.isfinite's guard: a bare
+    ``Infinity`` token is just as invalid per RFC 8259 as ``NaN``."""
+    mcp, ctx = mcp_inf
+    project_id = await _index(ctx, repo)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "search_code",
+            {
+                "query": "validate token",
+                "project_id": project_id,
+                "top_k": 50,
+                "rerank": True,
+            },
+        )
+    raw = result.content[0].text
+    assert "Infinity" not in raw, "bare Infinity token in MCP payload"
+    body = _strict_loads(raw)
+    hits = body["hits"]
+    assert hits and body["reranked"] is True
+
+    nulls = [h for h in hits if h["rerank_score"] is None]
+    assert len(nulls) == 1, "exactly the inf-scored pair reports a null score"
+    # inf sorts as -inf via the guard, so the unscoreable hit is last and the
+    # real scores stay in descending order — the ranking is unharmed by the
+    # nulling.
+    assert hits[-1]["rerank_score"] is None
+    scored = [h["rerank_score"] for h in hits[:-1]]
+    assert scored == sorted(scored, reverse=True)
+    assert not any(isinstance(s, float) and math.isinf(s) for s in scored)
 
 
 def test_rest_nan_rerank_score_serializes_as_null(nan_client, repo):
