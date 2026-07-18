@@ -76,9 +76,19 @@ def prepare_run(
 
     Split from :func:`execute_run` so the API can hand back
     ``202 Accepted + run_id`` before indexing starts (§3.2).
+
+    Goes through :func:`state.try_start_run` — the same guard as
+    jobs.launch_index_run — and raises RuntimeError when a live run
+    already holds the project: returning that run's id would make this
+    caller execute it concurrently with its owner, the exact race the
+    guard exists to prevent.
     """
     project_id = state.register_project(conn, root_path, embedder.model_id)
-    run_id = state.start_run(conn, project_id)
+    run_id, created = state.try_start_run(conn, project_id)
+    if not created:
+        raise RuntimeError(
+            f"index run {run_id} already running for project {project_id}"
+        )
     return project_id, run_id
 
 
