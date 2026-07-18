@@ -37,6 +37,7 @@ decides which.
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from typing import Any, Iterable, Literal, Protocol
 
 from qdrant_client import QdrantClient, models
@@ -96,7 +97,7 @@ class VectorStore:
     def collection_name(self) -> str:
         return self._collection
 
-    def ensure_collection(self, embedder: Any) -> None:
+    def ensure_collection(self, embedder: Any) -> bool:
         """Create the collection if missing, sized from ``embedder.dim``
         (§3.4 rule 1). Raises ValueError if it exists with a different
         dense size — the system refuses to serve mixed-model results
@@ -104,7 +105,11 @@ class VectorStore:
         collection): points written before M3 carry no sparse vector, so
         silently adding the config would leave the lexical channel empty
         for every existing chunk. The fix is the same as a model change:
-        drop the collection and state, re-index fully."""
+        drop the collection and state, re-index fully.
+
+        Returns ``True`` iff this call actually created the collection.
+        The caller uses that to detect the wipe signature — a missing
+        collection while the state DB still tracks indexed files."""
         if self._client.collection_exists(self._collection):
             info = self._client.get_collection(self._collection)
             vectors = info.config.params.vectors
@@ -128,7 +133,7 @@ class VectorStore:
                     f"silently lose the lexical channel. Delete the collection "
                     f"and the project file state, then re-index."
                 )
-            return
+            return False
         try:
             self._client.create_collection(
                 collection_name=self._collection,
@@ -151,8 +156,10 @@ class VectorStore:
             # exists branch applies; the winner also creates the indexes.
             if not self._client.collection_exists(self._collection):
                 raise
+            # The race winner created the collection (and its indexes); this
+            # process did not, so report False like the exists branch.
             self.ensure_collection(embedder)
-            return
+            return False
         # Keyword indexes must exist before the first bulk load (§3.6).
         for field in ("project_id", "language"):
             self._client.create_payload_index(
@@ -160,6 +167,7 @@ class VectorStore:
                 field_name=field,
                 field_schema=models.PayloadSchemaType.KEYWORD,
             )
+        return True
 
     def upsert_chunks(
         self,
@@ -265,6 +273,61 @@ class VectorStore:
             ),
             wait=True,
         )
+
+    def count_project_points(self, project_id: str) -> int:
+        """Exact number of points stored for one project.
+
+        Drift gate for the indexer: compared against the state DB's expected
+        chunk total to detect a vector store that lost data (an externally
+        dropped/recreated collection) while state still reports files as
+        indexed. Same filtered ``count(exact=True)`` path as
+        delete_orphan_points."""
+        return self._client.count(
+            collection_name=self._collection,
+            count_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="project_id",
+                        match=models.MatchValue(value=project_id),
+                    )
+                ]
+            ),
+            exact=True,
+        ).count
+
+    def per_file_point_counts(self, project_id: str) -> dict[str, int]:
+        """Point count per ``file_path`` for one project, via payload-only
+        scroll.
+
+        Only called after count_project_points has already detected drift,
+        so the full-project scroll is paid for only on genuine divergence.
+        ``file_path`` has no payload index, so this scans rather than
+        filters on it — acceptable at recovery time, not per query."""
+        counts: Counter[str] = Counter()
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="project_id",
+                            match=models.MatchValue(value=project_id),
+                        )
+                    ]
+                ),
+                with_payload=["file_path"],
+                with_vectors=False,
+                limit=1000,
+                offset=offset,
+            )
+            for point in points:
+                path = (point.payload or {}).get("file_path")
+                if path is not None:
+                    counts[str(path)] += 1
+            if offset is None:
+                break
+        return dict(counts)
 
     def delete_orphan_points(self, live_project_ids: Iterable[str]) -> int:
         """Delete points whose project_id is not in *live_project_ids*, and

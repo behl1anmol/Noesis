@@ -177,6 +177,13 @@ def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     A registered project with no runs yet reports ``never_indexed`` with
     the run fields nulled — a stable shape beats a shape-shifting one for
     agent consumers."""
+    # Index health: what the state DB expects vs what Qdrant actually holds.
+    # A mismatch is drift — a vector store that lost data (external collection
+    # wipe) while state still reports the files indexed. Surfaced so agents
+    # and the dashboard can see it without a reindex; a full reindex heals it.
+    expected_chunks = state.expected_chunk_total(ctx.conn, project_id)
+    vector_count = ctx.store.count_project_points(project_id)
+    drift = expected_chunks != vector_count
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {
@@ -189,6 +196,9 @@ def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
             "started_at": None,
             "finished_at": None,
             "error": None,
+            "expected_chunks": expected_chunks,
+            "vector_count": vector_count,
+            "drift": drift,
         }
     return {
         "project_id": project_id,
@@ -200,4 +210,7 @@ def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
         "started_at": run["started_at"],
         "finished_at": run["finished_at"],
         "error": run["error"],
+        "expected_chunks": expected_chunks,
+        "vector_count": vector_count,
+        "drift": drift,
     }

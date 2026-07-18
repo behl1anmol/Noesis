@@ -203,6 +203,76 @@ async def execute_run(
             len(discovered),
         )
         stored = state.get_file_states(conn, project_id)
+
+        # Drift self-heal (ADR-49): the state DB can claim files are indexed
+        # while Qdrant holds none of their points — an externally dropped or
+        # recreated collection. Hash comparison then sees no content change,
+        # the run writes nothing, and search stays empty for those files
+        # permanently. Gate cheaply: one exact project-scoped point count vs
+        # the stored chunk total. Only a mismatch pays for the per-file
+        # scroll. The total gate can miss *balanced* drift (one file over by
+        # N points, another under by N) — accepted to keep the steady state
+        # at a single count query.
+        drifted: set[str] = set()
+        orphan_paths: list[str] = []
+        stored_chunk_counts = state.get_file_chunk_counts(conn, project_id)
+        expected_points = sum(stored_chunk_counts.values())
+        actual_points = await asyncio.to_thread(
+            store.count_project_points, project_id
+        )
+        if actual_points != expected_points:
+            if paths is not None:
+                # Scoped (watcher) run: keep its narrow candidate set and its
+                # never-advance-anchor rule — surface the drift only. A full
+                # reindex is what heals it.
+                logger.warning(
+                    "index run %s: drift detected project=%s expected=%d "
+                    "actual=%d — scoped run, warning only; run a full reindex "
+                    "to self-heal",
+                    run_id,
+                    project_id,
+                    expected_points,
+                    actual_points,
+                )
+            else:
+                per_file = await asyncio.to_thread(
+                    store.per_file_point_counts, project_id
+                )
+                discovered_set = set(discovered)
+                drifted = {
+                    rel
+                    for rel, cc in stored_chunk_counts.items()
+                    if per_file.get(rel, 0) != cc
+                }
+                # Points for a file_path neither tracked in state nor present
+                # on disk: no other prune path covers them and they keep the
+                # drift gate firing every run.
+                orphan_paths = [
+                    p
+                    for p in per_file
+                    if p not in stored_chunk_counts and p not in discovered_set
+                ]
+                logger.warning(
+                    "index run %s: drift detected project=%s expected=%d "
+                    "actual=%d — re-embedding %d drifted file(s), pruning %d "
+                    "orphan path(s)",
+                    run_id,
+                    project_id,
+                    expected_points,
+                    actual_points,
+                    len(drifted),
+                    len(orphan_paths),
+                )
+                if candidates is not None and drifted:
+                    # Widening-only, exactly like the H1 dirty-paths union
+                    # above: forces partition to re-hash drifted files so the
+                    # re-embed uses their true current hash (rule 1 safe).
+                    # When candidates is None, partition already hashes the
+                    # whole tree, so no union is needed.
+                    candidates = gitfast.CandidatePathSet(
+                        set(candidates) | drifted
+                    )
+
         diff = await asyncio.to_thread(
             hashdiff.partition, root_path, discovered, stored, candidates=candidates
         )
@@ -210,16 +280,29 @@ async def execute_run(
         chunks_written = 0
         file_errors: list[tuple[str, str]] = []
         to_index = [*diff.new, *diff.changed]
+        if drifted:
+            # Drifted-but-unchanged files: content hash still matches state,
+            # yet their points are missing/mismatched in Qdrant — exactly what
+            # incremental indexing skips. Re-embed is idempotent (deterministic
+            # point ids), so this restores the missing points. Files deleted
+            # from disk are excluded: they never enter diff.hashes.
+            present = set(to_index)
+            to_index.extend(
+                rel
+                for rel in sorted(drifted)
+                if rel in diff.hashes and rel not in present
+            )
         # Start milestone: counts only, no paths or content (ADR-25).
         logger.info(
-            "index run %s: project=%s to_index=%d (new=%d changed=%d deleted=%d) "
-            "discovered=%d",
+            "index run %s: project=%s to_index=%d (new=%d changed=%d deleted=%d "
+            "drifted=%d) discovered=%d",
             run_id,
             project_id,
             len(to_index),
             len(diff.new),
             len(diff.changed),
             len(diff.deleted),
+            len(drifted),
             len(discovered),
         )
         # Throttle progress lines: the larger of every-50-files and every-10%,
@@ -311,6 +394,14 @@ async def execute_run(
         if diff.deleted:
             await asyncio.to_thread(store.delete_file_chunks, project_id, diff.deleted)
             state.delete_files(conn, project_id, diff.deleted)
+
+        if orphan_paths:
+            # Drift cleanup: points whose file_path is neither tracked in
+            # state nor on disk. No state rows correspond to them, so this
+            # only prunes Qdrant; without it the drift gate keeps firing.
+            await asyncio.to_thread(
+                store.delete_file_chunks, project_id, orphan_paths
+            )
 
         # Hash-time failures (H7 carry-forward) are per-file failures too:
         # the file's true state is unknown this run, its stored hash may be

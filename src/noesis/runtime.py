@@ -105,7 +105,21 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
     store = VectorStore(
         QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
     )
-    store.ensure_collection(embedder)
+    created = store.ensure_collection(embedder)
+    if created:
+        tracked = state.indexed_file_total(conn)
+        if tracked > 0:
+            log.warning(
+                "Qdrant collection %s was MISSING at startup but the state DB "
+                "already tracks %d indexed file(s) — signature of an external "
+                "collection wipe: points are gone while state still reports "
+                "files as indexed. Search will return empty for affected "
+                "projects until a full reindex, which now self-heals by "
+                "re-embedding drifted files. Nothing was deleted by this "
+                "process.",
+                cfg.qdrant.collection,
+                tracked,
+            )
     log.info("Qdrant collection %s ready", cfg.qdrant.collection)
     # The Qdrant-side half of the crash recovery above: fail_orphaned_runs
     # cleans SQLite rows a dead process left behind, this cleans the points

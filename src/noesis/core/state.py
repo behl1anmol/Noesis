@@ -348,6 +348,36 @@ def get_file_states(conn: sqlite3.Connection, project_id: str) -> dict[str, str]
     return {row["path"]: row["content_hash"] for row in rows}
 
 
+def get_file_chunk_counts(
+    conn: sqlite3.Connection, project_id: str
+) -> dict[str, int]:
+    """Stored per-file chunk_count for a project — the number of points the
+    vector store should hold for each file. Drift self-heal compares this,
+    file by file, against the live per-file point counts in Qdrant."""
+    rows = conn.execute(
+        "SELECT path, chunk_count FROM files WHERE project_id = ?", (project_id,)
+    ).fetchall()
+    return {row["path"]: int(row["chunk_count"]) for row in rows}
+
+
+def expected_chunk_total(conn: sqlite3.Connection, project_id: str) -> int:
+    """Sum of stored per-file chunk_count for a project — the number of
+    points the vector store should hold in total. COALESCE so a
+    never-indexed project reads 0, never NULL."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(chunk_count), 0) AS n FROM files WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+    return int(row["n"])
+
+
+def indexed_file_total(conn: sqlite3.Connection) -> int:
+    """Total tracked files across all projects — the wipe-signature check
+    (a vector collection created while state already tracks indexed files)."""
+    row = conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()
+    return int(row["n"])
+
+
 def upsert_file(
     conn: sqlite3.Connection,
     project_id: str,

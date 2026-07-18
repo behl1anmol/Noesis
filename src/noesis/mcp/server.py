@@ -146,7 +146,9 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
         ctx = get_ctx()
         if state.get_project(ctx.conn, project_id) is None:
             raise ToolError("unknown project_id")
-        return jobs.index_status(ctx, project_id)
+        # index_status now makes a synchronous Qdrant count round-trip; keep
+        # it off the event loop (same reason as get_chunk below).
+        return await asyncio.to_thread(jobs.index_status, ctx, project_id)
 
     @mcp.tool
     async def get_chunk(chunk_id: str) -> dict[str, Any]:
