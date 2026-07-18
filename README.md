@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="assets/noesis-banner.png" alt="Noesis" width="900">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/noesis-banner-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/noesis-banner-dark.svg">
+    <img src="assets/noesis-banner.png" alt="Noesis" width="900">
+  </picture>
 </p>
 
 ## Beyond search. Toward understanding
@@ -422,6 +426,17 @@ real model and are excluded from the default run.
 **Guardrails enforced in CI:** no `sentence_transformers` import outside the two model
 boundaries; no HTTP client anywhere in `core/`; `127.0.0.1`-only binds; `mcp` pinned
 `<2`. See [`CLAUDE.md`](CLAUDE.md) for the full house rules.
+
+**Brand assets** (icon/logo/banner, dark + light) are code-generated, not hand-drawn:
+
+```bash
+python3 assets/scripts/generate_assets.py   # regenerates assets/noesis-*-{dark,light}.svg
+```
+
+Edit `assets/scripts/generate_assets.py` and rerun to change the mark; then re-rasterize
+the PNGs used by the dashboard (`src/noesis/api/static/favicon.png`,
+`src/noesis/api/static/noesis-logo.png`) and the top-level `assets/noesis*.png` via
+`cairosvg` (or any SVG rasterizer) from the `-dark` SVG variants.
 
 ---
 
