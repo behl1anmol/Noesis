@@ -485,17 +485,27 @@ def try_start_run(
             " AND status = 'running' ORDER BY started_at DESC, rowid DESC",
             (project_id,),
         ).fetchall()
-        alive = [r for r in rows if r["owner"] and _owner_alive(r["owner"])]
-        if alive:
-            conn.rollback()  # nothing written; release the lock
-            return alive[0]["id"], False
-        if rows:  # dead owners: fail them now, exactly like fail_orphaned_runs
+        alive: list[sqlite3.Row] = []
+        dead: list[sqlite3.Row] = []
+        for row in rows:
+            (alive if (row["owner"] and _owner_alive(row["owner"])) else dead).append(
+                row
+            )
+        if dead:  # dead owners: fail them now, exactly like fail_orphaned_runs —
+            # even when an alive run also exists, or a crashed co-process's row
+            # would sit "running" until the next restart's fail_orphaned_runs
             now = _now()
             conn.executemany(
                 "UPDATE index_runs SET status = 'failed', error = 'interrupted',"
                 " finished_at = ? WHERE id = ?",
-                [(now, r["id"]) for r in rows],
+                [(now, r["id"]) for r in dead],
             )
+        if alive:
+            if dead:
+                conn.commit()  # persist the dead-row cleanup; releases the lock
+            else:
+                conn.rollback()  # nothing written; release the lock
+            return alive[0]["id"], False
         run_id = uuid.uuid4().hex
         conn.execute(
             "INSERT INTO index_runs (id, project_id, status, started_at,"
