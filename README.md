@@ -6,6 +6,11 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://behl1anmol.github.io/Noesis/"><strong>📚 Full documentation</strong></a>
+  — every detail of the models, indexing, MCP tools, dashboard, and design decisions.
+</p>
+
 ## Beyond search. Toward understanding
 
 Noesis is an AI-native code-understanding engine. It gives AI agents deep, current

@@ -1,0 +1,23 @@
+# Lessons
+
+Noesis was built largely by an AI agent, and the project treats the agent's mistakes as first-class engineering artifacts. When a mistake is caught — a wrong approach, a broken invariant, reverted work — it is recorded as a **lesson**: the concrete mistake, the corrective rule in imperative voice, and the rationale (the same "no rationale, no merge" rule as [decisions](decisions.md)).
+
+Lessons live in a SQLite devlog as the system of record and are rendered to the committed `dev/LESSONS.md`, which is injected into the agent's context at the start of every session ([ADR-27](decisions.md)). Active lessons are **binding guidance**, second only to the project's hard rules — and a lesson may never weaken those rules. The set is capped at 15: recurring mistakes reinforce an existing lesson instead of duplicating it, reinforced lessons get promoted into permanent hard rules (human-approved), and obsolete ones are retired.
+
+## Active lessons
+
+| # | Category | Lesson |
+|---|---|---|
+| 1 | correctness | Before implementing a fix whose correctness rests on framework or runtime semantics (asyncio cancellation, serializer behavior), reproduce both the failure and the fix's effect with a throwaway probe against the installed libraries. Citing library source proves the behavior exists — never that your code reaches that path. Probe the path, not the docs. |
+| 2 | testing | Run every regression test against the unfixed code and confirm it fails for the stated reason. For a race, never assert at a time that merely precedes the losing outcome — have the racing work signal its own completion and assert after that signal. |
+| 3 | testing | Verify UI behavior at the layer the user perceives: assert computed style / visibility / pixels, not the DOM attribute that is supposed to produce them; keep a global `[hidden]{display:none !important}` guard so author display rules can never resurrect a hidden element. |
+| 4 | design | On a server-rendered page, render static or request-time-known data into the HTML; introduce a client-side fetch only for data that changes while the page is open. When a UI bug reproduces on the user's machine but not in a clean browser, suspect the delivery chain before adding client-side code. |
+| 5 | process | Before running any dependency-adding command, record the decision row first — the ADR write is the gate that unlocks the install, not paperwork to backfill, even when the dependency is pre-decided in the architecture doc. |
+| 6 | correctness | Before building logic on the output shape of an external tool (git plumbing, CLI parsers), run the exact command against a real, messy instance of the data — not just fixtures or documentation — and design the consumer to fail safe (ambiguity resolves toward more hashing, never less). |
+| 7 | testing | Before attributing an anomalous latency to a bug or misconfig, verify by measurement: log the actual device, micro-benchmark the suspected hot path, and sanity-check against a first-principles FLOP estimate. A large number is often the honest cost of a large model, not a defect. |
+| 8 | process | Before trusting any auto-written-on-absence artifact (baselines, caches, snapshots), verify its provenance matches the current methodology — after changing corpus, labels, or scoring, delete and regenerate rather than letting a stale artifact be silently consumed. |
+| 9 | process | When a resolved dependency version diverges from the doc-pinned snapshot, read its changelog for behavior changes — especially network activity, API rewrites, and thread-safety — before building on it. A version-number diff alone is not verification. |
+| 10 | process | After any scaffolding-tool run (`uv init`/`add`), diff the generated config against doc-pinned constraints before building on it — generator defaults silently override documented pins. |
+| 11 | process | Before running any command that regenerates a tracked file from a local, gitignored database, confirm the DB is hydrated — the committed file is the durable source of truth on a fresh clone; the DB is a cache that can silently be empty. Import first, render second. |
+
+Concrete war stories behind several of these — the 12-second reranker latency that was real model cost, not a bug (lesson 7, [ADR-35](decisions.md)); the git status output that collapsed nested repos into one directory entry (lesson 6, [ADR-37](decisions.md)); the cancelled task whose worker thread kept writing (lesson 1, [ADR-47](decisions.md)) — are told in full in the committed [`dev/LESSONS.md`](https://github.com/behl1anmol/Noesis/blob/main/dev/LESSONS.md).

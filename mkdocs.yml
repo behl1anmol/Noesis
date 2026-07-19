@@ -1,0 +1,129 @@
+# Noesis documentation site — built by mkdocs-material, deployed to GitHub Pages
+# via .github/workflows/docs.yml. Docs deps live in the `docs` dependency group
+# (pyproject.toml); build with: uv run --no-sync mkdocs build --strict  (ADR-50)
+site_name: Noesis
+site_description: Beyond search. Toward understanding — a local, hybrid code-retrieval service for AI agents.
+site_url: https://behl1anmol.github.io/Noesis/
+repo_url: https://github.com/behl1anmol/Noesis
+repo_name: behl1anmol/Noesis
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/brand/noesis-icon-dark.svg
+  favicon: assets/brand/favicon.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+
+extra_css:
+  - assets/extra.css
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          # griffe static analysis over src/ — the package is never imported,
+          # so the docs build needs no runtime deps (no torch, no qdrant).
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            members_order: source
+            show_root_heading: true
+            merge_init_into_class: true
+            show_if_no_docstring: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+validation:
+  links:
+    absolute_links: warn
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Connecting agents (MCP): getting-started/connecting-agents.md
+      - GPU & devices: getting-started/gpu.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Indexing pipeline: concepts/indexing-pipeline.md
+      - Hybrid retrieval: concepts/retrieval.md
+      - cAST chunking: concepts/chunking.md
+      - Index freshness: concepts/freshness.md
+      - Security model: concepts/security.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - MCP tools: reference/mcp-tools.md
+      - REST API: reference/rest-api.md
+      - Dashboard: reference/dashboard.md
+  - Internals:
+      - Embedder: internals/embedder.md
+      - Reranker: internals/reranker.md
+      - Vector store: internals/vector-store.md
+      - SQLite schema: internals/sqlite-schema.md
+      - Discovery: internals/discovery.md
+      - Git fast-path: internals/git-fast-path.md
+      - Structural search: internals/structural-search.md
+      - Runtime & lifecycles: internals/runtime.md
+      - Evaluation harness: internals/evaluation.md
+  - API reference:
+      - api/index.md
+      - Indexing: api/core-indexing.md
+      - Retrieval: api/core-retrieval.md
+      - Models: api/core-models.md
+      - Service & state: api/core-service.md
+      - REST layer: api/api.md
+      - MCP layer: api/mcp.md
+      - App & runtime: api/app.md
+  - Project:
+      - Decision log (ADRs): project/decisions.md
+      - Risk register: project/risks.md
+      - Milestones: project/milestones.md
+      - Lessons: project/lessons.md
+  - Releases: releases.md
+  - Contributing: contributing.md
