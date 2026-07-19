@@ -37,6 +37,11 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pyyaml>=6.0",
 ]
+# Docs build only (GitHub Pages). Never a runtime dep — ADR-50.
+docs = [
+    "mkdocs-material>=9.6",
+    "mkdocstrings[python]>=0.30",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,36 @@
+/* Noesis brand palette for mkdocs-material.
+ * Source of truth for the mark: /assets + assets/scripts/generate_assets.py —
+ * the SVGs in docs/assets/brand/ are committed copies for the docs build.
+ * Hex values extracted from the generated logo SVGs:
+ *   dark variant:  ground #0a0c10, gold #f6cd82 / #e3a94f, ink #f2ede2
+ *   light variant: ground #faf8f3, gold #8f5c12 / #b9791f, ink #1c1a16
+ */
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #1c1a16;
+  --md-primary-fg-color--dark: #0a0c10;
+  --md-accent-fg-color: #8f5c12;
+  --md-typeset-a-color: #8f5c12;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #0a0c10;
+  --md-accent-fg-color: #e3a94f;
+  --md-typeset-a-color: #e3a94f;
+  --md-default-bg-color: #0e1117;
+}
+
+/* The header bar is dark in both schemes (primary is near-black), so the
+ * dark-scheme icon variant stays readable everywhere. */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.6rem;
+}
+
+/* Landing banner spacing */
+.noesis-banner {
+  display: block;
+  margin: 0 auto 1.5rem;
+  max-width: 900px;
+  width: 100%;
+}

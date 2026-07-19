@@ -1,0 +1,59 @@
+# Builds and deploys the documentation site to GitHub Pages (ADR-50).
+# Rebuilds on docs/source changes (mkdocstrings reads src/) and on every
+# published release (regenerates the Releases page). ci.yml is untouched.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/noesis/**"
+      - "scripts/docs/**"
+      - ".github/workflows/docs.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false # never cancel an in-flight Pages deploy
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Docs group only: mkdocstrings uses static analysis over src/, so the
+      # build needs no runtime deps (no torch, no qdrant) and stays fast.
+      - name: Install docs dependencies
+        run: uv sync --only-group docs
+      - name: Render releases page
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run --no-sync python scripts/docs/gen_releases.py --repo ${{ github.repository }} --strict-fetch
+      - name: Build site (strict)
+        run: uv run --no-sync mkdocs build --strict
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true # first run enables Pages (source: GitHub Actions)
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
