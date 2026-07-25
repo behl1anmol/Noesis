@@ -19,7 +19,7 @@ from typing import Callable, Sequence
 
 from . import gitfast, hashdiff, state
 from .chunker import chunk_file
-from .discovery import DiscoveryConfig, discover_files
+from .discovery import DiscoveryConfig, DiscoveryErrors, discover_files
 from .embedder import Embedder
 from .languages import detect_language
 from .vectorstore import VectorStore
@@ -203,8 +203,13 @@ async def execute_run(
         # Discovery walks the whole tree and binary-sniffs each file; on large
         # or network-mounted trees this alone is slow and, until now, silent.
         disc_started = time.perf_counter()
+        # Collect discovery failures instead of letting them vanish: a file
+        # (or whole subtree) that errored transiently is absent from
+        # `discovered`, and without the collector hashdiff would read that
+        # absence as deletion and purge live chunks.
+        disc_errors = DiscoveryErrors()
         discovered = await asyncio.to_thread(
-            discover_files, root_path, discovery_config
+            discover_files, root_path, discovery_config, errors=disc_errors
         )
         logger.info(
             "index run %s: discovery took=%.1fs discovered=%d",
@@ -284,7 +289,12 @@ async def execute_run(
                     )
 
         diff = await asyncio.to_thread(
-            hashdiff.partition, root_path, discovered, stored, candidates=candidates
+            hashdiff.partition,
+            root_path,
+            discovered,
+            stored,
+            candidates=candidates,
+            discovery_errored=disc_errors.files,
         )
 
         chunks_written = 0
@@ -401,9 +411,15 @@ async def execute_run(
                     chunks_written,
                 )
 
-        if diff.deleted:
+        # A directory-level discovery error means part of the tree was never
+        # walked, so "absent from discovery" is not deletion evidence this
+        # run. Skip deletions entirely — stale chunks beat purged live files;
+        # a clean next run detects real deletions again.
+        files_deleted = 0
+        if diff.deleted and not disc_errors.dirs:
             await asyncio.to_thread(store.delete_file_chunks, project_id, diff.deleted)
             state.delete_files(conn, project_id, diff.deleted)
+            files_deleted = len(diff.deleted)
 
         if orphan_paths:
             # Drift cleanup: points whose file_path is neither tracked in
@@ -419,6 +435,13 @@ async def execute_run(
         # to_index, so without this it would be invisible to every guard
         # below and silently stranded by the next fast path.
         hash_errors = [(path, f"hash failed: {msg}") for path, msg in diff.errored]
+        # Dir-level discovery errors are run failures too: an unseen subtree
+        # leaves its files' true state unknown, so they must block anchor
+        # advance exactly like hash failures. (File-level discovery errors
+        # already arrive here via diff.errored / discovery_errored.)
+        hash_errors.extend(
+            (dir_rel, f"discovery failed: {msg}") for dir_rel, msg in disc_errors.dirs
+        )
         if file_errors or hash_errors:
             state.record_file_errors(conn, run_id, [*file_errors, *hash_errors])
         # Partial failure is still a completed run (ADR-41); a run where
@@ -468,6 +491,17 @@ async def execute_run(
             files_failed=total_failed,
             error=f"all {total_failed} files failed" if all_failed else None,
         )
+        if paths is not None:
+            # Scoped runs never advance the anchor, so the H1 dirty-set write
+            # below never fires for them — persist what they DID index here,
+            # or content indexed only by scoped runs is invisible to the H1
+            # re-admission and a revert-while-unwatched stays stale forever.
+            # Union-only: can only widen the next fast path's candidate set
+            # (§3.2 rule-1 safe).
+            failed = {path for path, _ in file_errors}
+            indexed_ok = [rel for rel in to_index if rel not in failed]
+            if indexed_ok:
+                state.add_dirty_paths(conn, project_id, indexed_ok)
         # A run with failed files must not advance the git anchor either:
         # the failed files' state rows are stale, and anchoring past them
         # would let the next fast path carry them forward as unchanged.
@@ -507,7 +541,7 @@ async def execute_run(
             run_id=run_id,
             files_total=len(discovered),
             files_indexed=len(to_index) - len(file_errors),
-            files_deleted=len(diff.deleted),
+            files_deleted=files_deleted,
             chunks_written=chunks_written,
             fast_path_used=fast_path_active,
             candidate_count=len(candidates)

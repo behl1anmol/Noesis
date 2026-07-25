@@ -171,18 +171,23 @@ def run_progress(ctx: _ContextLike, run_id: str) -> dict[str, Any] | None:
     }
 
 
-def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
+async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     """Latest run for a project, shaped identically for REST and MCP.
 
     A registered project with no runs yet reports ``never_indexed`` with
     the run fields nulled — a stable shape beats a shape-shifting one for
-    agent consumers."""
+    agent consumers.
+
+    Async so the quick ``state.*`` reads stay on the event loop (the shared
+    sqlite conn is loop-owned; a worker-thread read can interleave inside
+    another op's open BEGIN IMMEDIATE transaction) while only the
+    synchronous Qdrant count round-trip is pushed to a worker thread."""
     # Index health: what the state DB expects vs what Qdrant actually holds.
     # A mismatch is drift — a vector store that lost data (external collection
     # wipe) while state still reports the files indexed. Surfaced so agents
     # and the dashboard can see it without a reindex; a full reindex heals it.
     expected_chunks = state.expected_chunk_total(ctx.conn, project_id)
-    vector_count = ctx.store.count_project_points(project_id)
+    vector_count = await asyncio.to_thread(ctx.store.count_project_points, project_id)
     drift = expected_chunks != vector_count
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:

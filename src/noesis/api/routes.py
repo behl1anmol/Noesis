@@ -11,7 +11,6 @@ tests assert the two surfaces return identical bodies.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -94,9 +93,9 @@ async def project_status(project_id: str, request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
     if state.get_project(ctx.conn, project_id) is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
-    # index_status now makes a synchronous Qdrant count round-trip; keep it
-    # off the event loop so a slow store can't stall other requests.
-    return await asyncio.to_thread(jobs.index_status, ctx, project_id)
+    # index_status keeps its quick state reads on the loop (shared conn is
+    # loop-owned) and internally offloads only the Qdrant count round-trip.
+    return await jobs.index_status(ctx, project_id)
 
 
 @router.post(
@@ -151,7 +150,7 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
         rerank=req.rerank,
         candidates=ctx.rerank_candidates,
     )
-    telemetry.record_query(
+    await telemetry.record_query(
         ctx.conn,
         interface="rest",
         kind="search",
@@ -191,7 +190,7 @@ async def structural_search_route(
             status_code=status,
             detail={"type": exc.error_type, "message": exc.message},
         ) from exc
-    telemetry.record_query(
+    await telemetry.record_query(
         ctx.conn,
         interface="rest",
         kind="structural",

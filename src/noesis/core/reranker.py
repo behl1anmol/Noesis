@@ -268,4 +268,8 @@ class LocalCrossEncoderReranker:
             if worker is None:
                 return
             self._queue.put((_SHUTDOWN, None))
-        worker.join()
+        worker.join(timeout=5.0)
+        if worker.is_alive():
+            logger.warning(
+                "reranker worker did not stop within 5s; abandoning (daemon thread)"
+            )

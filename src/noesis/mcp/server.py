@@ -74,7 +74,7 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             rerank=rerank,
             candidates=ctx.rerank_candidates,
         )
-        telemetry.record_query(
+        await telemetry.record_query(
             ctx.conn,
             interface="mcp",
             kind="search",
@@ -121,7 +121,7 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             )
         except structural_mod.StructuralSearchError as exc:
             raise ToolError(f"{exc.error_type}: {exc.message}") from exc
-        telemetry.record_query(
+        await telemetry.record_query(
             ctx.conn,
             interface="mcp",
             kind="structural",
@@ -146,9 +146,10 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
         ctx = get_ctx()
         if state.get_project(ctx.conn, project_id) is None:
             raise ToolError("unknown project_id")
-        # index_status now makes a synchronous Qdrant count round-trip; keep
-        # it off the event loop (same reason as get_chunk below).
-        return await asyncio.to_thread(jobs.index_status, ctx, project_id)
+        # index_status keeps its quick state reads on the loop (shared conn
+        # is loop-owned) and internally offloads only the Qdrant count
+        # round-trip (same reason as get_chunk below).
+        return await jobs.index_status(ctx, project_id)
 
     @mcp.tool
     async def get_chunk(chunk_id: str) -> dict[str, Any]:

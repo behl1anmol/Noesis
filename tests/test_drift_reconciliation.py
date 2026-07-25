@@ -246,12 +246,12 @@ async def test_orphan_points_pruned(ctx, repo):
 
 async def test_index_status_exposes_drift(ctx, repo):
     project_id, _ = await _index(ctx, repo)
-    status = jobs.index_status(ctx, project_id)
+    status = await jobs.index_status(ctx, project_id)
     assert status["drift"] is False
     assert status["vector_count"] == status["expected_chunks"]
 
     ctx.store.delete_project_points(project_id)
-    status = jobs.index_status(ctx, project_id)
+    status = await jobs.index_status(ctx, project_id)
     assert status["drift"] is True
     assert status["vector_count"] == 0
     assert status["expected_chunks"] > 0

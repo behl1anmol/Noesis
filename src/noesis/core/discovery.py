@@ -11,7 +11,7 @@ the index (a retrievable surface) or M5 structural-search results.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from pathspec import GitIgnoreSpec
@@ -106,6 +106,21 @@ class DiscoveryConfig:
     extra_ignore_patterns: tuple[str, ...] = ()
 
 
+@dataclass
+class DiscoveryErrors:
+    """Non-fatal discovery failures, (root-relative path, message) pairs.
+
+    ``files``: a file that exists but could not be screened (stat/read
+    error) — it is excluded from the results, but "absent from discovery"
+    must not be read as "deleted from disk" (same discrimination as H7).
+    ``dirs``: a directory whose scandir failed mid-walk — its whole subtree
+    went unseen, so deletion evidence from this walk is untrustworthy.
+    """
+
+    files: list[tuple[str, str]] = field(default_factory=list)
+    dirs: list[tuple[str, str]] = field(default_factory=list)
+
+
 def is_secret_path(rel_posix: str) -> bool:
     """True if a project-relative POSIX path matches the secret skip-list."""
     return bool(_SECRET_SPEC.match_file(rel_posix))
@@ -151,11 +166,40 @@ class _IgnoreStack:
 
 
 def discover_files(
-    root: str | Path, config: DiscoveryConfig | None = None
+    root: str | Path,
+    config: DiscoveryConfig | None = None,
+    *,
+    errors: DiscoveryErrors | None = None,
 ) -> list[str]:
-    """Return sorted, POSIX-style relative paths of indexable files under *root*."""
+    """Return sorted, POSIX-style relative paths of indexable files under *root*.
+
+    When *errors* is given, transient stat/read/scandir failures are recorded
+    there instead of vanishing silently — callers doing change detection need
+    them to tell "file errored" from "file deleted". ``errors=None`` keeps the
+    historical silent-skip behavior."""
     cfg = config or DiscoveryConfig()
     root_path = Path(root).resolve()
+
+    def _walk_error(exc: OSError) -> None:
+        # A directory deleted mid-walk is a genuine deletion (same
+        # discrimination as H7's file case); any other scandir failure means
+        # part of the tree went unseen and must be surfaced when asked.
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            return
+        if errors is None:
+            return
+        rel = "<root>"
+        if exc.filename:
+            try:
+                rel = PurePosixPath(
+                    Path(exc.filename).relative_to(root_path)
+                ).as_posix()
+            except ValueError:
+                rel = str(exc.filename)
+            if rel == ".":
+                rel = "<root>"
+        errors.dirs.append((rel, str(exc) or type(exc).__name__))
+
     ignores = _IgnoreStack()
     extra_spec = (
         GitIgnoreSpec.from_lines(cfg.extra_ignore_patterns)
@@ -170,7 +214,7 @@ def discover_files(
     visited: set[tuple[int, int]] = set()
 
     for dirpath, dirnames, filenames in os.walk(
-        root_path, topdown=True, followlinks=cfg.follow_symlinks
+        root_path, topdown=True, followlinks=cfg.follow_symlinks, onerror=_walk_error
     ):
         if cfg.follow_symlinks:
             try:
@@ -230,7 +274,14 @@ def discover_files(
                     continue
                 if _is_binary(full):
                     continue
-            except OSError:
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # genuinely vanished mid-walk — a real deletion (H7)
+            except OSError as exc:
+                # Still present but unscreened (EACCES, EIO, ESTALE): never
+                # index it on unverified data, but record the failure so
+                # callers don't mistake its absence for a deletion.
+                if errors is not None:
+                    errors.files.append((rel, str(exc) or type(exc).__name__))
                 continue
             results.append(rel)
 

@@ -330,6 +330,32 @@ def set_last_indexed_commit(
     conn.commit()
 
 
+def add_dirty_paths(
+    conn: sqlite3.Connection, project_id: str, paths: Iterable[str]
+) -> None:
+    """Union *paths* into the persisted dirty set (H1) WITHOUT touching
+    ``last_indexed_commit``. Scoped (watcher) runs never advance the anchor,
+    so :func:`set_last_indexed_commit` never fires for them — yet the dirty
+    content they indexed must still be re-admitted by the next fast path.
+    Union-only: it can only widen the candidate set (§3.2 rule-1 safe)."""
+    new = set(paths)
+    if not new:
+        return
+    row = conn.execute(
+        "SELECT dirty_paths FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        return
+    current: set[str] = (
+        set(json.loads(row["dirty_paths"])) if row["dirty_paths"] else set()
+    )
+    conn.execute(
+        "UPDATE projects SET dirty_paths = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(sorted(current | new)), _now(), project_id),
+    )
+    conn.commit()
+
+
 def get_dirty_paths(conn: sqlite3.Connection, project_id: str) -> frozenset[str]:
     """The dirty-path set persisted at the last anchor advance (H1). Empty
     when unset or the project is unknown."""

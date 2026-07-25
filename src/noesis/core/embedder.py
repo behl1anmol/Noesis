@@ -273,4 +273,8 @@ class LocalSTEmbedder:
             if worker is None:
                 return
             self._queue.put((_SHUTDOWN, next(self._seq), None))
-        worker.join()
+        worker.join(timeout=5.0)
+        if worker.is_alive():
+            logger.warning(
+                "embedder worker did not stop within 5s; abandoning (daemon thread)"
+            )
