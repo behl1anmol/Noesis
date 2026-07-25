@@ -14,7 +14,7 @@ from qdrant_client import QdrantClient
 
 from noesis.app import AppContext, create_app
 from noesis.core import dashboard as core_dashboard
-from noesis.core import indexer, jobs, state
+from noesis.core import indexer, jobs, state, telemetry
 from noesis.core.embedder import FakeEmbedder
 from noesis.core.vectorstore import VectorStore
 
@@ -347,6 +347,10 @@ def test_search_logs_metadata_only(client, project_dir):
         "/search",
         json={"query": "SECRET_QUERY_TEXT", "project_id": body["project_id"]},
     )
+    # Telemetry writes are queued to a dedicated writer thread (PR #24
+    # review), so a query is not guaranteed readable the instant the
+    # response returns. Barrier before asserting on the row.
+    asyncio.run(telemetry.flush())
     ctx = client.app.state.ctx
     rows = ctx.conn.execute("SELECT * FROM query_log").fetchall()
     assert len(rows) == 1
@@ -363,6 +367,7 @@ def test_usage_aggregation(client, project_dir):
     body = client.post("/projects", json={"root_path": str(project_dir)}).json()
     asyncio.run(_wait_done(client, body["run_id"]))
     client.post("/search", json={"query": "q", "project_id": body["project_id"]})
+    asyncio.run(telemetry.flush())  # queued write; see the note above
     usage = client.get("/api/usage").json()
     assert usage["index_activity"]["total_runs"] == 1
     assert usage["search_usage"]["total_queries"] == 1

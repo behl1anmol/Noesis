@@ -337,22 +337,36 @@ def add_dirty_paths(
     ``last_indexed_commit``. Scoped (watcher) runs never advance the anchor,
     so :func:`set_last_indexed_commit` never fires for them — yet the dirty
     content they indexed must still be re-admitted by the next fast path.
-    Union-only: it can only widen the candidate set (§3.2 rule-1 safe)."""
+    Union-only: it can only widen the candidate set (§3.2 rule-1 safe).
+
+    The read and the write run in one ``BEGIN IMMEDIATE`` transaction. In
+    practice ``try_start_run`` already serializes runs per project, even
+    across processes, and this is only called from inside a run — but that
+    invariant lives in another function, and a lost union here silently
+    reopens the H1 gap this exists to close. Self-protecting beats
+    depending on a caller's lock.
+    """
     new = set(paths)
     if not new:
         return
-    row = conn.execute(
-        "SELECT dirty_paths FROM projects WHERE id = ?", (project_id,)
-    ).fetchone()
-    if row is None:
-        return
-    current: set[str] = (
-        set(json.loads(row["dirty_paths"])) if row["dirty_paths"] else set()
-    )
-    conn.execute(
-        "UPDATE projects SET dirty_paths = ?, updated_at = ? WHERE id = ?",
-        (json.dumps(sorted(current | new)), _now(), project_id),
-    )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT dirty_paths FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return
+        current: set[str] = (
+            set(json.loads(row["dirty_paths"])) if row["dirty_paths"] else set()
+        )
+        conn.execute(
+            "UPDATE projects SET dirty_paths = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(sorted(current | new)), _now(), project_id),
+        )
+    except BaseException:
+        conn.rollback()
+        raise
     conn.commit()
 
 

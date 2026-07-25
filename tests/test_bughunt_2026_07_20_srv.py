@@ -12,6 +12,7 @@ untouched — only the wipe call moved off the loop.
 from __future__ import annotations
 
 import threading
+import time
 
 from qdrant_client import QdrantClient
 
@@ -58,3 +59,49 @@ async def test_delete_project_wipes_points_off_the_event_loop(tmp_path):
     )
     # The wipe still actually happened and the project row is gone.
     assert state.get_project(ctx.conn, project_id) is None
+
+
+# --- PR #24 review: bounded is not the same as free ---------------------------
+
+
+async def test_close_runtime_context_does_not_block_the_event_loop() -> None:
+    """MCP-1 bounded the model workers' join at 5s, but `close()` was still
+    called synchronously from an async teardown, so the loop stalled for up
+    to 5s per resource (10s for embedder + reranker) — stalling the MCP
+    session manager's own shutdown in the combined lifespan. The joins now
+    run off the loop."""
+    import asyncio
+
+    from noesis.core import state
+    from noesis.runtime import AppContext, close_runtime_context
+
+    class SlowClosing:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            time.sleep(0.4)  # stands in for a worker join near its bound
+            self.closed = True
+
+    conn = state.connect(":memory:")
+    embedder, reranker = SlowClosing(), SlowClosing()
+    ctx = AppContext(conn=conn, store=None, embedder=embedder, reranker=reranker)
+
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    beat = asyncio.create_task(ticker())
+    try:
+        await close_runtime_context(ctx)
+    finally:
+        beat.cancel()
+
+    assert embedder.closed and reranker.closed
+    # ~0.8s of closing: a loop-blocking teardown lets the ticker run zero
+    # times. Off the loop it keeps ticking throughout.
+    assert ticks > 5, f"event loop advanced only {ticks} times during teardown"

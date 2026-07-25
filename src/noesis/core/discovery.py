@@ -11,6 +11,7 @@ the index (a retrievable surface) or M5 structural-search results.
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -270,7 +271,18 @@ def discover_files(
                     and detect_language(rel) not in cfg.include_languages
                 ):
                     continue
-                if full.stat().st_size > cfg.max_file_bytes:
+                st = full.stat()
+                # Non-regular files are skipped before anything opens them.
+                # A FIFO passes the size gate (st_size is 0) and then
+                # `_is_binary`'s open() blocks until some process opens the
+                # write end — forever, in practice. That hangs discovery
+                # inside its worker thread, so the run never finishes and
+                # nothing raises for the OSError handler below to catch.
+                # Device and socket nodes are skipped here too, explicitly
+                # rather than by accident.
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if st.st_size > cfg.max_file_bytes:
                     continue
                 if _is_binary(full):
                     continue

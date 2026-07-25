@@ -188,7 +188,15 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     # and the dashboard can see it without a reindex; a full reindex heals it.
     expected_chunks = state.expected_chunk_total(ctx.conn, project_id)
     vector_count = await asyncio.to_thread(ctx.store.count_project_points, project_id)
-    drift = expected_chunks != vector_count
+    # Re-read after the count: the Qdrant round-trip is a scheduling point,
+    # so a live index run can commit chunks between the two readings and make
+    # a healthy index look drifted (either direction — whichever side is
+    # stale). Only a total that agrees with itself across the window is
+    # evidence; a total that moved is an in-flight run, not drift. Report the
+    # fresher figure.
+    expected_after = state.expected_chunk_total(ctx.conn, project_id)
+    drift = expected_chunks != vector_count and expected_after != vector_count
+    expected_chunks = expected_after
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {

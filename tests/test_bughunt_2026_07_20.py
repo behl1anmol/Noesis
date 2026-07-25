@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from noesis.core import discovery, state
 from noesis.core.discovery import DiscoveryErrors, discover_files
@@ -519,3 +523,117 @@ async def test_scoped_dir_error_requeues_the_scoped_file_not_just_the_dir(
     # The retry the caller performs from failed_paths picks the edit up.
     await run(paths=list(second.failed_paths))
     assert state.get_file_states(conn, pid)["pkg/mod.py"] != original_hash
+
+
+# --- PR #24 review round 2 ----------------------------------------------------
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_discovery_skips_non_regular_files(tmp_path) -> None:
+    """A FIFO must never be opened by discovery.
+
+    `full.stat()` succeeds on a FIFO and reports st_size 0, so it passed the
+    size gate and `_is_binary` then called open() on it — which blocks until
+    some process opens the write end. Discovery hung inside its worker
+    thread with nothing raising, so neither the OSError handler nor the new
+    errors collector could see it: the run simply never finished.
+    """
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "real.py").write_text("x = 1\n")
+    os.mkfifo(root / "pipe.py")
+
+    result: dict[str, list[str]] = {}
+    worker = threading.Thread(
+        target=lambda: result.update(files=discover_files(root)), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "discovery blocked on the FIFO"
+    assert result["files"] == ["real.py"]
+
+
+def test_add_dirty_paths_rolls_back_on_failure(tmp_path, monkeypatch) -> None:
+    """The union is a read-modify-write, now inside BEGIN IMMEDIATE. A
+    failure between the two halves must leave the stored set untouched and
+    no transaction open — otherwise a lost update silently reopens the H1
+    gap PIPE-2 closes."""
+    conn = state.connect(tmp_path / "s.sqlite")
+    state.init_db(conn)
+    pid = state.register_project(conn, tmp_path, "m")
+    state.set_last_indexed_commit(conn, pid, "c0", dirty_paths=["a.py"])
+
+    def boom(*_a, **_k):
+        raise RuntimeError("serialization failed")
+
+    monkeypatch.setattr(state.json, "dumps", boom)
+    try:
+        state.add_dirty_paths(conn, pid, ["b.py"])
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover — the monkeypatch must fire
+        raise AssertionError("expected the injected failure")
+    monkeypatch.undo()
+
+    assert not conn.in_transaction
+    assert state.get_dirty_paths(conn, pid) == frozenset({"a.py"})
+    # And the function still works afterwards — no wedged connection.
+    state.add_dirty_paths(conn, pid, ["b.py"])
+    assert state.get_dirty_paths(conn, pid) == frozenset({"a.py", "b.py"})
+    conn.close()
+
+
+def test_add_dirty_paths_does_not_lose_a_concurrent_union(tmp_path, monkeypatch):
+    """Two writers unioning into the same project row must both survive.
+
+    The SELECT and the UPDATE used to be separate transactions, so two
+    callers could both read the old set and the second write would drop the
+    first one's paths — silently reopening the H1 gap PIPE-2 closes, since a
+    path missing from the dirty set is never re-admitted by the next fast
+    path. BEGIN IMMEDIATE makes the second caller wait for the first.
+    """
+    db = tmp_path / "s.sqlite"
+    conn = state.connect(db)
+    state.init_db(conn)
+    pid = state.register_project(conn, tmp_path, "m")
+    state.set_last_indexed_commit(conn, pid, "c0", dirty_paths=["a.py"])
+    conn.close()
+
+    real_dumps = state.json.dumps
+
+    def slow_dumps(obj, *a, **k):
+        # Widen the read-modify-write window so the interleaving is
+        # deterministic instead of timing-dependent.
+        time.sleep(0.25)
+        return real_dumps(obj, *a, **k)
+
+    monkeypatch.setattr(state.json, "dumps", slow_dumps)
+    start = threading.Barrier(2)
+
+    def worker(path: str) -> None:
+        c = state.connect(db)
+        try:
+            start.wait(timeout=5)
+            state.add_dirty_paths(c, pid, [path])
+        finally:
+            c.close()
+
+    threads = [
+        threading.Thread(target=worker, args=("b.py",)),
+        threading.Thread(target=worker, args=("c.py",)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    monkeypatch.undo()
+    assert not any(t.is_alive() for t in threads)
+
+    check = state.connect(db)
+    try:
+        assert state.get_dirty_paths(check, pid) == frozenset(
+            {"a.py", "b.py", "c.py"}
+        )
+    finally:
+        check.close()
