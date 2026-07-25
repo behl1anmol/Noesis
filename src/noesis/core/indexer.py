@@ -262,11 +262,40 @@ async def execute_run(
                 # Points for a file_path neither tracked in state nor present
                 # on disk: no other prune path covers them and they keep the
                 # drift gate firing every run.
-                orphan_paths = [
-                    p
-                    for p in per_file
-                    if p not in stored_chunk_counts and p not in discovered_set
-                ]
+                #
+                # Discovery failures make "absent from disk" unprovable, so
+                # they must not feed this either — same purge-on-doubt rule as
+                # the deletion guard below. A path missing from `discovered_set`
+                # because its stat or its parent's scandir failed says nothing
+                # about whether the file exists, and a file live on disk whose
+                # state row is missing (a crash between `upsert_chunks` and
+                # `upsert_file`) is exactly the shape that lands here: pruning
+                # it deletes searchable points for a live file. A dir-level
+                # failure can hide arbitrarily many paths and cannot be
+                # enumerated, so it suppresses pruning for the whole run;
+                # file-level failures name their paths, so only those are
+                # spared. Cost of skipping is one more drift-gate firing next
+                # run; cost of pruning wrongly is content gone from search.
+                errored_files = {p for p, _ in disc_errors.files}
+                orphan_paths = (
+                    []
+                    if disc_errors.dirs
+                    else [
+                        p
+                        for p in per_file
+                        if p not in stored_chunk_counts
+                        and p not in discovered_set
+                        and p not in errored_files
+                    ]
+                )
+                if disc_errors.dirs:
+                    logger.warning(
+                        "index run %s: %d directory discovery error(s) — orphan "
+                        "point pruning skipped this run (absence is not "
+                        "evidence); a clean run prunes them",
+                        run_id,
+                        len(disc_errors.dirs),
+                    )
                 logger.warning(
                     "index run %s: drift detected project=%s expected=%d "
                     "actual=%d — re-embedding %d drifted file(s), pruning %d "
@@ -416,10 +445,22 @@ async def execute_run(
         # run. Skip deletions entirely — stale chunks beat purged live files;
         # a clean next run detects real deletions again.
         files_deleted = 0
+        # Suppressed deletions are unverified files, not deleted ones: their
+        # stored hash may be stale and this run never read them. They must be
+        # re-queued individually (the caller re-pends `failed_paths`) — a
+        # scoped retry matches its candidate set EXACTLY, with no prefix
+        # expansion, so re-pending only the errored directory would make the
+        # retry carry every stored child forward as unchanged and clear the
+        # pending row, stranding the edit until a manual full run. Any path in
+        # here that really was deleted is simply re-detected and deleted by the
+        # next run, which then clears its pending row.
+        unverified: tuple[str, ...] = ()
         if diff.deleted and not disc_errors.dirs:
             await asyncio.to_thread(store.delete_file_chunks, project_id, diff.deleted)
             state.delete_files(conn, project_id, diff.deleted)
             files_deleted = len(diff.deleted)
+        elif diff.deleted:
+            unverified = tuple(diff.deleted)
 
         if orphan_paths:
             # Drift cleanup: points whose file_path is neither tracked in
@@ -548,7 +589,13 @@ async def execute_run(
             if fast_path_active and candidates is not None
             else None,
             files_failed=total_failed,
-            failed_paths=tuple(path for path, _ in (*file_errors, *hash_errors)),
+            # `unverified` is a retry list, not an error list: it carries no
+            # run_file_errors row and is not counted in files_failed (nothing
+            # failed on those paths — the run simply never reached them).
+            failed_paths=(
+                *(path for path, _ in (*file_errors, *hash_errors)),
+                *(p for p in unverified),
+            ),
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

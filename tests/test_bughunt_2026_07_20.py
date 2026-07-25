@@ -375,3 +375,147 @@ def test_add_dirty_paths_unions_without_touching_anchor(tmp_path) -> None:
     state.add_dirty_paths(conn, "no-such-project", ["x.py"])
     assert state.get_dirty_paths(conn, pid) == frozenset({"a.py", "b.py"})
     conn.close()
+
+
+# --- PR #24 review (Codex): discovery errors must not leak into the two
+# other purge paths -----------------------------------------------------------
+
+
+async def test_dir_walk_error_suppresses_orphan_pruning(tmp_path, monkeypatch) -> None:
+    """A failed directory walk must not let drift cleanup prune live points.
+
+    `orphan_paths` is computed from the same incomplete `discovered_set` the
+    deletion guard already distrusts. A file live on disk whose state row is
+    missing (a crash between `upsert_chunks` and `upsert_file`) is exactly the
+    shape that lands there, so an unwalked directory made drift cleanup delete
+    searchable points for a live file — the purge-on-doubt case PIPE-1 exists
+    to close.
+    """
+    root = tmp_path / "proj"
+    (root / "pkg").mkdir(parents=True)
+    (root / "top.py").write_text("x = 1\n")
+    (root / "pkg" / "mod.py").write_text("def mod():\n    return 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = await run()
+    pid = first.project_id
+    assert store.per_file_point_counts(pid).get("pkg/mod.py", 0) > 0
+
+    # Simulate the crash window: points are in Qdrant, the state row is not.
+    # This both makes pkg/mod.py an orphan candidate and trips the drift gate
+    # (expected chunk total now disagrees with the live point count).
+    state.delete_files(conn, pid, ["pkg/mod.py"])
+    assert "pkg/mod.py" not in state.get_file_states(conn, pid)
+
+    real_scandir = os.scandir
+
+    def flaky(path=".", *args, **kwargs):
+        if Path(path).name == "pkg":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", flaky)
+    second = await run()
+    monkeypatch.undo()
+
+    # The file is live on disk; only the walk failed. Its points must survive.
+    assert store.per_file_point_counts(pid).get("pkg/mod.py", 0) > 0
+    assert second.files_deleted == 0
+
+    # And the clean run heals it: rediscovered, unknown to state, re-indexed.
+    third = await run()
+    assert "pkg/mod.py" in state.get_file_states(conn, pid)
+    assert store.per_file_point_counts(pid).get("pkg/mod.py", 0) > 0
+    assert third.files_failed == 0
+
+
+async def test_genuine_orphan_still_pruned_on_a_clean_run(tmp_path) -> None:
+    """The guard above must not disable orphan pruning outright: with no
+    discovery error, points for a path absent from both state and disk are
+    still pruned (ADR-49), or the drift gate fires forever."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    (root / "ghost.py").write_text("y = 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = await run()
+    pid = first.project_id
+    assert store.per_file_point_counts(pid).get("ghost.py", 0) > 0
+
+    # Neither tracked in state nor present on disk — a true orphan.
+    state.delete_files(conn, pid, ["ghost.py"])
+    (root / "ghost.py").unlink()
+
+    await run()
+    assert store.per_file_point_counts(pid).get("ghost.py", 0) == 0
+
+
+async def test_scoped_dir_error_requeues_the_scoped_file_not_just_the_dir(
+    tmp_path, monkeypatch
+) -> None:
+    """A scoped retry matches its candidate set exactly, with no prefix
+    expansion, so re-pending only the errored directory would make the retry
+    carry every stored child forward as unchanged and clear the pending row —
+    stranding the edit until a manual full run. The suppressed deletions are
+    re-queued as the file paths they are.
+    """
+    root = tmp_path / "proj"
+    (root / "pkg").mkdir(parents=True)
+    (root / "top.py").write_text("x = 1\n")
+    (root / "pkg" / "mod.py").write_text("def mod():\n    return 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run(paths=None):
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn,
+            store,
+            embedder,
+            str(root),
+            project_id,
+            run_id,
+            git_fast_path=False,
+            paths=paths,
+        )
+
+    first = await run()
+    pid = first.project_id
+    original_hash = state.get_file_states(conn, pid)["pkg/mod.py"]
+
+    # The watcher saw this edit and scoped a run to it...
+    (root / "pkg" / "mod.py").write_text("def mod():\n    return 999\n")
+
+    real_scandir = os.scandir
+
+    def flaky(path=".", *args, **kwargs):
+        if Path(path).name == "pkg":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_scandir(path, *args, **kwargs)
+
+    # ...but the walk of pkg/ failed, so the run never read the file.
+    monkeypatch.setattr(os, "scandir", flaky)
+    second = await run(paths=["pkg/mod.py"])
+    monkeypatch.undo()
+
+    # Nothing purged, and the file itself is queued for retry — not only the
+    # directory, whose exact-match candidate set would skip its children.
+    assert second.files_deleted == 0
+    assert "pkg/mod.py" in second.failed_paths
+    assert state.get_file_states(conn, pid)["pkg/mod.py"] == original_hash
+
+    # The retry the caller performs from failed_paths picks the edit up.
+    await run(paths=list(second.failed_paths))
+    assert state.get_file_states(conn, pid)["pkg/mod.py"] != original_hash
