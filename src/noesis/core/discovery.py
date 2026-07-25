@@ -182,10 +182,21 @@ def discover_files(
     root_path = Path(root).resolve()
 
     def _walk_error(exc: OSError) -> None:
-        # A directory deleted mid-walk is a genuine deletion (same
+        # A *subdirectory* deleted mid-walk is a genuine deletion (same
         # discrimination as H7's file case); any other scandir failure means
         # part of the tree went unseen and must be surfaced when asked.
-        if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+        #
+        # The root is the exception. os.walk routes the walk root's own
+        # scandir failure through this hook too, and an unmounted or renamed
+        # root arrives as FileNotFoundError — so treating it as "genuine
+        # absence" would report an empty tree with no error recorded, which
+        # every caller reads as "every tracked file was deleted". A missing
+        # root is never evidence that files were deleted; it is evidence the
+        # scan could not run. An unattributable failure (no filename) is
+        # treated the same way, since it cannot be proven to be a subtree.
+        failed = Path(exc.filename) if exc.filename else None
+        at_root = failed is None or failed == root_path
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError)) and not at_root:
             return
         if errors is None:
             return

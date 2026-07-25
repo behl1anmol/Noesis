@@ -345,6 +345,20 @@ def add_dirty_paths(
     invariant lives in another function, and a lost union here silently
     reopens the H1 gap this exists to close. Self-protecting beats
     depending on a caller's lock.
+
+    Runs on the caller's thread — ``execute_run`` calls it directly from the
+    event loop — and ``BEGIN IMMEDIATE`` takes SQLite's write lock at the
+    first statement rather than at commit. Under a foreign writer (the other
+    transport mid-run) it can therefore block the loop for up to the shared
+    connection's ``busy_timeout`` of 5s, once per scoped run. Accepted
+    deliberately: the alternative is a dedicated short-timeout connection
+    like telemetry's, which DROPS its write when the lock is contended — and
+    unlike a telemetry row, a dropped union is a correctness loss that
+    silently reopens the H1 gap. A bounded stall beats silent data loss. It
+    must not be moved to a worker thread either: the shared connection is
+    loop-owned, and a worker-thread write interleaving inside another
+    operation's open transaction is the hazard ``jobs.index_status``
+    documents.
     """
     new = set(paths)
     if not new:

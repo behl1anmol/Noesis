@@ -282,3 +282,109 @@ async def test_index_status_still_reports_genuine_drift(
 
     status = await jobs.index_status(ctx, pid)
     assert status["drift"] is True
+
+
+# --- PR #24 review round 3 ----------------------------------------------------
+
+
+async def test_drift_needs_two_agreeing_reads(ctx, project_dir, monkeypatch):
+    """The in-flight shape the first guard missed.
+
+    `upsert_chunks` lands points before `upsert_file` commits the row, so
+    mid-run the Qdrant count sits ABOVE the expected total and BOTH readings
+    differ from it. Asking only whether either reading equals the count gave
+    that case two chances to coincide and reported drift on a healthy index;
+    the readings have to agree with each other first.
+    """
+    pid = state.register_project(ctx.conn, project_dir, "fake")
+    totals = iter([400, 450])
+    monkeypatch.setattr(state, "expected_chunk_total", lambda *_a, **_k: next(totals))
+    monkeypatch.setattr(ctx.store, "count_project_points", lambda *_a, **_k: 470)
+
+    status = await jobs.index_status(ctx, pid)
+
+    assert status["drift"] is False
+    assert status["expected_chunks"] == 450
+    assert status["vector_count"] == 470
+
+
+async def test_drift_still_reported_when_the_total_holds_still(
+    ctx, project_dir, monkeypatch
+):
+    """Over-correction guard: a stable expectation that disagrees with the
+    store is exactly the ADR-49 signal and must survive."""
+    pid = state.register_project(ctx.conn, project_dir, "fake")
+    monkeypatch.setattr(state, "expected_chunk_total", lambda *_a, **_k: 400)
+    monkeypatch.setattr(ctx.store, "count_project_points", lambda *_a, **_k: 0)
+
+    status = await jobs.index_status(ctx, pid)
+    assert status["drift"] is True
+
+
+async def test_telemetry_close_drains_rows_queued_behind_the_sentinel(
+    ctx, db_path, tmp_path
+):
+    """`_queue` is module-global and outlives close().
+
+    A record_query racing the sentinel enqueues behind it, so the worker
+    returns on the sentinel and leaves the row queued. The next context's
+    writer would pick it up as its first item — carrying a db_path from the
+    torn-down runtime, which `state.connect` would then mkdir -p back into
+    existence as an empty, schema-less DB. close() must leave the queue
+    empty, or flush()'s no-worker early return is a lie.
+    """
+    gone = tmp_path / "torn-down" / "state.sqlite"
+    await telemetry.record_query(
+        ctx.conn, interface="rest", kind="search", project_id=None
+    )
+    work = telemetry._queue  # this generation's queue
+    await asyncio.to_thread(telemetry.close)
+    # Model the racing row: enqueued onto the retired generation's queue
+    # after its sentinel was consumed.
+    work.put_nowait((str(gone), {"interface": "rest", "kind": "search"}))
+    telemetry._queue = work  # close() retires it again
+    await asyncio.to_thread(telemetry.close)
+
+    assert work.qsize() == 0
+    assert not gone.parent.exists(), "a torn-down DB directory was recreated"
+
+    # A waiter blocked on a barrier must not be stranded by the drain.
+    barrier = telemetry._Barrier()
+    work.put_nowait(barrier)
+    telemetry._queue = work
+    await asyncio.to_thread(telemetry.close)
+    assert barrier.event.is_set()
+    assert work.qsize() == 0
+
+
+async def test_close_only_ever_touches_its_own_generation(ctx):
+    """The queue belongs to the worker generation, not to the module.
+
+    With one shared queue, a record_query racing close() started a fresh
+    worker that blocked on the SAME queue — so the new worker could consume
+    the `_SHUTDOWN` sentinel, leaving the old worker running forever with its
+    connections open (the exact handle leak close() exists to prevent), while
+    close()'s drain threw away rows the new worker was about to write. A
+    per-generation queue makes both unrepresentable.
+    """
+    await telemetry.record_query(
+        ctx.conn, interface="rest", kind="search", project_id=None
+    )
+    gen_a = telemetry._queue
+    assert gen_a is not None
+    await asyncio.to_thread(telemetry.close)
+    # A fully retired generation leaves nothing behind to inherit.
+    assert telemetry._worker is None and telemetry._queue is None
+
+    await telemetry.record_query(
+        ctx.conn, interface="rest", kind="search", project_id=None
+    )
+    gen_b = telemetry._queue
+    assert gen_b is not None and gen_b is not gen_a
+
+    # A row landing on the retired generation can never reach gen B's worker,
+    # and retiring gen B must not touch gen A's queue.
+    gen_a.put_nowait(("/nonexistent/x.sqlite", {"interface": "rest", "kind": "search"}))
+    await telemetry.flush()  # gen B's barrier still works
+    await asyncio.to_thread(telemetry.close)
+    assert gen_a.qsize() == 1, "close() drained a generation it does not own"

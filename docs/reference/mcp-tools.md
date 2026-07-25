@@ -105,7 +105,9 @@ Status of the most recent index run, shaped identically for REST and MCP:
 
 `status` is one of `never_indexed | queued | running | done | failed` (a registered project with no runs reports `never_indexed` with run fields nulled — a stable shape for agent consumers). The drift fields compare what the state DB expects against what Qdrant actually holds; a mismatch (`drift: true`) means the vector store lost data externally, and the next index run self-heals it ([ADR-49](../project/decisions.md)).
 
-`drift` requires evidence that survives an index run committing mid-call: the expected chunk total is read on both sides of the Qdrant count, and drift is reported only when both readings disagree with it. A total that *moved* across that window is an in-flight run, not drift, so calling this during active indexing does not produce spurious warnings. The figure reported is the fresher of the two.
+`drift` requires evidence that survives an index run committing mid-call: the expected chunk total is read on both sides of the Qdrant count, and drift is reported only when those two readings **agree with each other** and still disagree with the count. A total that moved across that window means neither reading is a stable expectation, so there is nothing to compare against — that is an in-flight run, not drift. The figure reported is the fresher of the two.
+
+The cost of that rule is worth knowing: while a run is actively committing, `drift` reads `false` even if the store genuinely lost data. The first call after the run settles reports it. A false negative for a few seconds beats a false positive on every status poll during every index run.
 
 ## `get_chunk`
 

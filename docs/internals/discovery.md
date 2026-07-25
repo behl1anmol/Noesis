@@ -55,7 +55,8 @@ and a path that could not be *read*:
 
 | Failure | Treated as | Why |
 |---|---|---|
-| `FileNotFoundError` / `NotADirectoryError` (file or directory) | genuine deletion — not recorded | the filesystem is ground truth at the moment it is read |
+| `FileNotFoundError` / `NotADirectoryError` on a file or **subdirectory** | genuine deletion — not recorded | the filesystem is ground truth at the moment it is read |
+| the same errors on the **walk root itself** | recorded in `errors.dirs` as `<root>` | `os.walk` routes the root's own scandir failure through the same hook, and an unmounted or renamed root arrives as `FileNotFoundError`. A missing root is never evidence that files were deleted — it is evidence the scan could not run |
 | any other `OSError` on a file (`EACCES`, `EIO`, `ESTALE`, …) | recorded in `errors.files` | the file still exists; it was merely unreadable this run |
 | any other `OSError` from `os.walk` (via its `onerror` hook) | recorded in `errors.dirs` | part of the tree went unwalked; its contents are unknown |
 

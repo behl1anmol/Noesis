@@ -637,3 +637,154 @@ def test_add_dirty_paths_does_not_lose_a_concurrent_union(tmp_path, monkeypatch)
         )
     finally:
         check.close()
+
+
+# --- PR #24 review round 3 ----------------------------------------------------
+
+
+async def test_vanished_root_does_not_purge_the_index(tmp_path) -> None:
+    """PIPE-1's own failure mode, through the branch PIPE-1 excluded.
+
+    `os.walk` routes the walk ROOT's scandir failure through the same
+    `onerror` hook as a subdirectory's, and a missing root arrives as
+    FileNotFoundError — which the H7 discrimination classified as genuine
+    absence. Discovery then returned `[]` with no error recorded anywhere, so
+    the run read it as "every tracked file was deleted", purged state rows
+    and points, and reported `done` — leaving the anchor free to advance.
+    """
+    root = tmp_path / "proj"
+    root.mkdir()
+    for name in ("a.py", "b.py", "c.py"):
+        (root / name).write_text(f"x = '{name}'\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = await run()
+    pid = first.project_id
+    assert set(state.get_file_states(conn, pid)) == {"a.py", "b.py", "c.py"}
+
+    # The root goes away — unmounted, renamed, whatever the cause.
+    root.rename(tmp_path / "gone")
+    second = await run()
+
+    assert set(state.get_file_states(conn, pid)) == {"a.py", "b.py", "c.py"}
+    counts = store.per_file_point_counts(pid)
+    assert all(counts.get(n, 0) > 0 for n in ("a.py", "b.py", "c.py"))
+    assert second.files_deleted == 0
+    assert state.get_latest_run(conn, pid)["status"] == "failed"
+
+    # Restoring the root heals it with no reindex needed.
+    (tmp_path / "gone").rename(root)
+    third = await run()
+    assert third.files_deleted == 0
+    assert third.files_failed == 0
+    assert set(state.get_file_states(conn, pid)) == {"a.py", "b.py", "c.py"}
+
+
+async def test_empty_root_does_not_purge_the_index(tmp_path) -> None:
+    """The errno-independent half of the same guard.
+
+    A root that EXISTS but is empty — a mountpoint not populated yet — walks
+    cleanly: `os.walk` yields nothing and `_walk_error` never fires, so no
+    error-based check can see it. An empty scan against non-empty state is
+    itself the evidence that the scan did not really run.
+    """
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = await run()
+    pid = first.project_id
+    assert set(state.get_file_states(conn, pid)) == {"a.py"}
+
+    (root / "a.py").unlink()  # root still exists, now empty
+    second = await run()
+
+    assert set(state.get_file_states(conn, pid)) == {"a.py"}
+    assert store.per_file_point_counts(pid).get("a.py", 0) > 0
+    assert second.files_deleted == 0
+    assert state.get_latest_run(conn, pid)["status"] == "failed"
+
+
+async def test_genuine_deletion_of_some_files_still_purges(tmp_path) -> None:
+    """Over-correction guard: the emptiness rule must only fire when the scan
+    returned NOTHING. Deleting some files while others remain is ordinary
+    deletion and must still prune."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+    (root / "b.py").write_text("y = 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = await run()
+    pid = first.project_id
+    (root / "b.py").unlink()
+    second = await run()
+
+    assert second.files_deleted == 1
+    assert set(state.get_file_states(conn, pid)) == {"a.py"}
+    assert store.per_file_point_counts(pid).get("b.py", 0) == 0
+    assert state.get_latest_run(conn, pid)["status"] == "done"
+
+
+async def test_dir_errors_stay_out_of_failed_paths(tmp_path, monkeypatch) -> None:
+    """Directory rels and the `<root>` sentinel must never be re-pended.
+
+    The caller turns every `failed_paths` entry into a `pending_changes` file
+    row, and a scoped run matches its candidate set exactly — so a directory
+    candidate matches nothing, indexes nothing, and then clears its own
+    pending row. The stored files under the failed subtree are re-queued the
+    right way, as themselves, via the suppressed-deletion set.
+    """
+    root = tmp_path / "proj"
+    (root / "pkg").mkdir(parents=True)
+    (root / "top.py").write_text("x = 1\n")
+    (root / "pkg" / "mod.py").write_text("y = 2\n")
+    conn, store, embedder = make_env(tmp_path)
+
+    async def run():
+        project_id, run_id = prepare_run(conn, embedder, str(root))
+        return await execute_run(
+            conn, store, embedder, str(root), project_id, run_id, git_fast_path=False
+        )
+
+    first = await run()
+    pid = first.project_id
+
+    real_scandir = os.scandir
+
+    def flaky(path=".", *args, **kwargs):
+        if Path(path).name == "pkg":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", flaky)
+    second = await run()
+    monkeypatch.undo()
+
+    assert "pkg" not in second.failed_paths
+    assert "<root>" not in second.failed_paths
+    # The child is what gets retried, and the directory is still visible to
+    # an operator in run_file_errors.
+    assert "pkg/mod.py" in second.failed_paths
+    assert second.files_failed >= 1
+    errored = {row["path"] for row in state.list_file_errors(conn, second.run_id)}
+    assert "pkg" in errored

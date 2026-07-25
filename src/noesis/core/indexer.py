@@ -218,6 +218,31 @@ async def execute_run(
             len(discovered),
         )
         stored = state.get_file_states(conn, project_id)
+        # A scan that returned NOTHING while state tracks files is not
+        # evidence of mass deletion — it is evidence the scan did not run: an
+        # unmounted or renamed root, or a mountpoint not populated yet. The
+        # walk-root discrimination in discovery catches the errno cases, but a
+        # root that exists and is simply empty raises nothing at all, so this
+        # cannot be expressed as an error check — the emptiness itself is the
+        # signal. Recorded as a directory-level error so it takes the same
+        # path as an unwalked subtree: deletions and orphan pruning are
+        # skipped, the anchor cannot advance, and the run is marked failed.
+        if stored and not discovered:
+            disc_errors.dirs.append(
+                (
+                    "<root>",
+                    f"discovery returned no files while state tracks "
+                    f"{len(stored)} file(s) — treating as an unreadable root, "
+                    f"not as deletion",
+                )
+            )
+            logger.warning(
+                "index run %s: discovery returned 0 files but state tracks %d "
+                "— refusing to treat that as deletion (root unreadable or "
+                "not mounted?)",
+                run_id,
+                len(stored),
+            )
 
         # Drift self-heal (ADR-49): the state DB can claim files are indexed
         # while Qdrant holds none of their points — an externally dropped or
@@ -480,11 +505,23 @@ async def execute_run(
         # leaves its files' true state unknown, so they must block anchor
         # advance exactly like hash failures. (File-level discovery errors
         # already arrive here via diff.errored / discovery_errored.)
-        hash_errors.extend(
+        #
+        # Kept in their OWN list rather than folded into hash_errors, because
+        # they are the only entries here that are not file paths — a directory
+        # rel, or the `<root>` sentinel. They belong in run_file_errors (an
+        # operator needs to see which subtree failed) but must never reach
+        # `failed_paths`, which the caller re-pends as file rows: a scoped
+        # retry matches its candidate set exactly, so a directory candidate
+        # matches nothing, indexes nothing, and then clears its own pending
+        # row. The stored files under that subtree are already re-queued the
+        # right way, as themselves, via `unverified`.
+        dir_errors = [
             (dir_rel, f"discovery failed: {msg}") for dir_rel, msg in disc_errors.dirs
-        )
-        if file_errors or hash_errors:
-            state.record_file_errors(conn, run_id, [*file_errors, *hash_errors])
+        ]
+        if file_errors or hash_errors or dir_errors:
+            state.record_file_errors(
+                conn, run_id, [*file_errors, *hash_errors, *dir_errors]
+            )
         # Partial failure is still a completed run (ADR-41); a run where
         # every file failed is not "done" by any honest reading — likely an
         # infrastructure problem (store/embedder down) wearing per-file dress.
@@ -515,9 +552,14 @@ async def execute_run(
             and len(file_errors) == len(to_index)
             and known_good_remainder == 0
         )
-        hash_all_failed = bool(hash_errors) and diff.verified + diff.skipped == 0
+        # dir_errors counts here as well as hash_errors: a root that could not
+        # be scanned at all produces ONLY a dir error, and that is the exact
+        # whole-tree outage this check exists to catch.
+        hash_all_failed = (
+            bool(hash_errors) or bool(dir_errors)
+        ) and diff.verified + diff.skipped == 0
         all_failed = chunk_embed_all_failed or hash_all_failed
-        total_failed = len(file_errors) + len(hash_errors)
+        total_failed = len(file_errors) + len(hash_errors) + len(dir_errors)
         state.finish_run(
             conn,
             run_id,
@@ -546,7 +588,7 @@ async def execute_run(
         # A run with failed files must not advance the git anchor either:
         # the failed files' state rows are stale, and anchoring past them
         # would let the next fast path carry them forward as unchanged.
-        if head is not None and not file_errors and not hash_errors:
+        if head is not None and not file_errors and not hash_errors and not dir_errors:
             # Persist the working-tree-dirty set with the anchor (H1). The
             # fast path already captured it at run start (git_info); a
             # full-walk run re-queries `git status` here.
@@ -575,7 +617,9 @@ async def execute_run(
             logger.debug(
                 "index run %s failed paths: %s",
                 run_id,
-                ", ".join(path for path, _ in (*file_errors, *hash_errors)),
+                ", ".join(
+                    path for path, _ in (*file_errors, *hash_errors, *dir_errors)
+                ),
             )
         return IndexResult(
             project_id=project_id,
@@ -592,6 +636,9 @@ async def execute_run(
             # `unverified` is a retry list, not an error list: it carries no
             # run_file_errors row and is not counted in files_failed (nothing
             # failed on those paths — the run simply never reached them).
+            # `dir_errors` is deliberately absent: every entry here is re-pended
+            # as a file row by the caller, and a directory or the `<root>`
+            # sentinel can never match a scoped run's exact candidate set.
             failed_paths=(
                 *(path for path, _ in (*file_errors, *hash_errors)),
                 *(p for p in unverified),

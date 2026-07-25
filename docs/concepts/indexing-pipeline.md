@@ -60,7 +60,8 @@ Deletion is inferred from absence: a file tracked in state that discovery did no
 
 - A **file-level** failure (the file exists but could not be read) carries its stored hash forward as unchanged, exactly like a hash-time `OSError`. It can never reach the deleted set.
 - A **directory-level** failure means part of the tree went unwalked, and the paths it hid cannot be enumerated. The run therefore skips deletions *and* orphan pruning entirely, and the error blocks the git anchor from advancing so the next run re-examines everything.
-- The suppressed paths are not lost: they are re-queued as pending changes under their own file paths, so the watcher retries them individually. A path that really was deleted is simply re-detected and pruned by the next clean run.
+- An **empty scan against non-empty state** is refused outright. If discovery returns nothing while the state DB still tracks files, the run treats that as an unreadable root — not as the deletion of every file. This one cannot be expressed as an error check: a root that exists but is empty (a mountpoint not populated yet) walks cleanly and raises nothing at all, so the emptiness itself has to be the signal.
+- The suppressed paths are not lost: they are re-queued as pending changes under their own file paths, so the watcher retries them individually. A path that really was deleted is simply re-detected and pruned by the next clean run. Directory paths and the `<root>` sentinel are deliberately excluded from that re-queue — a scoped run matches its candidates exactly, so a directory would match nothing and then clear its own pending row. They stay visible in `run_file_errors` for the operator.
 
 The asymmetry is deliberate. Skipping a deletion costs stale rows until the next clean run; performing one on bad evidence costs searchable content until a full reindex — and, once the anchor advances, silently.
 

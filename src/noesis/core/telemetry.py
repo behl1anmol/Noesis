@@ -22,6 +22,14 @@ and is the only thread that touches them, so no lock is needed. On a full
 queue or a busy DB the row is dropped: telemetry may lose a row, never slow
 a query. :func:`close` drains and stops the writer at teardown.
 
+The queue belongs to the worker *generation*, not to the module: a
+``record_query`` racing :func:`close` starts a new worker with a new queue
+rather than sharing the one being retired. With a single shared queue the
+new worker could consume the shutdown sentinel — leaving the old worker
+running forever with its connections open, the very leak ``close`` exists to
+prevent — and ``close``'s drain could discard rows the new worker was about
+to write.
+
 Consequence worth knowing: the usage page is eventually consistent. A query
 is normally readable within microseconds, but it is not guaranteed to be
 there the instant the response returns — under the contention above it can
@@ -59,21 +67,28 @@ class _Barrier:
     def __init__(self) -> None:
         self.event = threading.Event()
 
-_queue: queue.Queue[Any] = queue.Queue(maxsize=_QUEUE_MAX)
-# Guards worker startup only — never held across a write, so writes never
-# serialize against each other or against the query path.
+# The queue belongs to the WORKER GENERATION, not to the module. A shared
+# global queue lets a `record_query` that races `close()` start a fresh
+# worker which then blocks on the same queue as the one being shut down —
+# the new worker can consume the `_SHUTDOWN` sentinel, leaving the old
+# worker running forever with its connections open (precisely the handle
+# leak close() exists to prevent), while close() drains rows the new worker
+# was about to write. One queue per generation makes those cases
+# unrepresentable: a new generation gets a new queue, and close() only ever
+# touches its own.
 _worker_lock = threading.Lock()
 _worker: threading.Thread | None = None
+_queue: queue.Queue[Any] | None = None
 
 
-def _writer_loop() -> None:
+def _writer_loop(work: queue.Queue[Any]) -> None:
     """Sole owner of the telemetry connections. One handle per DB path,
     opened lazily; because only this thread touches them, the writes need
     no lock and concurrent queries never queue behind one another."""
     conns: dict[str, sqlite3.Connection] = {}
     try:
         while True:
-            item = _queue.get()
+            item = work.get()
             if item is _SHUTDOWN:
                 return
             if isinstance(item, _Barrier):
@@ -101,16 +116,26 @@ def _writer_loop() -> None:
                 logger.debug("telemetry connection close failed", exc_info=True)
 
 
-def _ensure_worker() -> None:
-    global _worker
+def _ensure_worker() -> queue.Queue[Any]:
+    """Return the live generation's queue, starting a worker if needed.
+
+    The lock is held only long enough to start a thread, never across a
+    write or a join, so this cannot stall the query path.
+    """
+    global _worker, _queue
     with _worker_lock:
-        if _worker is None or not _worker.is_alive():
+        if _worker is None or not _worker.is_alive() or _queue is None:
             # Daemon: a dropped telemetry row must never keep the process
             # alive. close() stops it deterministically at teardown.
+            _queue = queue.Queue(maxsize=_QUEUE_MAX)
             _worker = threading.Thread(
-                target=_writer_loop, name="noesis-telemetry", daemon=True
+                target=_writer_loop,
+                args=(_queue,),
+                name="noesis-telemetry",
+                daemon=True,
             )
             _worker.start()
+        return _queue
 
 
 async def record_query(
@@ -145,9 +170,8 @@ async def record_query(
             # always files).
             state.log_query(conn, **fields)
             return
-        _ensure_worker()
         try:
-            _queue.put_nowait((db_path, fields))
+            _ensure_worker().put_nowait((db_path, fields))
         except queue.Full:
             logger.debug("query telemetry queue full; dropping row")
     except Exception:  # noqa: BLE001 — telemetry must never break the query path
@@ -162,12 +186,15 @@ async def flush(timeout: float = 5.0) -> None:
     ever wants read-your-writes) needs this barrier. Returns when the rows
     land or *timeout* elapses; it never raises."""
     with _worker_lock:
-        alive = _worker is not None and _worker.is_alive()
-    if not alive:
+        work = _queue if (_worker is not None and _worker.is_alive()) else None
+    if work is None:
+        # No live worker means no live generation, and close() leaves the
+        # generation it retired with an empty queue — so there is nothing
+        # pending and nothing to wait for.
         return
     barrier = _Barrier()
     try:
-        _queue.put_nowait(barrier)
+        work.put_nowait(barrier)
     except queue.Full:
         return
     await asyncio.to_thread(barrier.event.wait, timeout)
@@ -182,22 +209,33 @@ def close(timeout: float = 5.0) -> None:
     and WSL, and survives a DB file removal. Bounded like the model workers
     (MCP-1): a stuck writer is abandoned, never waited on forever.
     """
-    global _worker
+    # Retire this generation under the lock. Anything that races us from here
+    # on calls _ensure_worker(), which sees no worker and builds a NEW queue
+    # with a NEW worker — so the queue below is ours alone for the rest of
+    # this function, and nothing we do to it can lose a row the caller
+    # expected written or hand our sentinel to someone else's worker.
+    global _worker, _queue
     with _worker_lock:
-        worker = _worker
-        _worker = None
-    if worker is None or not worker.is_alive():
+        worker, work = _worker, _queue
+        _worker, _queue = None, None
+    if worker is None or work is None or not worker.is_alive():
+        # Still drain: a retired generation must not leave rows sitting in a
+        # queue nobody will ever serve, which is what makes flush()'s
+        # no-worker early return honest.
+        if work is not None:
+            _discard_queued(work)
         return
     try:
-        _queue.put_nowait(_SHUTDOWN)
+        work.put_nowait(_SHUTDOWN)
     except queue.Full:
-        # Full queue means the writer is behind, not gone; block briefly so
-        # the sentinel still lands rather than leaking the thread.
+        # The writer is behind, not gone. Clear the backlog so the sentinel
+        # lands rather than leaking the thread — those rows were already
+        # droppable under the overflow contract.
+        _discard_queued(work)
         try:
-            _queue.put(_SHUTDOWN, timeout=timeout)
-        except queue.Full:
+            work.put_nowait(_SHUTDOWN)
+        except queue.Full:  # pragma: no cover — the queue was just emptied
             logger.warning("telemetry queue full; writer thread abandoned")
-            return
     worker.join(timeout=timeout)
     if worker.is_alive():
         logger.warning(
@@ -205,3 +243,22 @@ def close(timeout: float = 5.0) -> None:
             "(daemon thread)",
             timeout,
         )
+    # After the join, not before it: rows ahead of the sentinel are written by
+    # the exiting worker. Only what landed behind it is discarded.
+    _discard_queued(work)
+
+
+def _discard_queued(work: queue.Queue[Any]) -> None:
+    dropped = 0
+    while True:
+        try:
+            item = work.get_nowait()
+        except queue.Empty:
+            break
+        if isinstance(item, _Barrier):
+            # Never strand a flush() waiter on a barrier no worker will reach.
+            item.event.set()
+        elif item is not _SHUTDOWN:
+            dropped += 1
+    if dropped:
+        logger.debug("telemetry: dropped %d row(s) queued at shutdown", dropped)
