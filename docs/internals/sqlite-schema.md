@@ -104,7 +104,7 @@ erDiagram
 | `max_file_bytes` | INTEGER NULL | NULL = discovery default (1 MiB) |
 | `follow_symlinks` | INTEGER default 0 | discovery option |
 | `extra_ignores` | TEXT NULL | JSON list of extra ignore globs |
-| `dirty_paths` | TEXT NULL | JSON list — working-tree-dirty paths at the last anchor advance, re-admitted as candidates next run |
+| `dirty_paths` | TEXT NULL | JSON list — working-tree-dirty paths at the last anchor advance, re-admitted as candidates next run. Scoped watcher runs union the paths they indexed into it as well (they never advance the anchor, so the write that normally accompanies it never fires for them); the union runs in a `BEGIN IMMEDIATE` transaction so two writers cannot lose each other's paths |
 
 ### `files`
 

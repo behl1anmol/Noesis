@@ -35,6 +35,9 @@ Metadata analytics over the last 30 days (`?days=` clamps 1–365), drawn as inl
 !!! note "Privacy: metadata only"
     Search usage records *that* a query ran and how it performed — interface, channel, latency, result count. The query text is never stored ([ADR-40](../project/decisions.md); `query_log` schema in [SQLite schema](../internals/sqlite-schema.md)).
 
+!!! note "Search usage is eventually consistent"
+    Telemetry rows are handed to a dedicated writer thread and written outside the request, so a query is not guaranteed to appear on this page the instant its response returns — normally microseconds, but under heavy write contention it can lag briefly or be dropped ([ADR-52](../project/decisions.md)). That is the deliberate trade: telemetry may lose a row, but it can never slow a query. Index activity, watcher activity, and index health are read straight from committed state and are not affected.
+
 ## Implementation notes
 
 Pages are thin adapters (`src/noesis/api/dashboard.py`) over `src/noesis/core/dashboard.py`; templates live in `src/noesis/api/templates/`, assets in `src/noesis/api/static/` with an mtime-based cache-busting token, and the HTML itself is served `Cache-Control: no-store`. All mutating endpoints require local origin. Endpoint list: [REST API reference](rest-api.md#dashboard-endpoints).

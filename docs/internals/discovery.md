@@ -20,7 +20,9 @@ flowchart TB
     F -- match --> X5["skip"]
     F -- no --> G{"language filter active\nand language not included?"}
     G -- yes --> X6["skip"]
-    G -- no --> H{"larger than max_file_bytes\n(default 1 MiB)?"}
+    G -- no --> N{"not a regular file?\n(FIFO, socket, device)"}
+    N -- yes --> X9["skip — never opened"]
+    N -- no --> H{"larger than max_file_bytes\n(default 1 MiB)?"}
     H -- yes --> X7["skip"]
     H -- no --> I{"binary?\n(NUL byte in first 8 KiB)"}
     I -- yes --> X8["skip"]
@@ -37,8 +39,36 @@ flowchart TB
 | `GENERATED_SKIP_PATTERNS` | 14 lockfile names (`uv.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`, `Cargo.lock`, `poetry.lock`, `Pipfile.lock`, `go.sum`, `composer.lock`, `Gemfile.lock`, `packages.lock.json`, `flake.lock`) | committed (so not gitignored), text, often huge, pure retrieval noise — indexing one can dominate a small repo's embed cost ([ADR-31](../project/decisions.md)) |
 | Extra ignores | per-project gitignore-style globs, anchored at the project root | registration-time scoping ([ADR-42](../project/decisions.md)) |
 | Language filter | `include_languages` set; `None` = all | when active, files with no detected language are dropped — the user asked for specific languages |
+| File-type gate | `stat.S_ISREG` on the `stat` the size cap already needs | only regular files are ever opened. A FIFO reports `st_size` 0, so it passed the size cap, and the binary sniff's `open()` then blocked until some process opened the write end — hanging discovery inside its worker thread with nothing raising. Device and socket nodes are skipped here too, explicitly rather than by accident |
 | Size cap | `max_file_bytes`, default 1 048 576 | embedding cost guard |
 | Binary sniff | NUL byte in the first 8192 bytes | text-only index |
+
+## Failures are reported, not swallowed
+
+`discover_files(root, config, errors=…)` takes an optional `DiscoveryErrors`
+collector with two lists of `(path, message)` pairs: `files` and `dirs`. When
+it is omitted, failures are skipped silently exactly as before — the
+structural-search and registration-preview callers rely on that.
+
+The distinction the collector exists to make is between a path that is *gone*
+and a path that could not be *read*:
+
+| Failure | Treated as | Why |
+|---|---|---|
+| `FileNotFoundError` / `NotADirectoryError` (file or directory) | genuine deletion — not recorded | the filesystem is ground truth at the moment it is read |
+| any other `OSError` on a file (`EACCES`, `EIO`, `ESTALE`, …) | recorded in `errors.files` | the file still exists; it was merely unreadable this run |
+| any other `OSError` from `os.walk` (via its `onerror` hook) | recorded in `errors.dirs` | part of the tree went unwalked; its contents are unknown |
+
+This matters because everything downstream infers deletion from *absence*. A
+path missing from the walk is indistinguishable from a path deleted on disk,
+so a transient fault on a network mount used to purge every chunk under an
+unreadable subtree — and then advance the git anchor, making the loss
+permanent. The indexer now gives file-level errors the same carry-forward
+treatment as a hash-time failure, and a directory-level error suppresses
+deletion and orphan pruning for the whole run ([ADR-51](../project/decisions.md)).
+
+Directory paths are recorded relative to the root, or as the sentinel
+`<root>` when the walk failed at the root itself.
 
 ## `DiscoveryConfig`
 
@@ -55,5 +85,6 @@ Per-project overrides for all four are stored on the `projects` row at registrat
 
 - **Symlink cycle guard**: traversal tracks `(st_dev, st_ino)` pairs so following symlinks can never loop.
 - **Secrets never leak through any surface**: structural search reuses this exact filter chain, so a file discovery would exclude can never appear in `structural_search` results either.
-- **Filter order is meaningful**: cheap directory prunes run first; the binary sniff (which opens the file) runs last.
+- **Filter order is meaningful**: cheap directory prunes run first; the binary sniff (which opens the file) runs last, and nothing opens a path that is not a regular file.
+- **Absence is never assumed to mean deletion**: a path can only fall out of the walk silently when the filesystem said it was genuinely gone. Every other failure is reported to the caller.
 - The walk yields deterministic, sorted output — stable across runs for identical trees.

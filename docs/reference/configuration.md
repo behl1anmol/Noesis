@@ -40,7 +40,7 @@ If no file is found, all defaults apply.
 | `model` | str | `BAAI/bge-reranker-v2-m3` | Cross-encoder model id. |
 | `enabled` | bool | `false` | Kill switch **and** per-request default: `false` never loads the model and requests cannot opt in; `true` makes `rerank` default on with per-request opt-out ([ADR-34](../project/decisions.md)). Default-off is the measured M4 gate decision ([ADR-35](../project/decisions.md)). |
 | `preload` | bool | `false` | `true` loads the ~568M model at startup instead of on first reranked request. |
-| `candidates` | int ≥ 0 | `50` | Fused candidates passed to the reranker per request. |
+| `candidates` | int > 0 | `50` | Fused candidates passed to the reranker per request. Zero is rejected at load: it produces an empty candidate pool, so a reranked search returns no hits at all with nothing to explain why. |
 | `batch_size` | int > 0 | `16` | Pairs scored per cross-encoder batch. |
 | `device` | str | unset | Same semantics as `embedder.device`. |
 

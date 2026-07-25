@@ -36,5 +36,7 @@ Every design decision in Noesis carries a recorded rationale — the house rule 
 | 48 | Startup orphan-point sweep | Delete points of dead projects at startup; refused when the project table is empty |
 | 49 | SQLite↔Qdrant drift self-heal | Count gate per run → per-file scroll → re-embed drifted files + prune orphans |
 | 50 | Documentation stack | MkDocs Material on GitHub Pages via Actions: static mkdocstrings (griffe — no runtime deps at docs build), official Pages actions (no gh-pages branch), stdlib-urllib releases generator with a committed empty-state placeholder, dev-only `docs` dependency group |
+| 51 | Discovery errors block deletion | A transient walk/stat failure is reported, never silently skipped; file-level errors carry the stored hash forward, a directory-level error suppresses deletion and orphan pruning for the run and blocks the anchor |
+| 52 | Telemetry writer thread | `record_query` enqueues on a bounded queue and returns; one writer thread owns the connections and is closed at teardown — the usage page becomes eventually consistent |
 
 See also the [risk register](risks.md) and [milestones](milestones.md).

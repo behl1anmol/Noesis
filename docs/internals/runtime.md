@@ -43,7 +43,9 @@ flowchart TB
 
 ## Teardown order (H5)
 
-`close_runtime_context`: **cancel jobs → await their unwind → close model workers → close SQLite.** Cancelling a task only schedules `CancelledError`; the cancelled run still has to resume and execute its exception handler, which writes the run row as failed. Closing the connection first would make that final write raise and leave the row stuck `running`.
+`close_runtime_context`: **cancel jobs → await their unwind → close model workers → stop the telemetry writer → close SQLite.** Cancelling a task only schedules `CancelledError`; the cancelled run still has to resume and execute its exception handler, which writes the run row as failed. Closing the connection first would make that final write raise and leave the row stuck `running`.
+
+Every close in that sequence runs under `await asyncio.to_thread(...)`, which preserves the ordering while keeping the joins off the event loop. Each model worker's `close()` joins its thread with a 5 s bound (a stuck load is abandoned, never waited on forever), and the telemetry writer has its own bounded join — invoked synchronously from an async teardown, those would stall the loop for up to 5 s apiece, and in the combined lifespan that stalls the MCP session manager's shutdown along with it. The telemetry writer must be stopped here rather than left to process exit: it holds its own handle to the state DB, which would otherwise outlive `conn`, block temp-directory cleanup on Windows and WSL, and survive a DB-file removal ([ADR-52](../project/decisions.md)).
 
 ## The two transports
 
