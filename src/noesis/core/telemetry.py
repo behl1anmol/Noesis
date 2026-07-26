@@ -30,6 +30,17 @@ running forever with its connections open, the very leak ``close`` exists to
 prevent — and ``close``'s drain could discard rows the new worker was about
 to write.
 
+The writer generation is per *process*, not per ``AppContext``, and
+:func:`close` retires it — so the module assumes one live ``AppContext`` per
+process. That holds by construction: ``app.py`` builds exactly one in its
+lifespan and ``mcp/__main__.py`` builds exactly one in its, and the two are
+separate processes. If a second context were ever built alongside a live one,
+its teardown would discard rows the other had just enqueued (they are dropped,
+and :func:`flush` would then honestly report nothing pending) — losing
+telemetry rows, never corrupting anything. Making that safe would mean handing
+each context its own writer handle rather than sharing one writer across DB
+paths.
+
 Consequence worth knowing: the usage page is eventually consistent. A query
 is normally readable within microseconds, but it is not guaranteed to be
 there the instant the response returns — under the contention above it can

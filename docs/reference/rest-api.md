@@ -12,7 +12,7 @@ Two middleware layers guard every request: `TrustedHostMiddleware` (accepts only
 | `POST` | `/projects` | register a folder and start indexing | 202 |
 | `GET` | `/projects` | list registered projects | 200 |
 | `GET` | `/projects/{id}/status` | latest run status (+ drift fields) | 200 / 404 |
-| `POST` | `/projects/{id}/reindex` | incremental reindex | 202 / 404 / 409 |
+| `POST` | `/projects/{id}/reindex` | incremental reindex (`?force=true` accepts an empty root as deletion, [ADR-55](../project/decisions.md)) | 202 / 404 / 409 |
 | `GET` | `/runs/{run_id}` | run row, + live `progress` while running | 200 / 404 |
 | `POST` | `/search` | hybrid / dense / sparse search | 200 / 404 |
 | `POST` | `/structural-search` | AST-pattern search over live files | 200 / 400 / 404 |

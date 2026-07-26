@@ -39,5 +39,7 @@ Every design decision in Noesis carries a recorded rationale — the house rule 
 | 51 | Discovery errors block deletion | A transient walk/stat failure is reported, never silently skipped; file-level errors carry the stored hash forward, a directory-level error suppresses deletion and orphan pruning and blocks the anchor. Extended: a missing *root* is not genuine absence, and an empty scan against non-empty state is refused outright |
 | 52 | Telemetry writer thread | `record_query` enqueues on a bounded queue and returns; one writer thread owns the connections and is closed at teardown — the usage page becomes eventually consistent |
 | 53 | Drift needs two agreeing reads | The expected total is read on both sides of the Qdrant count; drift is reported only when those readings agree with each other and disagree with the count |
+| 54 | Suppression scoped to the unwalked subtree | A directory discovery error blocks deletion and orphan pruning only under its own prefix — project-wide only when no prefix describes what went unseen |
+| 55 | Empty-scan escapes | Discovery reports what the walk enumerated before filtering, so a fully filtered tree converges; a genuinely empty root needs an explicit `force` |
 
 See also the [risk register](risks.md) and [milestones](milestones.md).

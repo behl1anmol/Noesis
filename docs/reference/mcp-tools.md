@@ -122,8 +122,11 @@ Returns the exact stored span with the full chunk content — the indexed snapsh
 | Param | Type |
 |---|---|
 | `project_id` | str (required) |
+| `force` | bool (default `false`) |
 
 Starts an incremental re-index (only changed files are re-embedded) and returns immediately with a `run_id` — poll `get_index_status` until `done`. If a run is already in flight the existing run's id is returned (`status: "already_running"`). The mixed-model guard (index built with a different embedding model) raises a `ToolError` explaining that a full re-index is required.
+
+`force` confirms that a project whose scan now finds **zero** files really has had all its files deleted. By default that result is refused as deletion evidence and the run is marked `failed`, because an emptied root and an unmounted one are indistinguishable from here ([ADR-55](../project/decisions.md)) — accepting it wrongly drops the whole project from the index. It relaxes nothing else: a directory that failed to scan still suppresses deletions under it.
 
 !!! note "Registration is not an MCP tool"
     Registering a project is an operator step over REST or the dashboard — agents get `reindex`, not register. See [Connecting agents](../getting-started/connecting-agents.md).

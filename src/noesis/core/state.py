@@ -384,6 +384,23 @@ def add_dirty_paths(
     conn.commit()
 
 
+def clear_dirty_paths(conn: sqlite3.Connection, project_id: str) -> None:
+    """Empty the persisted H1 dirty set without touching the anchor.
+
+    :func:`set_last_indexed_commit` is the only other writer that shrinks it,
+    and it requires a commit — so a project with no git anchor (non-git root,
+    or git unavailable) had no way to shrink the set at all and grew it
+    without bound. Callers must have completed a clean FULL walk: that
+    re-hashes every discovered file, so nothing is left needing H1
+    re-admission. A blind write, unlike :func:`add_dirty_paths`'s
+    read-modify-write, so it needs no explicit transaction."""
+    conn.execute(
+        "UPDATE projects SET dirty_paths = ?, updated_at = ? WHERE id = ?",
+        (json.dumps([]), _now(), project_id),
+    )
+    conn.commit()
+
+
 def get_dirty_paths(conn: sqlite3.Connection, project_id: str) -> frozenset[str]:
     """The dirty-path set persisted at the last anchor advance (H1). Empty
     when unset or the project is unknown."""

@@ -66,10 +66,25 @@ so a transient fault on a network mount used to purge every chunk under an
 unreadable subtree — and then advance the git anchor, making the loss
 permanent. The indexer now gives file-level errors the same carry-forward
 treatment as a hash-time failure, and a directory-level error suppresses
-deletion and orphan pruning for the whole run ([ADR-51](../project/decisions.md)).
+deletion and orphan pruning ([ADR-51](../project/decisions.md)) — for the
+paths under that directory, not for the whole project
+([ADR-54](../project/decisions.md)). `os.walk` loses only the failing
+directory's own subtree and carries on elsewhere, so the rest of the tree
+stays provable; without the narrowing, one permanently unreadable directory
+froze deletion for every path in the project forever.
 
 Directory paths are recorded relative to the root, or as the sentinel
-`<root>` when the walk failed at the root itself.
+`<root>` when the walk failed at the root itself. That distinction is what
+the narrowing turns on: `<root>`, a path that could not be made relative to
+the root, and `follow_symlinks=True` (where the same directory is reachable
+under rel paths that are not under its own) all fall back to whole-run
+suppression, because no prefix describes what went unseen.
+
+The collector also reports `entries_seen`: how many file entries the walk
+enumerated **before** any filter ran. It is not an error, but it is the only
+way to tell an empty *result* apart from an empty *tree* — a scope narrowing
+that filtered everything out looks identical to an unmounted root from the
+returned list alone ([ADR-55](../project/decisions.md)).
 
 ## `DiscoveryConfig`
 

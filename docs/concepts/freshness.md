@@ -43,6 +43,8 @@ A watcher-triggered run is scoped to exactly the pending paths — but it still 
 
 Not advancing the anchor has a consequence worth spelling out. The dirty-set write that normally rides along with an anchor advance never fires for a scoped run, so a scoped run records the paths it indexed into `dirty_paths` itself. Without that, a file whose only indexed version came from a scoped run would be missing from the set the next fast path re-admits — and if it were reverted to its committed content in the meantime, neither `git diff` nor `git status` would mention it, leaving the stale content indexed indefinitely. The write is union-only, so it can only ever widen the next candidate set.
 
+Union-only keeps it correct but not bounded, and the set is normally trimmed by the same write that advances the anchor — which needs a resolvable HEAD. On a project with no git anchor at all (a non-git root, or git unavailable) nothing ever removed from it while every scoped run added, so the set crept toward "every file ever indexed" and dragged each scoped run's candidate set with it. A clean **full** walk now clears it even with no commit to record: a full walk re-hashes every discovered file, so nothing is left owing re-admission. A run with any file, hash, or discovery error does not clear it — that run did not re-hash everything.
+
 ## The git fast-path
 
 On a git repo with a stored anchor (`last_indexed_commit`), a full reindex doesn't need to hash every file. The candidate set is:

@@ -116,10 +116,21 @@ class DiscoveryErrors:
     must not be read as "deleted from disk" (same discrimination as H7).
     ``dirs``: a directory whose scandir failed mid-walk — its whole subtree
     went unseen, so deletion evidence from this walk is untrustworthy.
+
+    ``entries_seen`` counts every file entry the walk enumerated, *before*
+    any filter runs. It is not an error, but it lives here because only the
+    caller that cares about the errors cares about it: an empty result with
+    ``entries_seen == 0`` means the walk found nothing at all (an unmounted
+    or emptied root), while an empty result with ``entries_seen > 0`` means
+    the tree is readable and populated and the filters — an ADR-42 scope
+    narrowing, .gitignore, the skip-lists — removed everything. Those two
+    are indistinguishable from the returned list alone, and change
+    detection must not treat the first as deletion.
     """
 
     files: list[tuple[str, str]] = field(default_factory=list)
     dirs: list[tuple[str, str]] = field(default_factory=list)
+    entries_seen: int = 0
 
 
 def is_secret_path(rel_posix: str) -> bool:
@@ -176,8 +187,11 @@ def discover_files(
 
     When *errors* is given, transient stat/read/scandir failures are recorded
     there instead of vanishing silently — callers doing change detection need
-    them to tell "file errored" from "file deleted". ``errors=None`` keeps the
-    historical silent-skip behavior."""
+    them to tell "file errored" from "file deleted"; ``errors.entries_seen``
+    additionally reports how many file entries the walk enumerated before
+    filtering, which is the only way to tell an unreadable root from a fully
+    filtered one. ``errors=None`` keeps the historical silent-skip
+    behavior."""
     cfg = config or DiscoveryConfig()
     root_path = Path(root).resolve()
 
@@ -264,6 +278,10 @@ def discover_files(
         dirnames[:] = kept_dirs
 
         for name in filenames:
+            # Counted before every filter: the question this answers is "did
+            # the walk see anything?", not "did anything survive screening".
+            if errors is not None:
+                errors.entries_seen += 1
             rel = f"{dir_rel}/{name}" if dir_rel else name
             full = Path(dirpath) / name
             try:

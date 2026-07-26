@@ -48,6 +48,7 @@ def launch_index_run(
     *,
     paths: Sequence[str] | None = None,
     triggered_by: str = "manual",
+    force: bool = False,
 ) -> dict[str, str]:
     """Register (or re-open) the project and start indexing in the
     background. Returns the 202-style acceptance body shared verbatim by
@@ -61,7 +62,13 @@ def launch_index_run(
     same collection and state rows) and returns that run's id with
     ``status: "already_running"`` — a distinct status so a scoped/watcher
     caller can tell its launch was skipped and re-arm its retry (H3). A
-    real launch returns ``status: "accepted"``."""
+    real launch returns ``status: "accepted"``.
+
+    *force* is passed straight to :func:`execute_run`: it lets a discovery
+    result of zero files count as deletion evidence when state still tracks
+    files (ADR-55). Only an operator can make that call — nothing observable
+    separates an emptied root from an unmounted one — so it is never set by
+    the watcher."""
     if not os.path.isdir(root_path):
         raise ValueError(f"root_path is not an existing directory: {root_path!r}")
     project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
@@ -107,6 +114,7 @@ def launch_index_run(
                 batch_size=ctx.embed_batch_size,
                 git_fast_path=ctx.git_fast_path,
                 paths=paths,
+                force=force,
                 on_progress=_on_progress,
             )
         except Exception:
