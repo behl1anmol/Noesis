@@ -11,6 +11,11 @@ lesson may never weaken those. See `architecture-docs/code-indexer-expanded-arch
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
+## [14] testing (occurrences: 1)
+**Mistake:** Wrote a regression test for a log-message defect by asserting the NEW wording was absent ('accepting the empty scan'). Against the pre-fix source it passed vacuously — the old code emitted 'accepting as deletion', a string the assertion never looked for. Only the stash-and-rerun step exposed it; without that the test would have shipped proving nothing.
+**Lesson:** When a fix changes a user-visible string (log line, error message, status text), assert on the invariant the string expresses, not on the new phrasing. Match the bare verb or the semantic fact ('accepting'), or assert against both old and new wording. Every new regression test must be run against the pre-fix source and observed to FAIL for the reason it was written; a test that merely passes both ways is only valid when it was deliberately written as an over-correction guard.
+**Rationale:** A test asserting the absence of a string that only the fixed code can produce is a tautology against the buggy code. It reports green, is counted as coverage, and pins nothing — which is worse than no test, because it stops anyone from writing the real one.
+
 ## [12] implementation (occurrences: 1)
 **Mistake:** While fixing the telemetry write path, a fix batch opened its dedicated best-effort connection with a raw sqlite3.connect() call instead of state.connect(). The codebase enforces a single sqlite connection constructor, and the structural-search golden test sp-02 pins the AST pattern sqlite3.connect($$$ARGS) to exactly {state.py: 1}. The second call site broke that golden test; it was caught only by the mandatory full-suite run after all four fix batches had landed.
 **Lesson:** Open new resources through the codebase's existing sanctioned constructor, never by calling the underlying library primitive a second time; when the new call site genuinely needs different settings, construct via the sanctioned helper and override the specific pragma/option afterwards.
