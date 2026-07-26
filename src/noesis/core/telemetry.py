@@ -55,6 +55,7 @@ import logging
 import queue
 import sqlite3
 import threading
+import time
 from typing import Any
 
 from . import state
@@ -67,6 +68,11 @@ logger = logging.getLogger(__name__)
 _QUEUE_MAX = 1000
 
 _SHUTDOWN = object()
+
+# How long flush() waits between attempts to slip its barrier into a full
+# queue. Short enough that it costs nothing once the writer drains one row,
+# long enough that a stalled writer is not polled thousands of times.
+_FLUSH_RETRY_S = 0.01
 
 
 class _Barrier:
@@ -203,20 +209,40 @@ async def flush(timeout: float = 5.0) -> None:
     # close() cannot start until it acquires this same lock, so the barrier is
     # now either served by the live worker or set by close()'s drain.
     barrier = _Barrier()
-    with _worker_lock:
-        work = _queue if (_worker is not None and _worker.is_alive()) else None
-        if work is not None:
+    deadline = time.monotonic() + timeout
+    while True:
+        with _worker_lock:
+            work = _queue if (_worker is not None and _worker.is_alive()) else None
+            if work is None:
+                # No live worker means no live generation — nothing to wait
+                # for. A generation close() retired is either empty (it
+                # drained) or still being served by a worker that outlived its
+                # join, and in that second case anything already queued is
+                # written, not stranded.
+                return
             try:
                 work.put_nowait(barrier)
+                break
             except queue.Full:
-                work = None
-    if work is None:
-        # No live worker means no live generation — nothing to wait for. A
-        # generation close() retired is either empty (it drained) or still
-        # being served by a worker that outlived its join, and in that second
-        # case anything already queued is written, not stranded.
-        return
-    await asyncio.to_thread(barrier.event.wait, timeout)
+                pass
+        # A full queue is the opposite of "nothing to wait for": it is the
+        # maximum backlog, reached only when the writer is stalled on a foreign
+        # lock — the one time a caller most needs a real barrier. Dropping
+        # ROWS on overflow is the documented contract; dropping the BARRIER and
+        # returning would report "flushed" with up to _QUEUE_MAX rows pending
+        # (PR #24 review). So retry under the same deadline. A blocking
+        # `put(barrier, timeout=...)` is not the fix: the queue is only safe to
+        # read under the lock, and holding it across a blocking call would
+        # stall the `_ensure_worker` on the query path that this whole module
+        # exists to keep out of the way.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Waited the caller's whole budget without ever queuing the
+            # barrier. A flush that spends its timeout and gives up is honest;
+            # one that returns instantly is not.
+            return
+        await asyncio.sleep(min(_FLUSH_RETRY_S, remaining))
+    await asyncio.to_thread(barrier.event.wait, max(0.0, deadline - time.monotonic()))
 
 
 def close(timeout: float = 5.0) -> None:

@@ -86,6 +86,18 @@ way to tell an empty *result* apart from an empty *tree* — a scope narrowing
 that filtered everything out looks identical to an unmounted root from the
 returned list alone ([ADR-55](../project/decisions.md)).
 
+`entries_seen` is only consulted when the walk raised nothing. The indexer's
+empty-scan guard exists for emptiness that reports no error at all; where
+`errors.dirs` already holds one, that error *is* the diagnosis, it names the
+directory and carries the real errno, and the guard stands down rather than
+writing a generic `<root>` row over it.
+
+The counter runs before screening, so it includes entries that then landed in
+`errors.files`. Those were not *filtered* — the indexer carries an unreadable
+file forward as unchanged, so it is never deleted — and the log line that
+reports the escape subtracts them rather than crediting the filters with a
+permission error.
+
 ## `DiscoveryConfig`
 
 | Field | Default | Meaning |

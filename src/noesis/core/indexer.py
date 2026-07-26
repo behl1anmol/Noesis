@@ -82,8 +82,24 @@ class IndexResult:
     fast_path_used: bool = False
     candidate_count: int | None = None
     files_failed: int = 0
-    # Paths whose per-file processing failed (ADR-41): callers that clear
-    # pending_changes must keep these pending or auto-reindex never retries.
+    # Paths the next run must re-examine: callers that clear pending_changes
+    # must keep these pending or auto-reindex never retries them. Two
+    # populations, despite the name — files whose own processing failed
+    # (ADR-41), and files a directory-level discovery failure left unverified
+    # (ADR-51/54), which did not fail at all; the run simply never reached
+    # them. So this is NOT bounded by "how many files went wrong": when the
+    # failure cannot be attributed to a subtree (a vanished root), every
+    # stored path is unverified and this is the size of the index.
+    #
+    # That matters because the caller re-pends it with one `executemany` on
+    # the event loop (jobs.py). Deliberate: `state.*` writes run on the
+    # loop-owning thread throughout — the shared conn is loop-owned, and a
+    # worker-thread write can interleave inside another operation's open
+    # BEGIN IMMEDIATE (see jobs.index_status). At index scale the write is the
+    # same order as `delete_files` and `clear_pending_changes` on either side
+    # of it, so it is the established cost of that rule, not an exception to
+    # it. Whether a whole-index re-pend should happen at all is the open
+    # question in issue #25, not a property of this field.
     failed_paths: tuple[str, ...] = ()
 
 
@@ -294,7 +310,25 @@ async def execute_run(
         # ``force`` deliberately does NOT relax the directory-error
         # suppression below: an unwalked subtree is a different, still-open
         # proof problem, not something the operator asserted anything about.
-        if stored and not discovered and not force and not disc_errors.entries_seen:
+        #
+        # Both branches stand down when discovery already reported a directory
+        # failure (PR #24 review). This guard exists for the emptiness that
+        # raises nothing; when something DID raise, that error is the diagnosis
+        # and it is already recorded. Synthesizing a second ``<root>`` row on
+        # top of it would overwrite the real errno — ``record_file_errors`` is
+        # INSERT OR REPLACE keyed on (run_id, path) — costing the operator the
+        # EACCES/ESTALE they need to fix the mount, and double-counting one
+        # failure in ``files_failed``. Under ``force`` the same condition
+        # otherwise logs a purge that the deletion block then refuses to
+        # perform. Deletion safety is unchanged either way: the recorded
+        # directory error drives `unwalked` on its own.
+        if (
+            stored
+            and not discovered
+            and not force
+            and not disc_errors.entries_seen
+            and not disc_errors.dirs
+        ):
             disc_errors.dirs.append(
                 (
                     "<root>",
@@ -310,19 +344,34 @@ async def execute_run(
                 run_id,
                 len(stored),
             )
-        elif stored and not discovered:
+        elif stored and not discovered and not disc_errors.dirs:
             # The purge the guard exists to prevent, now deliberate. Loud
             # either way: an operator reading the log after the fact must be
-            # able to see which escape emptied the project.
+            # able to see which escape emptied the project — so it may only
+            # fire where a purge can actually follow, and it may only claim
+            # what the walk actually did. With no directory error recorded,
+            # `_unwalked_prefixes` below returns `()` and nothing is
+            # suppressed; with one, it returns a subtree or None and this line
+            # would name an escape that emptied nothing.
+            #
+            # `entries_seen` counts every enumerated entry, including ones that
+            # then failed to be screened — and a file that ERRORED was not
+            # "filtered out": hashdiff carries it forward, so it is never
+            # deleted. Report the two populations separately rather than
+            # crediting the filters with a permission error.
             logger.warning(
                 "index run %s: discovery returned 0 files while state tracks "
-                "%d — accepting as deletion (%s)",
+                "%d — accepting the empty scan as real (%s); what that deletes "
+                "is still decided per file, so an unreadable path is carried "
+                "forward, not purged",
                 run_id,
                 len(stored),
                 "forced by caller"
                 if force
                 else f"walk enumerated {disc_errors.entries_seen} file entry/"
-                f"entries, all filtered out — root is readable",
+                f"entries ({disc_errors.entries_seen - len(disc_errors.files)} "
+                f"filtered out, {len(disc_errors.files)} unreadable) — root is "
+                f"readable",
             )
 
         # Which stored paths this walk could not see. Computed once, after
