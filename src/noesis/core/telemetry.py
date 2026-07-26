@@ -196,17 +196,25 @@ async def flush(timeout: float = 5.0) -> None:
     right after recording it (tests, and the dashboard's usage page if it
     ever wants read-your-writes) needs this barrier. Returns when the rows
     land or *timeout* elapses; it never raises."""
+    # The barrier goes in while the lock is still held. Releasing it first and
+    # putting afterwards leaves a window where close() retires the generation
+    # and finishes its drain, so the barrier lands in a queue no worker will
+    # ever serve and this waits the full timeout for nothing (PR #24 review).
+    # close() cannot start until it acquires this same lock, so the barrier is
+    # now either served by the live worker or set by close()'s drain.
+    barrier = _Barrier()
     with _worker_lock:
         work = _queue if (_worker is not None and _worker.is_alive()) else None
+        if work is not None:
+            try:
+                work.put_nowait(barrier)
+            except queue.Full:
+                work = None
     if work is None:
-        # No live worker means no live generation, and close() leaves the
-        # generation it retired with an empty queue — so there is nothing
-        # pending and nothing to wait for.
-        return
-    barrier = _Barrier()
-    try:
-        work.put_nowait(barrier)
-    except queue.Full:
+        # No live worker means no live generation — nothing to wait for. A
+        # generation close() retired is either empty (it drained) or still
+        # being served by a worker that outlived its join, and in that second
+        # case anything already queued is written, not stranded.
         return
     await asyncio.to_thread(barrier.event.wait, timeout)
 
@@ -218,7 +226,9 @@ def close(timeout: float = 5.0) -> None:
     telemetry handles do not outlive the runtime that created them — an open
     second handle to the state DB blocks temp-directory cleanup on Windows
     and WSL, and survives a DB file removal. Bounded like the model workers
-    (MCP-1): a stuck writer is abandoned, never waited on forever.
+    (MCP-1): a stuck writer is abandoned, never waited on forever — and an
+    abandoned writer keeps its queue, sentinel included, so it can still stop
+    itself once the backlog clears.
     """
     # Retire this generation under the lock. Anything that races us from here
     # on calls _ensure_worker(), which sees no worker and builds a NEW queue
@@ -254,6 +264,19 @@ def close(timeout: float = 5.0) -> None:
             "(daemon thread)",
             timeout,
         )
+        # Do NOT drain here. The worker still owns this queue and has not
+        # reached the sentinel yet — `_discard_queued` would swallow it, and
+        # the worker would then block on `work.get()` forever with its
+        # connections open: precisely the handle leak this function exists to
+        # prevent (PR #24 review, reproduced with a 250ms-per-row backlog
+        # against a 1s join). The backlog is the worker's to finish; re-arm
+        # the stop in case the first sentinel was already consumed while the
+        # thread was on its way out.
+        try:
+            work.put_nowait(_SHUTDOWN)
+        except queue.Full:  # pragma: no cover — the worker is draining it
+            pass
+        return
     # After the join, not before it: rows ahead of the sentinel are written by
     # the exiting worker. Only what landed behind it is discarded.
     _discard_queued(work)

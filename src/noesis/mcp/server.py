@@ -168,22 +168,26 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
         return chunk
 
     @mcp.tool
-    async def reindex(project_id: str, force: bool = False) -> dict[str, str]:
+    async def reindex(project_id: str) -> dict[str, str]:
         """Re-index a registered project (incremental — only changed files
         are re-embedded). Returns immediately with a run_id; poll
         get_index_status for completion.
 
-        Set force=true only to confirm that a project whose scan now finds
-        zero files really has had all its files deleted: by default that
-        result is refused as deletion evidence, because an emptied root and
-        an unmounted one are indistinguishable, and accepting it wrongly
-        drops the whole project from the index."""
+        If a project's scan finds zero files while the index still tracks
+        some, the run fails rather than emptying the project — report that to
+        the human running this service; it cannot be resolved from here."""
         ctx = get_ctx()
         project = state.get_project(ctx.conn, project_id)
         if project is None:
             raise ToolError("unknown project_id")
         try:
-            return jobs.launch_index_run(ctx, project["root_path"], force=force)
+            # No `force` here, deliberately: ADR-55 makes the empty-root
+            # assertion an OPERATOR call, and the caller of an MCP tool is an
+            # agent. Exposing it would hand an LLM that read a zero-file
+            # status a one-parameter way to purge the whole project index —
+            # the outcome the guard exists to prevent. The REST surface keeps
+            # it (`?force=true`), which is a human with curl or the dashboard.
+            return jobs.launch_index_run(ctx, project["root_path"])
         except ValueError as exc:  # mixed-model guard
             raise ToolError(str(exc)) from exc
 

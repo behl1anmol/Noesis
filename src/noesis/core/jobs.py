@@ -68,7 +68,8 @@ def launch_index_run(
     result of zero files count as deletion evidence when state still tracks
     files (ADR-55). Only an operator can make that call — nothing observable
     separates an emptied root from an unmounted one — so it is never set by
-    the watcher."""
+    the watcher, and the REST route is the only caller that exposes it. The
+    MCP `reindex` tool deliberately does not: its caller is an agent."""
     if not os.path.isdir(root_path):
         raise ValueError(f"root_path is not an existing directory: {root_path!r}")
     project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
