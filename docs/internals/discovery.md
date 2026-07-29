@@ -59,6 +59,7 @@ and a path that could not be *read*:
 | the same errors on the **walk root itself** | recorded in `errors.dirs` as `<root>` | `os.walk` routes the root's own scandir failure through the same hook, and an unmounted or renamed root arrives as `FileNotFoundError`. A missing root is never evidence that files were deleted — it is evidence the scan could not run |
 | any other `OSError` on a file (`EACCES`, `EIO`, `ESTALE`, …) | recorded in `errors.files` | the file still exists; it was merely unreadable this run |
 | any other `OSError` from `os.walk` (via its `onerror` hook) | recorded in `errors.dirs` | part of the tree went unwalked; its contents are unknown |
+| `OSError` from the cycle-guard `stat` (`follow_symlinks` only) | **logged at DEBUG, not recorded** | the one deliberate exception. `os.walk` already scandir'd that directory successfully and its files are in the result, so the stat answers a question about directory *identity*, not about whether a file exists. Recording it would suppress deletion for a fully-walked subtree on evidence that says nothing about it. What degrades is duplicate detection: an unseeded directory is not pruned, so a symlink back into it yields the same files under a second rel path |
 
 This matters because everything downstream infers deletion from *absence*. A
 path missing from the walk is indistinguishable from a path deleted on disk,

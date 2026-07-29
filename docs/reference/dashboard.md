@@ -21,6 +21,17 @@ Drill into one project:
 - **Failed files** — per-file errors of the most recent run (indexing continues past individual failures; failed files are retried next run).
 - **Recent runs** — status, trigger (manual vs watcher, with a *fast path* badge when git narrowing applied), files changed/failed, chunks written, duration, start time.
 
+!!! warning "If every run fails with “discovery returned no files”"
+    When a scan finds zero files while the index still tracks some, the run is failed on purpose rather than emptying the project — an unmounted or renamed root looks exactly like "every file was deleted" ([ADR-55](../project/decisions.md)). Check the root first: if the disk is not mounted, mounting it fixes the next run with no further action.
+
+    If the root really is empty and you want the index emptied to match, that assertion needs an operator, and **the dashboard's Reindex button cannot make it** — it posts to the right endpoint but never sends the flag. Use the JSON API directly:
+
+    ```bash
+    curl -X POST 'http://127.0.0.1:8000/projects/{project_id}/reindex?force=true'
+    ```
+
+    `force` accepts the empty result as deletion evidence and does nothing else — a directory that failed to *scan* still suppresses deletions underneath it, forced or not. It is also deliberately absent from the MCP `reindex` tool, since the caller there is an agent rather than a person who can look at the disk.
+
 ## Usage (`/usage`)
 
 ![Usage analytics — runs, queries, channel mix, watcher activity](../assets/screenshots/dashboard-usage.png)

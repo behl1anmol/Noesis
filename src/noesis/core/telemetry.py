@@ -41,6 +41,27 @@ telemetry rows, never corrupting anything. Making that safe would mean handing
 each context its own writer handle rather than sharing one writer across DB
 paths.
 
+:func:`close` has no terminal state, and that is deliberate rather than an
+oversight. ``_ensure_worker`` rebuilds the generation whenever ``_worker`` is
+None, so a ``record_query`` arriving after ``close()`` starts a fresh worker
+with a fresh ``state.connect()`` handle. For a ``record_query`` *racing*
+``close()`` that is exactly right — the alternative is dropping a row from a
+query that was in flight when teardown began, or handing it to a worker that is
+already exiting. What it cannot distinguish is a ``record_query`` arriving
+*after* teardown decided to close, which would open a handle the closing context
+will never reap.
+
+That window is the two statements between ``await asyncio.to_thread(close)`` and
+``ctx.conn.close()`` in ``close_runtime_context``, and nothing reaches it in
+either deployment: uvicorn drains in-flight requests before running lifespan
+shutdown, ``combine_lifespans`` unwinds the MCP app first, and the one-live-
+``AppContext``-per-process invariant above means no other caller holds a conn to
+record against. A terminal flag would close it, at the cost of a module-global
+that every test building a second context in the same process would have to
+reset — trading a window nothing reaches for a new way to strand telemetry
+silently. Revisit only if a second live context ever becomes real; that
+invariant is the load-bearing one (PR #24 round-7 review).
+
 Consequence worth knowing: the usage page is eventually consistent. A query
 is normally readable within microseconds, but it is not guaranteed to be
 there the instant the response returns — under the contention above it can

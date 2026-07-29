@@ -10,6 +10,7 @@ the index (a retrievable surface) or M5 structural-search results.
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from pathlib import Path, PurePosixPath
 from pathspec import GitIgnoreSpec
 
 from .languages import detect_language
+
+logger = logging.getLogger(__name__)
 
 EXCLUDED_DIRS: frozenset[str] = frozenset(
     {
@@ -177,6 +180,39 @@ class _IgnoreStack:
         return decision
 
 
+def _cycle_guard_identity(path: str | Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` for the ``follow_symlinks`` cycle guard, or None.
+
+    A failure here is deliberately NOT recorded in ``DiscoveryErrors.dirs``.
+    ``os.walk`` has already scandir'd this directory successfully — its files
+    are enumerated and reach ``results`` — so this stat is evidence about
+    directory *identity*, never about whether a file exists. Routing it to
+    ``errors.dirs`` would suppress deletion and orphan pruning for a subtree
+    that was fully walked and block the git anchor (ADR-51, narrowed by
+    ADR-54), on a question it did not answer: exactly the over-correction
+    ADR-54 exists to undo, reached from the other direction.
+
+    What actually degrades is the duplicate guard, and only under
+    ``follow_symlinks=True``. An unseeded directory is not pruned, so a symlink
+    pointing back at it re-walks that subtree and yields the same files a
+    second time under a different rel path. Logged rather than dropped: after
+    ADR-51 this module's contract is that no filesystem fault vanishes without
+    a trace, and a reader is entitled to see the one place where the trace is a
+    log line instead of a recorded error (PR #24 round-7 review).
+    """
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        logger.debug(
+            "discovery: cycle-guard stat failed for %s (%s) — symlink "
+            "duplicate-detection degraded for this directory",
+            path,
+            exc,
+        )
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def discover_files(
     root: str | Path,
     config: DiscoveryConfig | None = None,
@@ -243,11 +279,9 @@ def discover_files(
         root_path, topdown=True, followlinks=cfg.follow_symlinks, onerror=_walk_error
     ):
         if cfg.follow_symlinks:
-            try:
-                st = os.stat(dirpath)
-                visited.add((st.st_dev, st.st_ino))
-            except OSError:
-                pass
+            ident = _cycle_guard_identity(dirpath)
+            if ident is not None:
+                visited.add(ident)
         dir_rel = PurePosixPath(Path(dirpath).relative_to(root_path)).as_posix()
         if dir_rel == ".":
             dir_rel = ""
@@ -266,14 +300,18 @@ def discover_files(
             if not cfg.follow_symlinks and (Path(dirpath) / d).is_symlink():
                 continue
             if cfg.follow_symlinks:
-                try:
-                    cst = os.stat(Path(dirpath) / d)
-                except OSError:
+                child_ident = _cycle_guard_identity(Path(dirpath) / d)
+                if child_ident is None:
+                    # Keep walking it. Skipping an unstattable directory would
+                    # hide whatever it holds and hand the deletion path a set
+                    # of "absent" files that were never actually looked for —
+                    # purge on doubt, which ADR-51 refuses. It simply walks
+                    # unguarded.
                     kept_dirs.append(d)
                     continue
-                if (cst.st_dev, cst.st_ino) in visited:
+                if child_ident in visited:
                     continue
-                visited.add((cst.st_dev, cst.st_ino))
+                visited.add(child_ident)
             kept_dirs.append(d)
         dirnames[:] = kept_dirs
 

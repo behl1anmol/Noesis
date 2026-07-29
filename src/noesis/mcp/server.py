@@ -186,7 +186,12 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             # agent. Exposing it would hand an LLM that read a zero-file
             # status a one-parameter way to purge the whole project index —
             # the outcome the guard exists to prevent. The REST surface keeps
-            # it (`?force=true`), which is a human with curl or the dashboard.
+            # it (`?force=true` on POST /projects/{id}/reindex), which is a
+            # human with curl or anything else that speaks the JSON API. NOT
+            # the dashboard: its Reindex button posts to that same route
+            # (`api/static/app.js`) but never sends the parameter, so a
+            # dashboard-only operator cannot reach the escape (PR #24 round-7
+            # review). `docs/reference/dashboard.md` points them at the curl.
             return jobs.launch_index_run(ctx, project["root_path"])
         except ValueError as exc:  # mixed-model guard
             raise ToolError(str(exc)) from exc
