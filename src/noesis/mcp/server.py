@@ -183,9 +183,16 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
         try:
             # No `force` here, deliberately: ADR-55 makes the empty-root
             # assertion an OPERATOR call, and the caller of an MCP tool is an
-            # agent. Exposing it would hand an LLM that read a zero-file
-            # status a one-parameter way to purge the whole project index —
-            # the outcome the guard exists to prevent. The REST surface keeps
+            # agent. Leaving it off keeps a whole-project purge out of the
+            # model's action space and out of any tool description that would
+            # read as a procedure for reaching it.
+            #
+            # Stated precisely, because the earlier wording overclaimed (PR #24
+            # round-8 review): this is an affordance, NOT an access boundary.
+            # `verify_local_origin` passes when Origin/Referer are absent, so
+            # any local process — including an agent holding a shell — can send
+            # `?force=true` itself. What the omission buys is that nothing here
+            # suggests it should. The REST surface keeps
             # it (`?force=true` on POST /projects/{id}/reindex), which is a
             # human with curl or anything else that speaks the JSON API. NOT
             # the dashboard: its Reindex button posts to that same route

@@ -614,11 +614,35 @@ def finish_run(
     files_failed: int | None = None,
     error: str | None = None,
 ) -> None:
+    """Close out a run row: status, counters, finish time, error.
+
+    The counters are written with ``COALESCE(?, col)`` so passing ``None``
+    leaves the stored value alone instead of erasing it. That matters because
+    this can legitimately be called **twice** for one run: ``execute_run``
+    writes ``"done"`` with a full set of counters, and only afterwards does its
+    remaining bookkeeping — ``add_dirty_paths`` (which takes SQLite's write
+    lock under ``BEGIN IMMEDIATE`` and raises ``OperationalError`` past the
+    5s ``busy_timeout``), the anchor write, and a ``git status`` subprocess.
+    Any of those raising lands in the ``except BaseException`` handler, which
+    calls this again with a status and an error and nothing else. Under the
+    old unconditional ``SET``, that second call blanked every counter the
+    first had committed — a run whose content was fully indexed showed up on
+    the dashboard as failed with no numbers at all (PR #24 round-8 review).
+
+    ``status``, ``error`` and ``finished_at`` stay unconditional: the whole
+    point of the second call is to overwrite those three, and ``error`` must
+    be able to move back to NULL as well as to a message.
+    """
     conn.execute(
         """
         UPDATE index_runs SET
-          status = ?, files_total = ?, files_changed = ?, chunks_written = ?,
-          fast_path_used = ?, candidate_count = ?, files_failed = ?,
+          status = ?,
+          files_total     = COALESCE(?, files_total),
+          files_changed   = COALESCE(?, files_changed),
+          chunks_written  = COALESCE(?, chunks_written),
+          fast_path_used  = COALESCE(?, fast_path_used),
+          candidate_count = COALESCE(?, candidate_count),
+          files_failed    = COALESCE(?, files_failed),
           finished_at = ?, error = ?
         WHERE id = ?
         """,

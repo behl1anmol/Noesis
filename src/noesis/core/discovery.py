@@ -160,7 +160,31 @@ class _IgnoreStack:
     def push(self, base_rel_posix: str, gitignore: Path) -> None:
         try:
             lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+        except OSError as exc:
+            # The second declared exception to "no filesystem fault vanishes
+            # without a trace" (ADR-51), and the one whose consequence points
+            # the opposite way from every other error in this module. Losing a
+            # .gitignore does not risk over-deleting — it risks
+            # UNDER-IGNORING: the rules that should have excluded this
+            # directory's files never load, so files the user asked to keep
+            # out can enter the index, which is a retrievable surface.
+            #
+            # Skipping is still what happens, for now, because the
+            # alternative is failing the whole walk over one unreadable
+            # ignore file. Which of those is right is a taxonomy decision
+            # tracked in issue #26 alongside the sibling `is_file()` call
+            # three lines below; this only stops the failure being invisible
+            # while that is decided (PR #24 round-8 review).
+            #
+            # Bounded, and worth knowing: the secret and generated-file
+            # skip-lists are applied independently of this stack, so a lost
+            # .gitignore is never a secret-exposure path.
+            logger.debug(
+                "discovery: could not read %s (%s) — its ignore rules are "
+                "not applied, so this directory may be under-ignored",
+                gitignore,
+                exc,
+            )
             return
         self._specs.append((base_rel_posix, GitIgnoreSpec.from_lines(lines)))
 
