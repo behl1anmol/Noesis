@@ -48,6 +48,7 @@ def launch_index_run(
     *,
     paths: Sequence[str] | None = None,
     triggered_by: str = "manual",
+    force: bool = False,
 ) -> dict[str, str]:
     """Register (or re-open) the project and start indexing in the
     background. Returns the 202-style acceptance body shared verbatim by
@@ -61,7 +62,14 @@ def launch_index_run(
     same collection and state rows) and returns that run's id with
     ``status: "already_running"`` — a distinct status so a scoped/watcher
     caller can tell its launch was skipped and re-arm its retry (H3). A
-    real launch returns ``status: "accepted"``."""
+    real launch returns ``status: "accepted"``.
+
+    *force* is passed straight to :func:`execute_run`: it lets a discovery
+    result of zero files count as deletion evidence when state still tracks
+    files (ADR-55). Only an operator can make that call — nothing observable
+    separates an emptied root from an unmounted one — so it is never set by
+    the watcher, and the REST route is the only caller that exposes it. The
+    MCP `reindex` tool deliberately does not: its caller is an agent."""
     if not os.path.isdir(root_path):
         raise ValueError(f"root_path is not an existing directory: {root_path!r}")
     project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
@@ -107,6 +115,7 @@ def launch_index_run(
                 batch_size=ctx.embed_batch_size,
                 git_fast_path=ctx.git_fast_path,
                 paths=paths,
+                force=force,
                 on_progress=_on_progress,
             )
         except Exception:
@@ -171,19 +180,43 @@ def run_progress(ctx: _ContextLike, run_id: str) -> dict[str, Any] | None:
     }
 
 
-def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
+async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     """Latest run for a project, shaped identically for REST and MCP.
 
     A registered project with no runs yet reports ``never_indexed`` with
     the run fields nulled — a stable shape beats a shape-shifting one for
-    agent consumers."""
+    agent consumers.
+
+    Async so the quick ``state.*`` reads stay on the event loop (the shared
+    sqlite conn is loop-owned; a worker-thread read can interleave inside
+    another op's open BEGIN IMMEDIATE transaction) while only the
+    synchronous Qdrant count round-trip is pushed to a worker thread.
+
+    ``drift`` is reported only when the expected chunk total held still
+    across that round-trip and still disagreed with the store. The cost of
+    that rule is worth stating: while a run is actively committing, ``drift``
+    reads False even if the store genuinely lost data — the first call after
+    the run settles reports it. A false negative for a few seconds beats a
+    false positive on every status poll during every index run."""
     # Index health: what the state DB expects vs what Qdrant actually holds.
     # A mismatch is drift — a vector store that lost data (external collection
     # wipe) while state still reports the files indexed. Surfaced so agents
     # and the dashboard can see it without a reindex; a full reindex heals it.
     expected_chunks = state.expected_chunk_total(ctx.conn, project_id)
-    vector_count = ctx.store.count_project_points(project_id)
-    drift = expected_chunks != vector_count
+    vector_count = await asyncio.to_thread(ctx.store.count_project_points, project_id)
+    # Re-read after the count: the Qdrant round-trip is a scheduling point, so
+    # a live index run can commit chunks between the two readings. A total
+    # that MOVED across that window means neither reading is a stable
+    # expectation, so there is nothing to compare the count against — the two
+    # readings must agree with each other before a disagreement with the count
+    # counts as evidence. (Asking only whether either reading happens to equal
+    # the count is not the same test and does not catch the in-flight case:
+    # `upsert_chunks` lands points before `upsert_file` commits the row, so
+    # mid-run the count sits ABOVE the expected total and both readings differ
+    # from it.) Report the fresher figure.
+    expected_after = state.expected_chunk_total(ctx.conn, project_id)
+    drift = expected_chunks == expected_after and expected_after != vector_count
+    expected_chunks = expected_after
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {

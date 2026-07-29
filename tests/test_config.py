@@ -61,6 +61,19 @@ def test_zero_batch_size_rejected(tmp_path):
         load_settings(cfg)
 
 
+def test_zero_reranker_candidates_rejected(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[reranker]\ncandidates = 0\n")
+    with pytest.raises(ValueError, match="reranker.candidates"):
+        load_settings(cfg)
+
+
+def test_one_reranker_candidate_accepted(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[reranker]\ncandidates = 1\n")
+    assert load_settings(cfg).reranker.candidates == 1
+
+
 def test_zero_poll_interval_rejected(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text("[watcher]\npoll_interval_s = 0\n")

@@ -74,7 +74,7 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             rerank=rerank,
             candidates=ctx.rerank_candidates,
         )
-        telemetry.record_query(
+        await telemetry.record_query(
             ctx.conn,
             interface="mcp",
             kind="search",
@@ -121,7 +121,7 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             )
         except structural_mod.StructuralSearchError as exc:
             raise ToolError(f"{exc.error_type}: {exc.message}") from exc
-        telemetry.record_query(
+        await telemetry.record_query(
             ctx.conn,
             interface="mcp",
             kind="structural",
@@ -146,9 +146,10 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
         ctx = get_ctx()
         if state.get_project(ctx.conn, project_id) is None:
             raise ToolError("unknown project_id")
-        # index_status now makes a synchronous Qdrant count round-trip; keep
-        # it off the event loop (same reason as get_chunk below).
-        return await asyncio.to_thread(jobs.index_status, ctx, project_id)
+        # index_status keeps its quick state reads on the loop (shared conn
+        # is loop-owned) and internally offloads only the Qdrant count
+        # round-trip (same reason as get_chunk below).
+        return await jobs.index_status(ctx, project_id)
 
     @mcp.tool
     async def get_chunk(chunk_id: str) -> dict[str, Any]:
@@ -170,12 +171,34 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
     async def reindex(project_id: str) -> dict[str, str]:
         """Re-index a registered project (incremental — only changed files
         are re-embedded). Returns immediately with a run_id; poll
-        get_index_status for completion."""
+        get_index_status for completion.
+
+        If a project's scan finds zero files while the index still tracks
+        some, the run fails rather than emptying the project — report that to
+        the human running this service; it cannot be resolved from here."""
         ctx = get_ctx()
         project = state.get_project(ctx.conn, project_id)
         if project is None:
             raise ToolError("unknown project_id")
         try:
+            # No `force` here, deliberately: ADR-55 makes the empty-root
+            # assertion an OPERATOR call, and the caller of an MCP tool is an
+            # agent. Leaving it off keeps a whole-project purge out of the
+            # model's action space and out of any tool description that would
+            # read as a procedure for reaching it.
+            #
+            # Stated precisely, because the earlier wording overclaimed (PR #24
+            # round-8 review): this is an affordance, NOT an access boundary.
+            # `verify_local_origin` passes when Origin/Referer are absent, so
+            # any local process — including an agent holding a shell — can send
+            # `?force=true` itself. What the omission buys is that nothing here
+            # suggests it should. The REST surface keeps
+            # it (`?force=true` on POST /projects/{id}/reindex), which is a
+            # human with curl or anything else that speaks the JSON API. NOT
+            # the dashboard: its Reindex button posts to that same route
+            # (`api/static/app.js`) but never sends the parameter, so a
+            # dashboard-only operator cannot reach the escape (PR #24 round-7
+            # review). `docs/reference/dashboard.md` points them at the curl.
             return jobs.launch_index_run(ctx, project["root_path"])
         except ValueError as exc:  # mixed-model guard
             raise ToolError(str(exc)) from exc

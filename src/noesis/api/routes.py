@@ -11,7 +11,6 @@ tests assert the two surfaces return identical bodies.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -94,9 +93,9 @@ async def project_status(project_id: str, request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
     if state.get_project(ctx.conn, project_id) is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
-    # index_status now makes a synchronous Qdrant count round-trip; keep it
-    # off the event loop so a slow store can't stall other requests.
-    return await asyncio.to_thread(jobs.index_status, ctx, project_id)
+    # index_status keeps its quick state reads on the loop (shared conn is
+    # loop-owned) and internally offloads only the Qdrant count round-trip.
+    return await jobs.index_status(ctx, project_id)
 
 
 @router.post(
@@ -104,13 +103,19 @@ async def project_status(project_id: str, request: Request) -> dict[str, Any]:
     status_code=202,
     dependencies=[Depends(verify_local_origin)],
 )
-async def reindex(project_id: str, request: Request) -> dict[str, str]:
+async def reindex(
+    project_id: str, request: Request, force: bool = False
+) -> dict[str, str]:
+    """*force* accepts an empty discovery result as deletion evidence for a
+    project whose files really are all gone (ADR-55); without it such a
+    project can never converge, since an emptied root and an unmounted one
+    look identical from here."""
     ctx = request.app.state.ctx
     project = state.get_project(ctx.conn, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
     try:
-        return jobs.launch_index_run(ctx, project["root_path"])
+        return jobs.launch_index_run(ctx, project["root_path"], force=force)
     except ValueError as exc:
         # Mixed-model guard → 409; a vanished root_path → 400 (M3).
         status = 409 if isinstance(exc, MixedModelError) else 400
@@ -151,7 +156,7 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
         rerank=req.rerank,
         candidates=ctx.rerank_candidates,
     )
-    telemetry.record_query(
+    await telemetry.record_query(
         ctx.conn,
         interface="rest",
         kind="search",
@@ -191,7 +196,7 @@ async def structural_search_route(
             status_code=status,
             detail={"type": exc.error_type, "message": exc.message},
         ) from exc
-    telemetry.record_query(
+    await telemetry.record_query(
         ctx.conn,
         interface="rest",
         kind="structural",

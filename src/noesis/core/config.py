@@ -202,7 +202,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             preload=_require_bool(
                 rrk.get("preload", RerankerSettings.preload), "reranker.preload"
             ),
-            candidates=_require_non_negative_int(
+            candidates=_require_positive_int(
                 rrk.get("candidates", RerankerSettings.candidates),
                 "reranker.candidates",
             ),

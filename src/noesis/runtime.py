@@ -16,7 +16,7 @@ from sqlite3 import Connection
 
 from qdrant_client import QdrantClient
 
-from noesis.core import state
+from noesis.core import state, telemetry
 from noesis.core.config import Settings, StructuralSettings
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
@@ -170,7 +170,7 @@ async def close_runtime_context(ctx: AppContext) -> None:
     must AWAIT the tasks' unwind before closing anything they touch — closing
     ``conn`` first would make that final write raise ``ProgrammingError`` and
     leave the run row stuck ``running`` (H5). Order: cancel → await → stop
-    model workers → close SQLite."""
+    model workers → stop the telemetry writer → close SQLite."""
     tasks = [t for t in ctx.jobs.values() if not t.done()]
     for task in tasks:
         task.cancel()
@@ -179,5 +179,13 @@ async def close_runtime_context(ctx: AppContext) -> None:
     for resource in (ctx.embedder, ctx.reranker):
         close = getattr(resource, "close", None)
         if close is not None:
-            close()
+            # Each close() joins a worker thread with a 5s bound. Bounded is
+            # not the same as free: run it off the loop, or teardown blocks
+            # every other task (including the MCP session manager's own
+            # shutdown in the combined lifespan) for up to 5s per resource.
+            await asyncio.to_thread(close)
+    # Same reason, and it must happen here rather than at process exit: the
+    # writer holds its own handle to the state DB, which would otherwise
+    # outlive ctx.conn and survive a DB-file removal.
+    await asyncio.to_thread(telemetry.close)
     ctx.conn.close()

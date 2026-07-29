@@ -384,6 +384,9 @@ structural_patterns:
       src/noesis/core/jobs.py: 2
       # H3 added the re-arm clock in _launch_scoped, bringing watcher to 3.
       src/noesis/core/watcher.py: 3
+      # flush()'s deadline: one to set it, two to read what is left of it
+      # while it retries a barrier into a full queue (PR #24 round-6 review).
+      src/noesis/core/telemetry.py: 3
 
   - id: sp-08
     pattern: "$LOOP.run_in_executor($$$ARGS)"

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AbstractSet, Iterable, Mapping
+from typing import AbstractSet, Iterable, Mapping, Sequence
 
 _READ_CHUNK = 1 << 20  # 1 MiB
 
@@ -66,6 +66,7 @@ def partition(
     stored: Mapping[str, str],
     *,
     candidates: AbstractSet[str] | None = None,
+    discovery_errored: Sequence[tuple[str, str]] = (),
 ) -> DiffResult:
     """Partition `discovered` (relative POSIX paths under `root`) against
     `stored` (path -> content_hash from the files table).
@@ -83,6 +84,11 @@ def partition(
     the hashing work, never decides changed/unchanged by itself (rule 1):
     every hashed file is still compared against `stored`, and deletions
     fall out of discovery exactly as in the full walk.
+
+    *discovery_errored* lists (path, error) pairs for files discovery could
+    not screen (transient stat/read failure) and therefore excluded from
+    `discovered` — they get the same treatment as a hash-time OSError (H7):
+    surfaced in `errored`, stored hash carried forward, never `deleted`.
     """
     root = Path(root)
     new: list[str] = []
@@ -133,6 +139,17 @@ def partition(
         elif prior != current:
             changed.append(rel)
         else:
+            unchanged.append(rel)
+
+    for rel, msg in discovery_errored:
+        # Discovery-stage failure on a still-present file: exactly the H7
+        # branch above — report it, carry the stored hash forward so its
+        # chunks keep serving, and keep it out of `deleted`.
+        errored.append((rel, msg))
+        prior_hash = stored.get(rel)
+        if prior_hash is not None:
+            seen.add(rel)
+            hashes[rel] = prior_hash
             unchanged.append(rel)
 
     deleted = sorted(p for p in stored if p not in seen)

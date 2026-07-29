@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os.path
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -19,12 +20,55 @@ from typing import Callable, Sequence
 
 from . import gitfast, hashdiff, state
 from .chunker import chunk_file
-from .discovery import DiscoveryConfig, discover_files
+from .discovery import DiscoveryConfig, DiscoveryErrors, discover_files
 from .embedder import Embedder
 from .languages import detect_language
 from .vectorstore import VectorStore
 
 logger = logging.getLogger(__name__)
+
+
+def _unwalked_prefixes(
+    disc_errors: DiscoveryErrors, *, follow_symlinks: bool
+) -> tuple[str, ...] | None:
+    """Root-relative prefixes whose contents this walk never saw.
+
+    A stored path under one of them cannot be proven deleted; every other
+    stored path can, because os.walk only loses the failing directory's own
+    subtree and carries on elsewhere. Returning the prefixes instead of a
+    single project-wide "suppress everything" flag keeps a permanently
+    unreadable directory — a root-owned dir, a dead mount — from freezing
+    deletion processing and orphan pruning for the whole project forever
+    (PR #24 review).
+
+    ``()`` means nothing is blocked. ``None`` means the failures cannot be
+    attributed to a subtree and the whole run's deletion evidence is void:
+
+    * the ``<root>`` sentinel — the walk root itself failed, or the empty-scan
+      guard fired, so nothing at all was seen;
+    * a path outside the root (``relative_to`` failed, so discovery recorded
+      the absolute name) — no prefix of the project's rel paths matches it;
+    * ``follow_symlinks`` — the same directory is reachable under rel paths
+      that are not under its own, so prefix containment stops implying
+      "unseen".
+    """
+    if not disc_errors.dirs:
+        return ()
+    if follow_symlinks:
+        return None
+    prefixes: list[str] = []
+    for dir_rel, _ in disc_errors.dirs:
+        if not dir_rel or dir_rel == "<root>":
+            return None
+        if os.path.isabs(dir_rel) or dir_rel.startswith("../"):
+            return None
+        prefixes.append(dir_rel)
+    return tuple(prefixes)
+
+
+def _under(path: str, prefixes: tuple[str, ...]) -> bool:
+    """True if *path* is one of *prefixes* or lives inside one."""
+    return any(path == p or path.startswith(f"{p}/") for p in prefixes)
 
 
 @dataclass(frozen=True)
@@ -38,8 +82,24 @@ class IndexResult:
     fast_path_used: bool = False
     candidate_count: int | None = None
     files_failed: int = 0
-    # Paths whose per-file processing failed (ADR-41): callers that clear
-    # pending_changes must keep these pending or auto-reindex never retries.
+    # Paths the next run must re-examine: callers that clear pending_changes
+    # must keep these pending or auto-reindex never retries them. Two
+    # populations, despite the name — files whose own processing failed
+    # (ADR-41), and files a directory-level discovery failure left unverified
+    # (ADR-51/54), which did not fail at all; the run simply never reached
+    # them. So this is NOT bounded by "how many files went wrong": when the
+    # failure cannot be attributed to a subtree (a vanished root), every
+    # stored path is unverified and this is the size of the index.
+    #
+    # That matters because the caller re-pends it with one `executemany` on
+    # the event loop (jobs.py). Deliberate: `state.*` writes run on the
+    # loop-owning thread throughout — the shared conn is loop-owned, and a
+    # worker-thread write can interleave inside another operation's open
+    # BEGIN IMMEDIATE (see jobs.index_status). At index scale the write is the
+    # same order as `delete_files` and `clear_pending_changes` on either side
+    # of it, so it is the established cost of that rule, not an exception to
+    # it. Whether a whole-index re-pend should happen at all is the open
+    # question in issue #25, not a property of this field.
     failed_paths: tuple[str, ...] = ()
 
 
@@ -129,6 +189,7 @@ async def execute_run(
     discovery_config: DiscoveryConfig | None = None,
     git_fast_path: bool = True,
     paths: Sequence[str] | None = None,
+    force: bool = False,
     on_progress: ProgressFn | None = None,
 ) -> IndexResult:
     """Index changes for an already-registered project under an open run.
@@ -144,6 +205,12 @@ async def execute_run(
     ``last_indexed_commit`` — the anchor may only move when the candidate
     set was derived from a git diff against it, otherwise the next fast
     path would silently skip files the watcher never saw (§3.2 rule 1).
+
+    *force* accepts a discovery result of zero files as real deletion evidence
+    even when state still tracks files. Off by default: nothing observable
+    distinguishes an emptied root from an unmounted one, so the assertion
+    has to come from an operator (ADR-55). It relaxes nothing else — a
+    directory that failed to scan still suppresses deletions under it.
     """
     if paths is not None:
         git_fast_path = False
@@ -203,8 +270,13 @@ async def execute_run(
         # Discovery walks the whole tree and binary-sniffs each file; on large
         # or network-mounted trees this alone is slow and, until now, silent.
         disc_started = time.perf_counter()
+        # Collect discovery failures instead of letting them vanish: a file
+        # (or whole subtree) that errored transiently is absent from
+        # `discovered`, and without the collector hashdiff would read that
+        # absence as deletion and purge live chunks.
+        disc_errors = DiscoveryErrors()
         discovered = await asyncio.to_thread(
-            discover_files, root_path, discovery_config
+            discover_files, root_path, discovery_config, errors=disc_errors
         )
         logger.info(
             "index run %s: discovery took=%.1fs discovered=%d",
@@ -213,6 +285,105 @@ async def execute_run(
             len(discovered),
         )
         stored = state.get_file_states(conn, project_id)
+        # A scan that returned NOTHING while state tracks files is not
+        # evidence of mass deletion — it is evidence the scan did not run: an
+        # unmounted or renamed root, or a mountpoint not populated yet. The
+        # walk-root discrimination in discovery catches the errno cases, but a
+        # root that exists and is simply empty raises nothing at all, so this
+        # cannot be expressed as an error check — the emptiness itself is the
+        # signal. Recorded as a directory-level error so it takes the same
+        # path as an unwalked subtree: deletions and orphan pruning are
+        # skipped, the anchor cannot advance, and the run is marked failed.
+        #
+        # Two escapes, because a guard that can never be satisfied is a guard
+        # that strands the project (PR #24 review):
+        #
+        # * ``entries_seen`` — the walk enumerated files and the filters
+        #   removed all of them. The root is demonstrably readable and
+        #   populated, so the emptiness is a scope decision (an ADR-42
+        #   narrowing, a new .gitignore), not a missing mount, and the
+        #   now-out-of-scope files SHOULD leave the index.
+        # * ``force`` — an operator asserting the empty root is real. Nothing
+        #   the process can observe distinguishes "every file deleted" from
+        #   "root not mounted", so that call is the operator's to make.
+        #
+        # ``force`` deliberately does NOT relax the directory-error
+        # suppression below: an unwalked subtree is a different, still-open
+        # proof problem, not something the operator asserted anything about.
+        #
+        # Both branches stand down when discovery already reported a directory
+        # failure (PR #24 review). This guard exists for the emptiness that
+        # raises nothing; when something DID raise, that error is the diagnosis
+        # and it is already recorded. Synthesizing a second ``<root>`` row on
+        # top of it would overwrite the real errno — ``record_file_errors`` is
+        # INSERT OR REPLACE keyed on (run_id, path) — costing the operator the
+        # EACCES/ESTALE they need to fix the mount, and double-counting one
+        # failure in ``files_failed``. Under ``force`` the same condition
+        # otherwise logs a purge that the deletion block then refuses to
+        # perform. Deletion safety is unchanged either way: the recorded
+        # directory error drives `unwalked` on its own.
+        if (
+            stored
+            and not discovered
+            and not force
+            and not disc_errors.entries_seen
+            and not disc_errors.dirs
+        ):
+            disc_errors.dirs.append(
+                (
+                    "<root>",
+                    f"discovery returned no files while state tracks "
+                    f"{len(stored)} file(s) — treating as an unreadable root, "
+                    f"not as deletion",
+                )
+            )
+            logger.warning(
+                "index run %s: discovery returned 0 files but state tracks %d "
+                "— refusing to treat that as deletion (root unreadable or "
+                "not mounted?)",
+                run_id,
+                len(stored),
+            )
+        elif stored and not discovered and not disc_errors.dirs:
+            # The purge the guard exists to prevent, now deliberate. Loud
+            # either way: an operator reading the log after the fact must be
+            # able to see which escape emptied the project — so it may only
+            # fire where a purge can actually follow, and it may only claim
+            # what the walk actually did. With no directory error recorded,
+            # `_unwalked_prefixes` below returns `()` and nothing is
+            # suppressed; with one, it returns a subtree or None and this line
+            # would name an escape that emptied nothing.
+            #
+            # `entries_seen` counts every enumerated entry, including ones that
+            # then failed to be screened — and a file that ERRORED was not
+            # "filtered out": hashdiff carries it forward, so it is never
+            # deleted. Report the two populations separately rather than
+            # crediting the filters with a permission error.
+            logger.warning(
+                "index run %s: discovery returned 0 files while state tracks "
+                "%d — accepting the empty scan as real (%s); what that deletes "
+                "is still decided per file, so an unreadable path is carried "
+                "forward, not purged",
+                run_id,
+                len(stored),
+                "forced by caller"
+                if force
+                else f"walk enumerated {disc_errors.entries_seen} file entry/"
+                f"entries ({disc_errors.entries_seen - len(disc_errors.files)} "
+                f"filtered out, {len(disc_errors.files)} unreadable) — root is "
+                f"readable",
+            )
+
+        # Which stored paths this walk could not see. Computed once, after
+        # the empty-scan guard has had its chance to add `<root>`, and used
+        # by both purge paths below (orphan pruning and deletion).
+        # `discovery_config` may still be None here (no persisted scope row);
+        # discover_files defaults it the same way, so read the flag from the
+        # same default rather than assuming what it is.
+        unwalked = _unwalked_prefixes(
+            disc_errors,
+            follow_symlinks=(discovery_config or DiscoveryConfig()).follow_symlinks,
+        )
 
         # Drift self-heal (ADR-49): the state DB can claim files are indexed
         # while Qdrant holds none of their points — an externally dropped or
@@ -257,11 +428,45 @@ async def execute_run(
                 # Points for a file_path neither tracked in state nor present
                 # on disk: no other prune path covers them and they keep the
                 # drift gate firing every run.
-                orphan_paths = [
-                    p
-                    for p in per_file
-                    if p not in stored_chunk_counts and p not in discovered_set
-                ]
+                #
+                # Discovery failures make "absent from disk" unprovable, so
+                # they must not feed this either — same purge-on-doubt rule as
+                # the deletion guard below. A path missing from `discovered_set`
+                # because its stat or its parent's scandir failed says nothing
+                # about whether the file exists, and a file live on disk whose
+                # state row is missing (a crash between `upsert_chunks` and
+                # `upsert_file`) is exactly the shape that lands here: pruning
+                # it deletes searchable points for a live file. A dir-level
+                # failure hides its whole subtree and cannot enumerate what it
+                # hid, so every path under it is spared; file-level failures
+                # name their paths, so only those are. Paths elsewhere were
+                # walked normally and stay provable. Cost of skipping is one
+                # more drift-gate firing next run; cost of pruning wrongly is
+                # content gone from search.
+                errored_files = {p for p, _ in disc_errors.files}
+                orphan_paths = (
+                    []
+                    if unwalked is None
+                    else [
+                        p
+                        for p in per_file
+                        if p not in stored_chunk_counts
+                        and p not in discovered_set
+                        and p not in errored_files
+                        and not _under(p, unwalked)
+                    ]
+                )
+                if disc_errors.dirs:
+                    logger.warning(
+                        "index run %s: %d directory discovery error(s) — orphan "
+                        "point pruning %s (absence is not evidence); a clean "
+                        "run prunes them",
+                        run_id,
+                        len(disc_errors.dirs),
+                        "skipped for the whole run"
+                        if unwalked is None
+                        else "skipped under the failed director(ies)",
+                    )
                 logger.warning(
                     "index run %s: drift detected project=%s expected=%d "
                     "actual=%d — re-embedding %d drifted file(s), pruning %d "
@@ -284,7 +489,12 @@ async def execute_run(
                     )
 
         diff = await asyncio.to_thread(
-            hashdiff.partition, root_path, discovered, stored, candidates=candidates
+            hashdiff.partition,
+            root_path,
+            discovered,
+            stored,
+            candidates=candidates,
+            discovery_errored=disc_errors.files,
         )
 
         chunks_written = 0
@@ -401,9 +611,43 @@ async def execute_run(
                     chunks_written,
                 )
 
+        # A directory-level discovery error means part of the tree was never
+        # walked, so "absent from discovery" is not deletion evidence *there*.
+        # Stale chunks beat purged live files; a clean next run detects real
+        # deletions again. Scoped to the unwalked subtrees rather than the
+        # whole project: a directory that is permanently unreadable (root-owned,
+        # dead mount) would otherwise freeze deletion processing for every
+        # other path forever, and deletions outside it were provable all along
+        # — os.walk loses only the failing directory's subtree. When the
+        # failures cannot be attributed to a subtree (`unwalked is None`) the
+        # old project-wide suppression is exactly right and still applies
+        # (ADR-54).
+        files_deleted = 0
+        # Suppressed deletions are unverified files, not deleted ones: their
+        # stored hash may be stale and this run never read them. They must be
+        # re-queued individually (the caller re-pends `failed_paths`) — a
+        # scoped retry matches its candidate set EXACTLY, with no prefix
+        # expansion, so re-pending only the errored directory would make the
+        # retry carry every stored child forward as unchanged and clear the
+        # pending row, stranding the edit until a manual full run. Any path in
+        # here that really was deleted is simply re-detected and deleted by the
+        # next run, which then clears its pending row.
+        unverified: tuple[str, ...] = ()
         if diff.deleted:
-            await asyncio.to_thread(store.delete_file_chunks, project_id, diff.deleted)
-            state.delete_files(conn, project_id, diff.deleted)
+            if unwalked is None:
+                provable: tuple[str, ...] = ()
+                unverified = tuple(diff.deleted)
+            elif unwalked:
+                provable = tuple(p for p in diff.deleted if not _under(p, unwalked))
+                unverified = tuple(p for p in diff.deleted if _under(p, unwalked))
+            else:
+                provable = tuple(diff.deleted)
+            if provable:
+                await asyncio.to_thread(
+                    store.delete_file_chunks, project_id, provable
+                )
+                state.delete_files(conn, project_id, provable)
+                files_deleted = len(provable)
 
         if orphan_paths:
             # Drift cleanup: points whose file_path is neither tracked in
@@ -418,9 +662,43 @@ async def execute_run(
         # stale, and — unlike chunk/embed failures — it never entered
         # to_index, so without this it would be invisible to every guard
         # below and silently stranded by the next fast path.
-        hash_errors = [(path, f"hash failed: {msg}") for path, msg in diff.errored]
-        if file_errors or hash_errors:
-            state.record_file_errors(conn, run_id, [*file_errors, *hash_errors])
+        #
+        # `diff.errored` carries both stages: hashdiff's own read failures and
+        # the file-level discovery failures handed to it as
+        # `discovery_errored`. They are disjoint (a file discovery could not
+        # screen never reaches `discovered`, so it is never hashed), and the
+        # stage belongs in the message — an operator chasing a permission
+        # error should not be pointed at hashing when the stat failed.
+        discovery_failed = {path for path, _ in disc_errors.files}
+        hash_errors = [
+            (
+                path,
+                f"{'discovery' if path in discovery_failed else 'hash'} "
+                f"failed: {msg}",
+            )
+            for path, msg in diff.errored
+        ]
+        # Dir-level discovery errors are run failures too: an unseen subtree
+        # leaves its files' true state unknown, so they must block anchor
+        # advance exactly like hash failures. (File-level discovery errors
+        # already arrive here via diff.errored / discovery_errored.)
+        #
+        # Kept in their OWN list rather than folded into hash_errors, because
+        # they are the only entries here that are not file paths — a directory
+        # rel, or the `<root>` sentinel. They belong in run_file_errors (an
+        # operator needs to see which subtree failed) but must never reach
+        # `failed_paths`, which the caller re-pends as file rows: a scoped
+        # retry matches its candidate set exactly, so a directory candidate
+        # matches nothing, indexes nothing, and then clears its own pending
+        # row. The stored files under that subtree are already re-queued the
+        # right way, as themselves, via `unverified`.
+        dir_errors = [
+            (dir_rel, f"discovery failed: {msg}") for dir_rel, msg in disc_errors.dirs
+        ]
+        if file_errors or hash_errors or dir_errors:
+            state.record_file_errors(
+                conn, run_id, [*file_errors, *hash_errors, *dir_errors]
+            )
         # Partial failure is still a completed run (ADR-41); a run where
         # every file failed is not "done" by any honest reading — likely an
         # infrastructure problem (store/embedder down) wearing per-file dress.
@@ -451,9 +729,27 @@ async def execute_run(
             and len(file_errors) == len(to_index)
             and known_good_remainder == 0
         )
-        hash_all_failed = bool(hash_errors) and diff.verified + diff.skipped == 0
+        # dir_errors counts here as well as hash_errors: a root that could not
+        # be scanned at all produces ONLY a dir error, and that is the exact
+        # whole-tree outage this check exists to catch.
+        hash_all_failed = (
+            bool(hash_errors) or bool(dir_errors)
+        ) and diff.verified + diff.skipped == 0
         all_failed = chunk_embed_all_failed or hash_all_failed
-        total_failed = len(file_errors) + len(hash_errors)
+        total_failed = len(file_errors) + len(hash_errors) + len(dir_errors)
+        # `total_failed` counts directory entries too, so the file-count
+        # wording lies for the shape that produces ONLY dir errors — an
+        # unreadable or empty root reported "all 1 files failed" with zero
+        # files failed (PR #24 review).
+        if not all_failed:
+            run_error = None
+        elif dir_errors and not file_errors and not hash_errors:
+            run_error = (
+                f"discovery failed for {len(dir_errors)} location(s); "
+                "no files could be verified"
+            )
+        else:
+            run_error = f"all {total_failed} files failed"
         state.finish_run(
             conn,
             run_id,
@@ -466,12 +762,24 @@ async def execute_run(
             if fast_path_active and candidates is not None
             else None,
             files_failed=total_failed,
-            error=f"all {total_failed} files failed" if all_failed else None,
+            error=run_error,
         )
+        if paths is not None:
+            # Scoped runs never advance the anchor, so the H1 dirty-set write
+            # below never fires for them — persist what they DID index here,
+            # or content indexed only by scoped runs is invisible to the H1
+            # re-admission and a revert-while-unwatched stays stale forever.
+            # Union-only: can only widen the next fast path's candidate set
+            # (§3.2 rule-1 safe).
+            failed = {path for path, _ in file_errors}
+            indexed_ok = [rel for rel in to_index if rel not in failed]
+            if indexed_ok:
+                state.add_dirty_paths(conn, project_id, indexed_ok)
         # A run with failed files must not advance the git anchor either:
         # the failed files' state rows are stale, and anchoring past them
         # would let the next fast path carry them forward as unchanged.
-        if head is not None and not file_errors and not hash_errors:
+        clean_run = not file_errors and not hash_errors and not dir_errors
+        if head is not None and clean_run:
             # Persist the working-tree-dirty set with the anchor (H1). The
             # fast path already captured it at run start (git_info); a
             # full-walk run re-queries `git status` here.
@@ -483,6 +791,19 @@ async def execute_run(
                     or frozenset()
                 )
             state.set_last_indexed_commit(conn, project_id, head, dirty_paths=new_dirty)
+        elif candidates is None and clean_run:
+            # Clean FULL walk with no anchor to record — a non-git root, or
+            # git unavailable. `set_last_indexed_commit` is the only other
+            # writer that shrinks the H1 dirty set, and it needs a commit, so
+            # without this the union in `add_dirty_paths` only ever grows: on a
+            # non-git watched project every scoped run adds what it indexed and
+            # nothing ever removes it, and indexer's H1 re-admission unions the
+            # whole accumulation back into the next scoped candidate set. It
+            # would creep toward "re-hash every file ever indexed" on every
+            # watcher run. Safe to drop here and only here: a full walk hashed
+            # every discovered file, so no stored hash is stale and nothing is
+            # owed re-admission.
+            state.clear_dirty_paths(conn, project_id)
         # Completion milestone: counts + duration, so a finished run is visible
         # even when the dashboard isn't being watched. errors is a count; the
         # failed paths themselves stay at DEBUG (ADR-25 exposure).
@@ -500,21 +821,32 @@ async def execute_run(
             logger.debug(
                 "index run %s failed paths: %s",
                 run_id,
-                ", ".join(path for path, _ in (*file_errors, *hash_errors)),
+                ", ".join(
+                    path for path, _ in (*file_errors, *hash_errors, *dir_errors)
+                ),
             )
         return IndexResult(
             project_id=project_id,
             run_id=run_id,
             files_total=len(discovered),
             files_indexed=len(to_index) - len(file_errors),
-            files_deleted=len(diff.deleted),
+            files_deleted=files_deleted,
             chunks_written=chunks_written,
             fast_path_used=fast_path_active,
             candidate_count=len(candidates)
             if fast_path_active and candidates is not None
             else None,
             files_failed=total_failed,
-            failed_paths=tuple(path for path, _ in (*file_errors, *hash_errors)),
+            # `unverified` is a retry list, not an error list: it carries no
+            # run_file_errors row and is not counted in files_failed (nothing
+            # failed on those paths — the run simply never reached them).
+            # `dir_errors` is deliberately absent: every entry here is re-pended
+            # as a file row by the caller, and a directory or the `<root>`
+            # sentinel can never match a scoped run's exact candidate set.
+            failed_paths=(
+                *(path for path, _ in (*file_errors, *hash_errors)),
+                *(p for p in unverified),
+            ),
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

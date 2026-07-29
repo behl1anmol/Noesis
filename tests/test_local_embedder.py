@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -180,6 +181,32 @@ async def test_close_is_idempotent_and_rejects_new_work():
 async def test_close_before_any_work_is_safe():
     embedder = make_embedder(FakeModel())
     embedder.close()
+
+
+async def test_close_is_bounded_while_worker_is_stuck_in_model_load():
+    """Shutdown must not hang on ``worker.join()`` while the worker is mid
+    model-load (the cold-cache download can take minutes): the join is bounded
+    at 5s and the daemon worker is abandoned. Pre-fix, close() blocked until
+    the load finished — here ~60s, the stall cap that also keeps a regression
+    from hanging the suite forever."""
+    load_started = threading.Event()
+    release = threading.Event()
+    model = FakeModel()
+
+    def stuck_load():
+        load_started.set()
+        release.wait(timeout=60.0)  # hard cap: regression fails, never hangs
+        return model
+
+    embedder = LocalSTEmbedder(dim=4, _load_model=stuck_load)
+    pending = asyncio.ensure_future(embedder.embed_query("held"))
+    assert await asyncio.to_thread(load_started.wait, 5.0)
+    started = time.monotonic()
+    embedder.close()
+    elapsed = time.monotonic() - started
+    assert elapsed < 6.0, f"close() blocked {elapsed:.1f}s on a stuck worker"
+    release.set()
+    await pending  # abandoned worker still finishes the in-flight job
 
 
 def test_constructor_defaults():

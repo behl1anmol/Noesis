@@ -330,6 +330,77 @@ def set_last_indexed_commit(
     conn.commit()
 
 
+def add_dirty_paths(
+    conn: sqlite3.Connection, project_id: str, paths: Iterable[str]
+) -> None:
+    """Union *paths* into the persisted dirty set (H1) WITHOUT touching
+    ``last_indexed_commit``. Scoped (watcher) runs never advance the anchor,
+    so :func:`set_last_indexed_commit` never fires for them — yet the dirty
+    content they indexed must still be re-admitted by the next fast path.
+    Union-only: it can only widen the candidate set (§3.2 rule-1 safe).
+
+    The read and the write run in one ``BEGIN IMMEDIATE`` transaction. In
+    practice ``try_start_run`` already serializes runs per project, even
+    across processes, and this is only called from inside a run — but that
+    invariant lives in another function, and a lost union here silently
+    reopens the H1 gap this exists to close. Self-protecting beats
+    depending on a caller's lock.
+
+    Runs on the caller's thread — ``execute_run`` calls it directly from the
+    event loop — and ``BEGIN IMMEDIATE`` takes SQLite's write lock at the
+    first statement rather than at commit. Under a foreign writer (the other
+    transport mid-run) it can therefore block the loop for up to the shared
+    connection's ``busy_timeout`` of 5s, once per scoped run. Accepted
+    deliberately: the alternative is a dedicated short-timeout connection
+    like telemetry's, which DROPS its write when the lock is contended — and
+    unlike a telemetry row, a dropped union is a correctness loss that
+    silently reopens the H1 gap. A bounded stall beats silent data loss. It
+    must not be moved to a worker thread either: the shared connection is
+    loop-owned, and a worker-thread write interleaving inside another
+    operation's open transaction is the hazard ``jobs.index_status``
+    documents.
+    """
+    new = set(paths)
+    if not new:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT dirty_paths FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return
+        current: set[str] = (
+            set(json.loads(row["dirty_paths"])) if row["dirty_paths"] else set()
+        )
+        conn.execute(
+            "UPDATE projects SET dirty_paths = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(sorted(current | new)), _now(), project_id),
+        )
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
+def clear_dirty_paths(conn: sqlite3.Connection, project_id: str) -> None:
+    """Empty the persisted H1 dirty set without touching the anchor.
+
+    :func:`set_last_indexed_commit` is the only other writer that shrinks it,
+    and it requires a commit — so a project with no git anchor (non-git root,
+    or git unavailable) had no way to shrink the set at all and grew it
+    without bound. Callers must have completed a clean FULL walk: that
+    re-hashes every discovered file, so nothing is left needing H1
+    re-admission. A blind write, unlike :func:`add_dirty_paths`'s
+    read-modify-write, so it needs no explicit transaction."""
+    conn.execute(
+        "UPDATE projects SET dirty_paths = ?, updated_at = ? WHERE id = ?",
+        (json.dumps([]), _now(), project_id),
+    )
+    conn.commit()
+
+
 def get_dirty_paths(conn: sqlite3.Connection, project_id: str) -> frozenset[str]:
     """The dirty-path set persisted at the last anchor advance (H1). Empty
     when unset or the project is unknown."""
@@ -543,11 +614,35 @@ def finish_run(
     files_failed: int | None = None,
     error: str | None = None,
 ) -> None:
+    """Close out a run row: status, counters, finish time, error.
+
+    The counters are written with ``COALESCE(?, col)`` so passing ``None``
+    leaves the stored value alone instead of erasing it. That matters because
+    this can legitimately be called **twice** for one run: ``execute_run``
+    writes ``"done"`` with a full set of counters, and only afterwards does its
+    remaining bookkeeping — ``add_dirty_paths`` (which takes SQLite's write
+    lock under ``BEGIN IMMEDIATE`` and raises ``OperationalError`` past the
+    5s ``busy_timeout``), the anchor write, and a ``git status`` subprocess.
+    Any of those raising lands in the ``except BaseException`` handler, which
+    calls this again with a status and an error and nothing else. Under the
+    old unconditional ``SET``, that second call blanked every counter the
+    first had committed — a run whose content was fully indexed showed up on
+    the dashboard as failed with no numbers at all (PR #24 round-8 review).
+
+    ``status``, ``error`` and ``finished_at`` stay unconditional: the whole
+    point of the second call is to overwrite those three, and ``error`` must
+    be able to move back to NULL as well as to a message.
+    """
     conn.execute(
         """
         UPDATE index_runs SET
-          status = ?, files_total = ?, files_changed = ?, chunks_written = ?,
-          fast_path_used = ?, candidate_count = ?, files_failed = ?,
+          status = ?,
+          files_total     = COALESCE(?, files_total),
+          files_changed   = COALESCE(?, files_changed),
+          chunks_written  = COALESCE(?, chunks_written),
+          fast_path_used  = COALESCE(?, fast_path_used),
+          candidate_count = COALESCE(?, candidate_count),
+          files_failed    = COALESCE(?, files_failed),
           finished_at = ?, error = ?
         WHERE id = ?
         """,

@@ -474,7 +474,7 @@ async def delete_project(ctx: Any, project_id: str) -> bool:
             break
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-    ctx.store.delete_project_points(project_id)
+    await asyncio.to_thread(ctx.store.delete_project_points, project_id)
     state.delete_project(ctx.conn, project_id)
     logger.info("project %s deleted (%s)", project_id, project["root_path"])
     return True

@@ -40,9 +40,22 @@ If no file is found, all defaults apply.
 | `model` | str | `BAAI/bge-reranker-v2-m3` | Cross-encoder model id. |
 | `enabled` | bool | `false` | Kill switch **and** per-request default: `false` never loads the model and requests cannot opt in; `true` makes `rerank` default on with per-request opt-out ([ADR-34](../project/decisions.md)). Default-off is the measured M4 gate decision ([ADR-35](../project/decisions.md)). |
 | `preload` | bool | `false` | `true` loads the ~568M model at startup instead of on first reranked request. |
-| `candidates` | int ≥ 0 | `50` | Fused candidates passed to the reranker per request. |
+| `candidates` | int > 0 | `50` | Fused candidates passed to the reranker per request, and the per-channel prefetch depth. Zero is rejected at load. It does **not** empty the result set — `retriever.search_code` clamps both values with `max(top_k, candidates)` — but it collapses the rerank pool and the RRF prefetch to `top_k`, so a hit ranked just outside one channel's `top_k` loses that channel's RRF contribution entirely and can drop out of the fused results. The cost is **silent recall loss**, with nothing in the response to indicate it. See the note below on what the validator can and cannot enforce. |
 | `batch_size` | int > 0 | `16` | Pairs scored per cross-encoder batch. |
 | `device` | str | unset | Same semantics as `embedder.device`. |
+
+!!! note "What the `candidates > 0` check does and does not enforce"
+    The harm above is really about `candidates` falling below `top_k`, and the
+    validator cannot check that: `top_k` is a **per-request** value
+    (`1..100`), while `candidates` is read once at startup. There is no load
+    time at which the relationship is known.
+
+    So `> 0` rejects the one value that is never defensible under any `top_k`,
+    and nothing more. `candidates=1` is accepted and, at any `top_k > 1`,
+    behaves exactly like `0` would — same clamp, same collapsed pool. If you
+    are tuning this, the rule that matters is **keep `candidates` at or above
+    the largest `top_k` you expect to serve**; the default of `50` sits
+    comfortably above the default `top_k` of `10`.
 
 ## `[structural]`
 
