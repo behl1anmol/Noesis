@@ -168,10 +168,16 @@ def project_detail(ctx: Any, project_id: str) -> dict[str, Any] | None:
     for row in state.list_unwalkable_dirs(ctx.conn, project_id):
         dir_path = row["dir_path"]
         if is_attributable_prefix(dir_path):
+            # Prefix match without LIKE: `_` is a single-character wildcard
+            # there, and directory names contain underscores constantly, so
+            # `src/my_module` also matched `src/myXmodule/...` and inflated the
+            # count (PR #30 review). `substr` compares the separator-terminated
+            # prefix literally — the same containment rule `indexer._under`
+            # applies, which is why `pkg` must not match `pkg2/`.
             hidden = ctx.conn.execute(
                 "SELECT COUNT(*) AS n FROM files WHERE project_id = ?"
-                " AND (path = ? OR path LIKE ? || '/%')",
-                (project_id, dir_path, dir_path),
+                " AND (path = ? OR substr(path, 1, length(?) + 1) = ? || '/')",
+                (project_id, dir_path, dir_path, dir_path),
             ).fetchone()["n"]
         else:
             # `<root>`, or a path outside the root: no prefix describes it, so

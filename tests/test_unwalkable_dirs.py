@@ -408,6 +408,43 @@ def test_promotion_fires_when_the_candidate_set_stops_being_narrow(tmp_path) -> 
     assert reason is not None and "candidate set" in reason
 
 
+def test_the_fraction_trigger_does_not_latch_on_an_undrainable_dirty_set(
+    tmp_path,
+) -> None:
+    """Raised by the PR #30 review. A live ledger row means every run reports a
+    directory error, so `clean_run` is false and neither drain fires — the H1
+    dirty set is pinned. Counting it toward the fraction trigger latched that
+    trigger permanently at the first crossing: it fired on a number promotion
+    is structurally incapable of moving, so every launch thereafter promoted to
+    a full walk. Same "guard that can fire forever" shape this module removes,
+    reached from the other side.
+
+    `pending` still counts — those paths really changed and a promotion really
+    does clear them."""
+    ctx = make_ctx(
+        tmp_path, promote_after_scoped_runs=0, promote_candidate_fraction=0.25
+    )
+    root = tmp_path / "proj"
+    root.mkdir()
+    pid = state.register_project(ctx.conn, root, ctx.embedder.model_id)
+    for i in range(20):
+        state.upsert_file(ctx.conn, pid, f"f{i}.py", f"h{i}")
+    state.add_dirty_paths(ctx.conn, pid, [f"f{i}.py" for i in range(6)])
+
+    # Healthy project: the dirty set is drainable, so it counts and fires.
+    assert jobs._promotion_reason(ctx, pid, ["f0.py"]) is not None
+
+    # Same set, now known-undrainable: it must stop counting.
+    state.reconcile_unwalkable_dirs(
+        ctx.conn, pid, reported=[("pkg", "EACCES")], cleared=[], quarantine_after=99
+    )
+    assert jobs._promotion_reason(ctx, pid, ["f0.py"]) is None
+
+    # ...but a genuinely large pending set still promotes.
+    many = [f"f{i}.py" for i in range(8)]
+    assert jobs._promotion_reason(ctx, pid, many) is not None
+
+
 def test_an_unattributable_ledger_row_forces_a_full_walk(tmp_path) -> None:
     """A vanished root leaves every stored path unverified, and no scoped run
     can be wide enough to help. The re-admission union deliberately skips these
@@ -686,6 +723,38 @@ def test_project_detail_counts_the_files_each_directory_hides(tmp_path) -> None:
     # `<root>` describes no subtree, so everything is behind it.
     assert hidden["<root>"] == 4
     assert detail["unwalkable_count"] == 2
+
+
+def test_files_hidden_does_not_treat_underscores_as_wildcards(tmp_path) -> None:
+    """Raised by the PR #30 review. The count was built with
+    `path LIKE ? || '/%'`, where `_` is a single-character wildcard — so
+    `src/my_module` also matched `src/myXmodule/...`. Underscores are ubiquitous
+    in directory names, so this inflated silently and constantly, on precisely
+    the number an operator uses to judge whether a quarantine covers a stray
+    subdirectory or most of the project."""
+    from noesis.core import dashboard
+
+    ctx = make_ctx(tmp_path)
+    root = tmp_path / "proj"
+    root.mkdir()
+    pid = state.register_project(ctx.conn, root, ctx.embedder.model_id)
+    for path in (
+        "src/my_module/a.py",
+        "src/my_module/c.py",
+        "src/myXmodule/b.py",  # the LIKE false positive
+        "src/my_module2/d.py",  # prefix without a separator — also not hidden
+    ):
+        state.upsert_file(ctx.conn, pid, path, "h")
+    state.reconcile_unwalkable_dirs(
+        ctx.conn,
+        pid,
+        reported=[("src/my_module", "EACCES")],
+        cleared=[],
+        quarantine_after=99,
+    )
+
+    detail = dashboard.project_detail(ctx, pid)
+    assert detail["unwalkable_dirs"][0]["files_hidden"] == 2
 
 
 def test_indexing_settings_reject_an_out_of_range_fraction(tmp_path) -> None:

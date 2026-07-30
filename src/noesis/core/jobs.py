@@ -61,14 +61,12 @@ def _promotion_reason(
     ``0`` — the whole policy off restores exactly the pre-ADR-57 behaviour.
     """
     cfg = getattr(ctx, "indexing", None) or IndexingSettings()
+    unwalkable = state.list_unwalkable_dirs(ctx.conn, project_id)
     # 1. An unattributable discovery failure (a vanished root, a dead mount)
     #    leaves EVERY stored path unverified. A scoped run cannot make progress
     #    on that — its candidate set is by definition narrower than the damage
     #    — so the only useful next run is a full one.
-    if any(
-        not is_attributable_prefix(row["dir_path"])
-        for row in state.list_unwalkable_dirs(ctx.conn, project_id)
-    ):
+    if any(not is_attributable_prefix(row["dir_path"]) for row in unwalkable):
         return "an unattributable discovery failure leaves the whole index unverified"
     # 2. Enough scoped runs have gone by that the drains are overdue.
     if cfg.promote_after_scoped_runs > 0:
@@ -82,7 +80,29 @@ def _promotion_reason(
     if cfg.promote_candidate_fraction > 0:
         indexed = state.indexed_file_count(ctx.conn, project_id)
         if indexed:
-            effective = len(set(paths) | state.get_dirty_paths(ctx.conn, project_id))
+            # The H1 dirty set counts toward the threshold only when a
+            # promotion could actually shrink it (PR #30 review). A live
+            # ledger row means every run reports a directory error, so
+            # `clean_run` is false and NEITHER drain fires — `clear_dirty_paths`
+            # and the anchor write are both gated on it. The set is pinned, so
+            # counting it would latch this trigger permanently at the first
+            # crossing and promote every launch thereafter, on a number
+            # promotion is structurally incapable of moving. That is the same
+            # "a guard that can fire forever has no exit" shape this module
+            # exists to remove, reached from the other side. Measured on a
+            # 20-file project with one permanently unreadable directory: 5 of
+            # 12 launches promoted with the set counted, 3 of 12 without —
+            # against 3 of 12 for a healthy project of the same size.
+            #
+            # `pending` is still counted: those paths really did change, a
+            # promotion really does clear them, and the cost argument holds.
+            # Triggers 1 and 2 keep covering the unwalkable case on their own
+            # cadence, so nothing stops being re-probed. Draining the pinned
+            # set at all is issue #28.
+            candidates = set(paths)
+            if not unwalkable:
+                candidates |= state.get_dirty_paths(ctx.conn, project_id)
+            effective = len(candidates)
             if effective >= cfg.promote_candidate_fraction * indexed:
                 return (
                     f"effective candidate set is {effective} of {indexed} indexed "

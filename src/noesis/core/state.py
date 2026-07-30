@@ -114,6 +114,14 @@ CREATE TABLE IF NOT EXISTS unwalkable_dirs (
   quarantined_at   TEXT,
   PRIMARY KEY (project_id, dir_path)
 );
+
+-- `index_runs` is append-only for the life of a project (only delete_project
+-- removes rows), and the promotion trigger reads it twice per launch — now on
+-- every watcher quiet cycle, not just on manual actions. Both halves of
+-- `scoped_runs_since_full` filter on project_id and order by started_at
+-- (PR #30 review).
+CREATE INDEX IF NOT EXISTS idx_index_runs_project_started
+  ON index_runs (project_id, started_at);
 """
 
 # Additive column migrations for DBs created by earlier milestones —
@@ -985,6 +993,14 @@ def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
     watcher runs on such a project: 3 full walks under this rule versus 9 under
     a clean-only rule — every run, on the population issue #25 is about, where
     the walk is slowest (9p/network mounts, ADR-45).
+
+    That comparison isolates this trigger (``promote_candidate_fraction`` at
+    0), and it is only representative of the shipped defaults because the
+    fraction trigger is separately stopped from latching the same way: it
+    excludes the H1 dirty set once a ledger row makes that set undrainable
+    (see ``jobs._promotion_reason``). Before that fix the two latches
+    compounded and the real figure at defaults was worse than the 3 quoted here
+    — which is what the PR #30 review caught.
 
     Nor would that buy a drain. The drain is blocked by the discovery error
     itself, not by the promotion cadence, so promoting harder just re-walks a
