@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 from typing import Any, Protocol, Sequence
 
 from noesis.core import state
-from noesis.core.indexer import execute_run
+from noesis.core.config import IndexingSettings
+from noesis.core.indexer import execute_run, is_attributable_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,54 @@ class _ContextLike(Protocol):
     progress: dict[str, dict[str, Any]]
     git_fast_path: bool
     embed_batch_size: int
+    indexing: IndexingSettings
+
+
+def _promotion_reason(
+    ctx: _ContextLike, project_id: str, paths: Sequence[str]
+) -> str | None:
+    """Why this scoped run should become a full walk instead — or None.
+
+    Every automated trigger in the service is scoped (``watcher``'s two, and
+    the dashboard's two), and only a FULL run drains the H1 dirty set or
+    advances the git anchor: ``clear_dirty_paths`` needs ``candidates is None``
+    and ``set_last_indexed_commit`` needs a commit, neither of which a scoped
+    run can produce (ADR-40). So without a promotion rule a watched project
+    never gets a full walk again after its first one, and both the dirty set
+    and any unwalkable-directory state stay latched (issue #25).
+
+    Three triggers, cheapest test first. Each is independently disableable with
+    ``0`` — the whole policy off restores exactly the pre-ADR-57 behaviour.
+    """
+    cfg = getattr(ctx, "indexing", None) or IndexingSettings()
+    # 1. An unattributable discovery failure (a vanished root, a dead mount)
+    #    leaves EVERY stored path unverified. A scoped run cannot make progress
+    #    on that — its candidate set is by definition narrower than the damage
+    #    — so the only useful next run is a full one.
+    if any(
+        not is_attributable_prefix(row["dir_path"])
+        for row in state.list_unwalkable_dirs(ctx.conn, project_id)
+    ):
+        return "an unattributable discovery failure leaves the whole index unverified"
+    # 2. Enough scoped runs have gone by that the drains are overdue.
+    if cfg.promote_after_scoped_runs > 0:
+        since = state.scoped_runs_since_full(ctx.conn, project_id)
+        if since >= cfg.promote_after_scoped_runs:
+            return f"{since} scoped run(s) since the last completed full walk"
+    # 3. The candidate set is no longer narrow enough to be worth scoping.
+    #    Discovery already stats and binary-sniffs every file on every run, so
+    #    past this point a scoped run costs about what the full walk costs
+    #    while delivering none of its drains.
+    if cfg.promote_candidate_fraction > 0:
+        indexed = state.indexed_file_count(ctx.conn, project_id)
+        if indexed:
+            effective = len(set(paths) | state.get_dirty_paths(ctx.conn, project_id))
+            if effective >= cfg.promote_candidate_fraction * indexed:
+                return (
+                    f"effective candidate set is {effective} of {indexed} indexed "
+                    f"file(s)"
+                )
+    return None
 
 
 def launch_index_run(
@@ -73,13 +122,36 @@ def launch_index_run(
     if not os.path.isdir(root_path):
         raise ValueError(f"root_path is not an existing directory: {root_path!r}")
     project_id = state.register_project(ctx.conn, root_path, ctx.embedder.model_id)
+    # Promote a scoped run to a full walk when the scoped path has stopped
+    # paying for itself (ADR-57). Decided HERE, before the run row is opened,
+    # because `paths` feeds both `execute_run` and the `clear_pending_changes`
+    # below — setting it to None in one place keeps the run and its pending
+    # clear describing the same thing. Doing it inside `execute_run` instead
+    # would leave the caller clearing only the old scoped set after a walk that
+    # examined everything.
+    #
+    # Never promoted under `force`: that flag lets an empty discovery result
+    # purge the index, and applying it to a whole tree the caller had
+    # deliberately scoped is not what the operator asserted. (Unreachable
+    # today — the only `force` caller passes no paths — but the guard is the
+    # cheap half of that pairing.)
+    if paths is not None and not force:
+        reason = _promotion_reason(ctx, project_id, paths)
+        if reason is not None:
+            logger.info(
+                "project %s: promoting a %d-path scoped run to a full walk (%s)",
+                project_id,
+                len(paths),
+                reason,
+            )
+            paths = None
     # Atomic check-and-insert (state.try_start_run, BEGIN IMMEDIATE): a plain
     # read-then-insert is race-free on one event loop but not across the
     # dual-transport deployment (HTTP + stdio MCP sharing this DB), where two
     # near-simultaneous launches could both pass the check and race two index
     # runs onto the same collection.
     run_id, created = state.try_start_run(
-        ctx.conn, project_id, triggered_by=triggered_by
+        ctx.conn, project_id, triggered_by=triggered_by, scoped=paths is not None
     )
     if not created:
         return {
@@ -116,6 +188,9 @@ def launch_index_run(
                 git_fast_path=ctx.git_fast_path,
                 paths=paths,
                 force=force,
+                unwalkable_quarantine_runs=(
+                    getattr(ctx, "indexing", None) or IndexingSettings()
+                ).unwalkable_quarantine_runs,
                 on_progress=_on_progress,
             )
         except Exception:
@@ -197,7 +272,14 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     that rule is worth stating: while a run is actively committing, ``drift``
     reads False even if the store genuinely lost data — the first call after
     the run settles reports it. A false negative for a few seconds beats a
-    false positive on every status poll during every index run."""
+    false positive on every status poll during every index run.
+
+    ``unwalkable_dirs`` / ``quarantined_dirs`` (ADR-56) are the coverage half
+    of the same health picture: directories discovery could not walk, and the
+    subset that has failed long enough for their contents to stop being
+    re-queued. Both zero is the healthy state. Non-zero does not mean anything
+    was deleted — nothing under an unwalked directory is ever purged — it means
+    what is indexed there cannot be proven current."""
     # Index health: what the state DB expects vs what Qdrant actually holds.
     # A mismatch is drift — a vector store that lost data (external collection
     # wipe) while state still reports the files indexed. Surfaced so agents
@@ -217,6 +299,13 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     expected_after = state.expected_chunk_total(ctx.conn, project_id)
     drift = expected_chunks == expected_after and expected_after != vector_count
     expected_chunks = expected_after
+    # Coverage health, alongside the store health above (ADR-56). `drift` says
+    # the store lost content it should hold; these say part of the TREE was
+    # never read, so what is indexed for it may be stale and cannot be proven
+    # otherwise. An agent searching a project is entitled to know that before
+    # trusting an answer, which is why this rides the shared REST/MCP shape and
+    # not just the dashboard.
+    unwalkable, quarantined = state.count_unwalkable_dirs(ctx.conn, project_id)
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {
@@ -232,6 +321,8 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
             "expected_chunks": expected_chunks,
             "vector_count": vector_count,
             "drift": drift,
+            "unwalkable_dirs": unwalkable,
+            "quarantined_dirs": quarantined,
         }
     return {
         "project_id": project_id,
@@ -246,4 +337,6 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
         "expected_chunks": expected_chunks,
         "vector_count": vector_count,
         "drift": drift,
+        "unwalkable_dirs": unwalkable,
+        "quarantined_dirs": quarantined,
     }

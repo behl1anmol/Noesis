@@ -28,6 +28,24 @@ from .vectorstore import VectorStore
 logger = logging.getLogger(__name__)
 
 
+def is_attributable_prefix(dir_rel: str) -> bool:
+    """True when *dir_rel* is a root-relative prefix ``_under`` can test.
+
+    False for the three shapes that describe no subtree of this project: the
+    empty string, the ``<root>`` sentinel, and a path outside the root (an
+    absolute name, or one reached by ``../``) — which discovery records when
+    ``relative_to`` fails. Public because the promotion policy in ``jobs`` asks
+    the same question of a stored ledger row: an unattributable failure leaves
+    the *whole* index unverified, which no scoped run can make progress on.
+    """
+    return bool(
+        dir_rel
+        and dir_rel != "<root>"
+        and not os.path.isabs(dir_rel)
+        and not dir_rel.startswith("../")
+    )
+
+
 def _unwalked_prefixes(
     disc_errors: DiscoveryErrors, *, follow_symlinks: bool
 ) -> tuple[str, ...] | None:
@@ -58,9 +76,7 @@ def _unwalked_prefixes(
         return None
     prefixes: list[str] = []
     for dir_rel, _ in disc_errors.dirs:
-        if not dir_rel or dir_rel == "<root>":
-            return None
-        if os.path.isabs(dir_rel) or dir_rel.startswith("../"):
+        if not is_attributable_prefix(dir_rel):
             return None
         prefixes.append(dir_rel)
     return tuple(prefixes)
@@ -101,6 +117,14 @@ class IndexResult:
     # it. Whether a whole-index re-pend should happen at all is the open
     # question in issue #25, not a property of this field.
     failed_paths: tuple[str, ...] = ()
+    # Paths this run left OUT of `failed_paths` because the directory hiding
+    # them is quarantined (ADR-56): it has failed to be walked for
+    # `unwalkable_quarantine_runs` consecutive runs, so re-pending them every
+    # run was a backlog that could never drain. They are still not deleted —
+    # quarantine bounds the RETRY, never the deletion policy — and the run that
+    # finds the directory walkable again re-hashes them all. Reported here so
+    # "we stopped retrying N paths" is never a silent drop.
+    unverified_suppressed: int = 0
 
 
 # Live-progress callback: (files_done, files_to_index, chunks_written).
@@ -190,6 +214,7 @@ async def execute_run(
     git_fast_path: bool = True,
     paths: Sequence[str] | None = None,
     force: bool = False,
+    unwalkable_quarantine_runs: int = 5,
     on_progress: ProgressFn | None = None,
 ) -> IndexResult:
     """Index changes for an already-registered project under an open run.
@@ -211,6 +236,14 @@ async def execute_run(
     distinguishes an emptied root from an unmounted one, so the assertion
     has to come from an operator (ADR-55). It relaxes nothing else — a
     directory that failed to scan still suppresses deletions under it.
+
+    *unwalkable_quarantine_runs* is how many consecutive runs a directory must
+    fail to be walked before the stored paths it hides stop being re-queued for
+    retry (ADR-56). ``0`` disables quarantine. It relaxes nothing about
+    deletion either: a quarantined subtree's files are still never purged, and
+    the run that finds the directory readable again re-hashes every one of
+    them. All it bounds is the ``pending_changes`` backlog, which under a
+    permanently unreadable directory could otherwise never drain (issue #25).
     """
     if paths is not None:
         git_fast_path = False
@@ -385,6 +418,65 @@ async def execute_run(
             follow_symlinks=(discovery_config or DiscoveryConfig()).follow_symlinks,
         )
 
+        # Directory-failure ledger (ADR-56). READ here, WRITTEN after the file
+        # loop — the order is load-bearing. Reconciling early would delete a
+        # recovered directory's row before the re-admission below had run, and
+        # a crash in between would lose the only record that its files were
+        # ever unverified: the ledger would say healthy, the files would carry
+        # stale hashes, and nothing would re-hash them.
+        ledger = state.list_unwalkable_dirs(conn, project_id)
+        reported_now = {dir_rel for dir_rel, _ in disc_errors.dirs}
+        prior_counts = {row["dir_path"]: row["consecutive_runs"] for row in ledger}
+        # Quarantine is judged on the count this run WILL have, not the stored
+        # one, so `unwalkable_quarantine_runs = N` means "suppressed on the Nth
+        # consecutive failure" rather than the N+1'th. The reconcile below
+        # applies the same >= test to the same post-increment number, so the
+        # decision here and the `quarantined_at` an operator reads agree.
+        quarantined: frozenset[str] = (
+            frozenset()
+            if unwalkable_quarantine_runs <= 0
+            else frozenset(
+                key
+                for key in set(prior_counts) | reported_now
+                if prior_counts.get(key, 0) + (1 if key in reported_now else 0)
+                >= unwalkable_quarantine_runs
+            )
+        )
+        # Recorded directories this walk proved walkable again. Requires
+        # `unwalked is not None`: when the failure cannot be attributed to a
+        # subtree the walk proved nothing about anything, so nothing clears.
+        # A recorded path that is not under what went unseen this run was
+        # reached — whether it is readable again, was deleted, or has been
+        # filtered out of scope. All three are correct resets, and none of them
+        # is a fault.
+        recovered = (
+            ()
+            if unwalked is None
+            else tuple(key for key in prior_counts if not _under(key, unwalked))
+        )
+        # Re-admit what the recovered subtrees hold, in the very run that
+        # observes the recovery. This is what makes it safe to stop re-pending
+        # a quarantined subtree: a file edited while its directory was
+        # unreadable lost its watcher event, so without this nothing would ever
+        # retry it. Widening-only, exactly like the H1 and drift unions
+        # (§3.2 rule 1). Unattributable rows are deliberately excluded — no
+        # prefix describes them, and unioning "everything" would silently turn
+        # a scoped run into a whole-index hash; those force a full walk through
+        # the promotion policy in `jobs` instead.
+        recovered_prefixes = tuple(k for k in recovered if is_attributable_prefix(k))
+        if recovered_prefixes and candidates is not None:
+            readmit = {p for p in discovered if _under(p, recovered_prefixes)}
+            if readmit:
+                logger.info(
+                    "index run %s: %d director(ies) walkable again — re-hashing "
+                    "%d file(s) under them to catch edits made while they were "
+                    "unreadable",
+                    run_id,
+                    len(recovered_prefixes),
+                    len(readmit),
+                )
+                candidates = gitfast.CandidatePathSet(set(candidates) | readmit)
+
         # Drift self-heal (ADR-49): the state DB can claim files are indexed
         # while Qdrant holds none of their points — an externally dropped or
         # recreated collection. Hash comparison then sees no content change,
@@ -398,9 +490,7 @@ async def execute_run(
         orphan_paths: list[str] = []
         stored_chunk_counts = state.get_file_chunk_counts(conn, project_id)
         expected_points = sum(stored_chunk_counts.values())
-        actual_points = await asyncio.to_thread(
-            store.count_project_points, project_id
-        )
+        actual_points = await asyncio.to_thread(store.count_project_points, project_id)
         if actual_points != expected_points:
             if paths is not None:
                 # Scoped (watcher) run: keep its narrow candidate set and its
@@ -484,9 +574,7 @@ async def execute_run(
                     # re-embed uses their true current hash (rule 1 safe).
                     # When candidates is None, partition already hashes the
                     # whole tree, so no union is needed.
-                    candidates = gitfast.CandidatePathSet(
-                        set(candidates) | drifted
-                    )
+                    candidates = gitfast.CandidatePathSet(set(candidates) | drifted)
 
         diff = await asyncio.to_thread(
             hashdiff.partition,
@@ -643,19 +731,49 @@ async def execute_run(
             else:
                 provable = tuple(diff.deleted)
             if provable:
-                await asyncio.to_thread(
-                    store.delete_file_chunks, project_id, provable
-                )
+                await asyncio.to_thread(store.delete_file_chunks, project_id, provable)
                 state.delete_files(conn, project_id, provable)
                 files_deleted = len(provable)
+
+        # Which unverified paths the caller should re-pend (ADR-56). Note what
+        # this block does NOT touch: `provable`, `files_deleted`, and the
+        # deletion above already happened on ADR-51/54's terms alone. Quarantine
+        # decides only whether a path is queued for RETRY — never whether it is
+        # deleted — so a quarantined subtree's chunks keep serving search
+        # forever, exactly as they did before this change.
+        repend = unverified
+        if unverified and quarantined:
+            if unwalked is None:
+                # No prefix describes what went unseen, so every stored path is
+                # unverified and the choice is all-or-nothing. Stand down only
+                # when EVERY directory reported this run is quarantined: one
+                # fresh failure means this run's doubt is new, and new doubt is
+                # exactly what the retry exists for.
+                if disc_errors.dirs and reported_now <= quarantined:
+                    repend = ()
+            else:
+                blocked = tuple(p for p in unwalked if p in quarantined)
+                if blocked:
+                    repend = tuple(p for p in unverified if not _under(p, blocked))
+        suppressed = len(unverified) - len(repend)
+        if suppressed:
+            logger.warning(
+                "index run %s: %d path(s) under %d quarantined director(ies) are "
+                "no longer being re-queued for retry — their indexed content is "
+                "KEPT and still searchable, not deleted, but it is no longer "
+                "being re-verified either. Fix the director(ies) (or narrow the "
+                "project's index scope) and the next run re-hashes them "
+                "automatically",
+                run_id,
+                suppressed,
+                len(reported_now & quarantined),
+            )
 
         if orphan_paths:
             # Drift cleanup: points whose file_path is neither tracked in
             # state nor on disk. No state rows correspond to them, so this
             # only prunes Qdrant; without it the drift gate keeps firing.
-            await asyncio.to_thread(
-                store.delete_file_chunks, project_id, orphan_paths
-            )
+            await asyncio.to_thread(store.delete_file_chunks, project_id, orphan_paths)
 
         # Hash-time failures (H7 carry-forward) are per-file failures too:
         # the file's true state is unknown this run, its stored hash may be
@@ -673,8 +791,7 @@ async def execute_run(
         hash_errors = [
             (
                 path,
-                f"{'discovery' if path in discovery_failed else 'hash'} "
-                f"failed: {msg}",
+                f"{'discovery' if path in discovery_failed else 'hash'} failed: {msg}",
             )
             for path, msg in diff.errored
         ]
@@ -692,13 +809,42 @@ async def execute_run(
         # matches nothing, indexes nothing, and then clears its own pending
         # row. The stored files under that subtree are already re-queued the
         # right way, as themselves, via `unverified`.
+        #
+        # A quarantined directory says so here, so the run row explains its own
+        # backlog: an operator looking at "why is this failing every run and
+        # why did the awaiting-reindex list empty out?" gets both halves in one
+        # place, rather than having to correlate a log line with a table.
         dir_errors = [
-            (dir_rel, f"discovery failed: {msg}") for dir_rel, msg in disc_errors.dirs
+            (
+                dir_rel,
+                f"discovery failed: {msg}"
+                + (
+                    " — quarantined after "
+                    f"{prior_counts.get(dir_rel, 0) + 1} consecutive failure(s):"
+                    " stored paths under it are no longer re-queued for retry."
+                    " They are NOT deleted; a run that walks this directory"
+                    " again re-hashes them"
+                    if dir_rel in quarantined
+                    else ""
+                ),
+            )
+            for dir_rel, msg in disc_errors.dirs
         ]
         if file_errors or hash_errors or dir_errors:
             state.record_file_errors(
                 conn, run_id, [*file_errors, *hash_errors, *dir_errors]
             )
+        # Fold this run's directory result into the ledger. Deliberately AFTER
+        # the file loop and the re-admission above: a crash before this point
+        # leaves the ledger untouched, so the next run redoes the union rather
+        # than believing a recovery that never got applied.
+        state.reconcile_unwalkable_dirs(
+            conn,
+            project_id,
+            reported=disc_errors.dirs,
+            cleared=recovered,
+            quarantine_after=unwalkable_quarantine_runs,
+        )
         # Partial failure is still a completed run (ADR-41); a run where
         # every file failed is not "done" by any honest reading — likely an
         # infrastructure problem (store/embedder down) wearing per-file dress.
@@ -845,8 +991,9 @@ async def execute_run(
             # sentinel can never match a scoped run's exact candidate set.
             failed_paths=(
                 *(path for path, _ in (*file_errors, *hash_errors)),
-                *(p for p in unverified),
+                *repend,
             ),
+            unverified_suppressed=suppressed,
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

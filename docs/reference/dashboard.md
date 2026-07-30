@@ -18,6 +18,7 @@ The dashboard is the human monitoring surface: three server-rendered Jinja2 page
 Drill into one project:
 
 - **Pending changes** — files the watcher has seen, with event type (created/modified/deleted) and detection time, waiting for *Index pending* or the auto-reindex quiet period.
+- **Unreadable directories** — see below; hidden when there are none.
 - **Failed files** — per-file errors of the most recent run (indexing continues past individual failures; failed files are retried next run).
 - **Recent runs** — status, trigger (manual vs watcher, with a *fast path* badge when git narrowing applied), files changed/failed, chunks written, duration, start time.
 
@@ -31,6 +32,37 @@ Drill into one project:
     ```
 
     `force` accepts the empty result as deletion evidence and does nothing else — a directory that failed to *scan* still suppresses deletions underneath it, forced or not. It is also deliberately absent from the MCP `reindex` tool, since the caller there is an agent rather than a person who can look at the disk.
+
+### Unreadable directories
+
+Directories discovery could not walk — a permissions change, a dead network
+mount, a subtree that disappeared out from under a stale handle. The panel
+appears only when there are some, and lists each with how many consecutive runs
+it has failed, how many indexed files sit behind it, when it was first seen, and
+the underlying error.
+
+The important thing to know reading it: **nothing under an unreadable directory
+is ever deleted from the index.** Discovery cannot see the files, and "I could
+not look" is not evidence that they are gone — so their content is kept and
+stays searchable. What is lost is only the *guarantee that it is current*.
+
+A directory that keeps failing eventually shows a **quarantined** tag. That
+means the files it hides have stopped being re-queued for retry, because
+retrying something that cannot be read produced a permanently non-draining
+"awaiting reindex" list. Quarantine changes nothing else — in particular it is
+still not permission to delete anything.
+
+Recovery is automatic and needs no action: the first run that manages to walk
+the directory again re-hashes everything under it, which picks up any edit made
+while it was unreadable, and the row disappears. The row also clears if the
+directory was genuinely deleted or has been filtered out of the project's index
+scope — in those cases its files then leave the index normally, because the walk
+reached the location and found nothing there.
+
+So the panel is a to-do list, not an error log. Either fix the directory (remount
+the disk, fix the permissions) or, if the exclusion is intentional, narrow the
+project's index scope so discovery stops trying. Thresholds are under
+[`[indexing]`](configuration.md#indexing).
 
 ## Usage (`/usage`)
 

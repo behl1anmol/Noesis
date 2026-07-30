@@ -17,7 +17,7 @@ from sqlite3 import Connection
 from qdrant_client import QdrantClient
 
 from noesis.core import state, telemetry
-from noesis.core.config import Settings, StructuralSettings
+from noesis.core.config import IndexingSettings, Settings, StructuralSettings
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
 from noesis.core.vectorstore import VectorStore
@@ -42,6 +42,10 @@ class AppContext:
     embed_batch_size: int = 32
     structural: StructuralSettings = field(default_factory=StructuralSettings)
     git_fast_path: bool = True
+    # ADR-56/57 thresholds, read by jobs.launch_index_run (promotion) and
+    # passed into execute_run (quarantine). Defaulted so every existing test
+    # context and any adapter that builds an AppContext by hand keeps working.
+    indexing: IndexingSettings = field(default_factory=IndexingSettings)
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
     # M8 (ADR-40): live run progress (jobs.run_progress reads it) and the
     # watcher manager, both owned by the lifespan.
@@ -156,6 +160,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         embed_batch_size=cfg.embedder.batch_size,
         structural=cfg.structural,
         git_fast_path=cfg.git.fast_path,
+        indexing=cfg.indexing,
         config_device_pin=cfg.embedder.device,
         config_reranker_device_pin=cfg.reranker.device,
     )

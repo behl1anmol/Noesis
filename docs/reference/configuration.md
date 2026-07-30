@@ -76,6 +76,28 @@ If no file is found, all defaults apply.
 |---|---|---|---|
 | `poll_interval_s` | float > 0 | `1.0` | Snapshot cadence of the polling observer, used only for watched roots on inotify-blind filesystems (9p/cifs/nfs/fuse — e.g. WSL2's `/mnt/c`). Natively watched roots never poll. |
 
+## `[indexing]`
+
+Recovery policy: how a project gets back to a full, anchored walk on its own.
+Every automated trigger (the watcher's two paths, the dashboard's two) runs
+*scoped*, and only a full run drains the working-tree-dirty set or advances the
+git anchor — so without these a project that hits a snag stays there until a
+human clicks Reindex.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `promote_after_scoped_runs` | int ≥ 0 | `20` | Promote a scoped run to a full walk once this many scoped runs have started since the last **completed** full one. A failed full run does not reset the counter — it did not drain anything. `0` disables. |
+| `promote_candidate_fraction` | float 0–1 | `0.25` | Promote when the effective candidate set (pending ∪ dirty) reaches this fraction of the indexed file count. Past that point a scoped run costs about what the full walk costs while delivering none of its drains, since discovery stats and binary-sniffs every file either way. `0` disables. |
+| `unwalkable_quarantine_runs` | int ≥ 0 | `5` | Consecutive runs a directory must fail to be walked before the indexed paths it hides stop being re-queued for retry. `0` disables, restoring a permanently non-draining backlog. |
+
+!!! note "Quarantine never deletes anything"
+    A quarantined directory's indexed content is **kept and stays searchable**.
+    Quarantine bounds only the *retry* — it has no say in deletion, which
+    still requires positive evidence that a file is gone. The run that finds
+    the directory walkable again re-hashes everything under it, so an edit made
+    while it was unreadable is picked up automatically. See
+    [the dashboard reference](dashboard.md#unreadable-directories).
+
 ## Environment variables
 
 | Variable | Effect |
@@ -114,4 +136,9 @@ fast_path = true
 
 [watcher]
 poll_interval_s = 1.0
+
+[indexing]
+promote_after_scoped_runs = 20
+promote_candidate_fraction = 0.25
+unwalkable_quarantine_runs = 5
 ```

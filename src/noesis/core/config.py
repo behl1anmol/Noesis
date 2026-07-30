@@ -93,6 +93,30 @@ class GitSettings:
 
 
 @dataclass(frozen=True)
+class IndexingSettings:
+    """§3.7 ``[indexing]`` — the automatic path back to a full, anchored walk
+    (ADR-56/57). Every automated trigger in the service is *scoped*, and only a
+    full run drains the H1 dirty set or advances the anchor, so without these a
+    project has no way out of a latched state (issue #25).
+
+    ``promote_after_scoped_runs``: promote a scoped run to a full walk once
+    this many scoped runs have started since the last completed full one.
+    ``promote_candidate_fraction``: promote when the effective candidate set
+    (pending ∪ dirty) reaches this fraction of the indexed file count — the
+    point where a scoped run stops being cheaper than the full walk it already
+    pays for, since discovery stats and binary-sniffs every file either way.
+    ``unwalkable_quarantine_runs``: consecutive runs a directory must fail to
+    be walked before the paths it hides stop being re-queued for retry.
+
+    ``0`` disables each independently, restoring the pre-ADR-56 behaviour.
+    """
+
+    promote_after_scoped_runs: int = 20
+    promote_candidate_fraction: float = 0.25
+    unwalkable_quarantine_runs: int = 5
+
+
+@dataclass(frozen=True)
 class WatcherSettings:
     """§3.7 ``[watcher]``. ``poll_interval_s`` is the PollingObserver
     snapshot cadence used only for watched roots on inotify-blind
@@ -116,6 +140,7 @@ class Settings:
     structural: StructuralSettings = field(default_factory=StructuralSettings)
     git: GitSettings = field(default_factory=GitSettings)
     watcher: WatcherSettings = field(default_factory=WatcherSettings)
+    indexing: IndexingSettings = field(default_factory=IndexingSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
 
 
@@ -148,6 +173,17 @@ def _require_non_negative_int(value: object, key: str) -> int:
     return n
 
 
+def _require_fraction(value: object, key: str) -> float:
+    """A 0..1 proportion. The upper bound is real, not cosmetic: a value above
+    1 can never be reached by a candidate set bounded by the index size, so it
+    would silently mean "never promote" while reading as a tuned threshold.
+    Use 0 to disable, which says so."""
+    x = float(value)
+    if not 0.0 <= x <= 1.0:
+        raise ValueError(f"config field {key!r} must be between 0 and 1, got {x!r}")
+    return x
+
+
 def load_settings(config_path: str | Path | None = None) -> Settings:
     """Load settings, falling back to defaults per key.
 
@@ -173,6 +209,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     stru = raw.get("structural", {})
     git = raw.get("git", {})
     wat = raw.get("watcher", {})
+    idx = raw.get("indexing", {})
     qdr = raw.get("qdrant", {})
     raw_db = raw.get("db_path")
     if raw_db is None:
@@ -231,6 +268,29 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             poll_interval_s=_require_positive_float(
                 wat.get("poll_interval_s", WatcherSettings.poll_interval_s),
                 "watcher.poll_interval_s",
+            ),
+        ),
+        indexing=IndexingSettings(
+            promote_after_scoped_runs=_require_non_negative_int(
+                idx.get(
+                    "promote_after_scoped_runs",
+                    IndexingSettings.promote_after_scoped_runs,
+                ),
+                "indexing.promote_after_scoped_runs",
+            ),
+            promote_candidate_fraction=_require_fraction(
+                idx.get(
+                    "promote_candidate_fraction",
+                    IndexingSettings.promote_candidate_fraction,
+                ),
+                "indexing.promote_candidate_fraction",
+            ),
+            unwalkable_quarantine_runs=_require_non_negative_int(
+                idx.get(
+                    "unwalkable_quarantine_runs",
+                    IndexingSettings.unwalkable_quarantine_runs,
+                ),
+                "indexing.unwalkable_quarantine_runs",
             ),
         ),
         qdrant=QdrantSettings(

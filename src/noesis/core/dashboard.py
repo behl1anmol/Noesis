@@ -19,6 +19,7 @@ from typing import Any
 from . import jobs, state
 from .compute import available_devices
 from .discovery import DiscoveryConfig, discover_files
+from .indexer import is_attributable_prefix
 from .languages import EXT_TO_LANGUAGE, LANGUAGE_MAP, detect_language
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ def _project_summary(ctx: Any, project: sqlite3.Row) -> dict[str, Any]:
         if run["status"] == "running":
             progress = jobs.run_progress(ctx, run["id"])
     watcher = getattr(ctx, "watcher", None)
+    unwalkable, quarantined = state.count_unwalkable_dirs(conn, project_id)
     last_done = conn.execute(
         "SELECT finished_at FROM index_runs WHERE project_id = ? AND status = 'done'"
         " ORDER BY finished_at DESC LIMIT 1",
@@ -95,6 +97,13 @@ def _project_summary(ctx: Any, project: sqlite3.Row) -> dict[str, Any]:
         "file_count": counts["files"],
         "chunk_count": counts["chunks"],
         "pending_count": pending,
+        # Coverage health (ADR-56): directories discovery could not walk, and
+        # the subset quarantined long enough to stop being re-queued. Both zero
+        # is healthy. Non-zero never means content was deleted — an unwalked
+        # subtree is never purged — it means what is indexed there is no longer
+        # provably current.
+        "unwalkable_count": unwalkable,
+        "quarantined_count": quarantined,
         "last_indexed_at": None if last_done is None else last_done["finished_at"],
         "index_age_s": None
         if last_done is None
@@ -150,11 +159,31 @@ def project_detail(ctx: Any, project_id: str) -> dict[str, Any] | None:
                 for e in errors
             ]
             break
+    # Unwalkable directories, each with the number of indexed files it hides —
+    # the figure that tells an operator whether this is a stray subdirectory or
+    # most of the project (ADR-56). Counted from `files` rather than from disk:
+    # the whole problem is that the directory cannot be read, so stored state
+    # is the only thing that can answer "how much is behind this".
+    unwalkable_dirs = []
+    for row in state.list_unwalkable_dirs(ctx.conn, project_id):
+        dir_path = row["dir_path"]
+        if is_attributable_prefix(dir_path):
+            hidden = ctx.conn.execute(
+                "SELECT COUNT(*) AS n FROM files WHERE project_id = ?"
+                " AND (path = ? OR path LIKE ? || '/%')",
+                (project_id, dir_path, dir_path),
+            ).fetchone()["n"]
+        else:
+            # `<root>`, or a path outside the root: no prefix describes it, so
+            # every stored file is behind it.
+            hidden = summary["file_count"]
+        unwalkable_dirs.append({**dict(row), "files_hidden": hidden})
     return {
         **summary,
         "pending_files": pending,
         "recent_runs": runs,
         "failed_files": failed_files,
+        "unwalkable_dirs": unwalkable_dirs,
     }
 
 

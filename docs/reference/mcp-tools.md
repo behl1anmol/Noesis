@@ -99,7 +99,9 @@ Status of the most recent index run, shaped identically for REST and MCP:
   "error": null,
   "expected_chunks": 333,
   "vector_count": 333,
-  "drift": false
+  "drift": false,
+  "unwalkable_dirs": 0,
+  "quarantined_dirs": 0
 }
 ```
 
@@ -108,6 +110,10 @@ Status of the most recent index run, shaped identically for REST and MCP:
 `drift` requires evidence that survives an index run committing mid-call: the expected chunk total is read on both sides of the Qdrant count, and drift is reported only when those two readings **agree with each other** and still disagree with the count. A total that moved across that window means neither reading is a stable expectation, so there is nothing to compare against — that is an in-flight run, not drift. The figure reported is the fresher of the two.
 
 The cost of that rule is worth knowing: while a run is actively committing, `drift` reads `false` even if the store genuinely lost data. The first call after the run settles reports it. A false negative for a few seconds beats a false positive on every status poll during every index run.
+
+`unwalkable_dirs` and `quarantined_dirs` are the **coverage** half of the same health picture, where `drift` is the storage half. `drift` says the store lost content it should be holding; these say part of the *tree* was never read, so what is indexed for it may be stale and cannot be proven otherwise. `quarantined_dirs` is a subset: those have failed long enough that the paths they hide are no longer being re-queued for retry ([ADR-56](../project/decisions.md)).
+
+Both zero is the healthy state. Non-zero does **not** mean anything was deleted — nothing under an unwalked directory is ever purged, because "I could not look" is not evidence of absence. It means results from that part of the tree may reflect older content than what is on disk. Worth checking before treating a search result as authoritative, and worth reporting to the human if a search over that project is coming back thin. Recovery is automatic: the first run that walks the directory again re-hashes its contents. There is no tool to clear this — it is a filesystem problem (a permissions change, an unmounted disk) or a deliberate scope decision, and both are resolved outside Noesis.
 
 ## `get_chunk`
 

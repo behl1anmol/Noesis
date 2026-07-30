@@ -92,6 +92,28 @@ CREATE TABLE IF NOT EXISTS app_settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Directories discovery could not walk, and for how long (ADR-56). One row
+-- per failing location, keyed on exactly what DiscoveryErrors.dirs reports:
+-- a root-relative prefix, the '<root>' sentinel, or an absolute path when the
+-- failure could not be attributed to a subtree at all.
+--
+-- A table rather than a JSON column like projects.dirty_paths: this needs a
+-- per-row counter and timestamps, has to be queryable for the dashboard, and
+-- must not be a read-modify-write blob on the event loop.
+CREATE TABLE IF NOT EXISTS unwalkable_dirs (
+  project_id       TEXT NOT NULL REFERENCES projects(id),
+  dir_path         TEXT NOT NULL,
+  consecutive_runs INTEGER NOT NULL DEFAULT 0,
+  first_seen_at    TEXT NOT NULL,
+  last_seen_at     TEXT NOT NULL,
+  last_error       TEXT NOT NULL,
+  -- Set once consecutive_runs crosses the threshold: the stored paths this
+  -- directory hides stop being re-queued for retry. NEVER a licence to delete
+  -- them (ADR-51/54 still own that decision) — only to stop re-pending.
+  quarantined_at   TEXT,
+  PRIMARY KEY (project_id, dir_path)
+);
 """
 
 # Additive column migrations for DBs created by earlier milestones —
@@ -121,6 +143,15 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # a second process sharing the DB must not mark the first's live run
     # failed (and thereby disarm the concurrent-run guard).
     ("index_runs", "owner", "TEXT"),
+    # ADR-57: 1 for a run scoped to an explicit candidate set, 0 for a full
+    # walk. Needed to count scoped runs since the last full walk (the
+    # promotion trigger) and, incidentally, to make the scoped path visible at
+    # all: `candidate_count` is NULL for scoped runs, so the run row recorded
+    # nothing about them. A NEW column deliberately — `candidate_count` and
+    # `fast_path_used` already carry meanings the dashboard and usage page
+    # depend on. NULL means "recorded before this column existed", which
+    # `scoped_runs_since_full` reads as not-scoped.
+    ("index_runs", "scoped", "INTEGER"),
 )
 
 
@@ -419,9 +450,7 @@ def get_file_states(conn: sqlite3.Connection, project_id: str) -> dict[str, str]
     return {row["path"]: row["content_hash"] for row in rows}
 
 
-def get_file_chunk_counts(
-    conn: sqlite3.Connection, project_id: str
-) -> dict[str, int]:
+def get_file_chunk_counts(conn: sqlite3.Connection, project_id: str) -> dict[str, int]:
     """Stored per-file chunk_count for a project — the number of points the
     vector store should hold for each file. Drift self-heal compares this,
     file by file, against the live per-file point counts in Qdrant."""
@@ -446,6 +475,15 @@ def indexed_file_total(conn: sqlite3.Connection) -> int:
     """Total tracked files across all projects — the wipe-signature check
     (a vector collection created while state already tracks indexed files)."""
     row = conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()
+    return int(row["n"])
+
+
+def indexed_file_count(conn: sqlite3.Connection, project_id: str) -> int:
+    """Files tracked for one project — the denominator the promotion trigger
+    measures a scoped run's effective candidate set against (ADR-57)."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM files WHERE project_id = ?", (project_id,)
+    ).fetchone()
     return int(row["n"])
 
 
@@ -521,20 +559,28 @@ def fail_orphaned_runs(conn: sqlite3.Connection) -> int:
 
 
 def start_run(
-    conn: sqlite3.Connection, project_id: str, *, triggered_by: str = "manual"
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    triggered_by: str = "manual",
+    scoped: bool = False,
 ) -> str:
     run_id = uuid.uuid4().hex
     conn.execute(
         "INSERT INTO index_runs (id, project_id, status, started_at, triggered_by,"
-        " owner) VALUES (?, ?, 'running', ?, ?, ?)",
-        (run_id, project_id, _now(), triggered_by, _OWNER),
+        " owner, scoped) VALUES (?, ?, 'running', ?, ?, ?, ?)",
+        (run_id, project_id, _now(), triggered_by, _OWNER, int(scoped)),
     )
     conn.commit()
     return run_id
 
 
 def try_start_run(
-    conn: sqlite3.Connection, project_id: str, *, triggered_by: str = "manual"
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    triggered_by: str = "manual",
+    scoped: bool = False,
 ) -> tuple[str, bool]:
     """Atomically open a run — or return the one already running.
 
@@ -548,6 +594,11 @@ def try_start_run(
 
     Returns ``(run_id, created)`` — ``created`` False means a live run
     already exists and ``run_id`` is that run's id.
+
+    *scoped* records whether this run was given an explicit candidate set,
+    written at INSERT rather than at ``finish_run`` so a run that crashes still
+    counts toward the promotion trigger (ADR-57) — otherwise a project that
+    keeps dying mid-run would never promote.
     """
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -580,8 +631,8 @@ def try_start_run(
         run_id = uuid.uuid4().hex
         conn.execute(
             "INSERT INTO index_runs (id, project_id, status, started_at,"
-            " triggered_by, owner) VALUES (?, ?, 'running', ?, ?, ?)",
-            (run_id, project_id, _now(), triggered_by, _OWNER),
+            " triggered_by, owner, scoped) VALUES (?, ?, 'running', ?, ?, ?, ?)",
+            (run_id, project_id, _now(), triggered_by, _OWNER, int(scoped)),
         )
         conn.commit()
         return run_id, True
@@ -729,6 +780,7 @@ def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
     conn.execute("DELETE FROM index_runs WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM pending_changes WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM watcher_stats WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM unwalkable_dirs WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM files WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     conn.commit()
@@ -818,6 +870,127 @@ def list_file_errors(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]
         "SELECT path, error FROM run_file_errors WHERE run_id = ? ORDER BY path",
         (run_id,),
     ).fetchall()
+
+
+def list_unwalkable_dirs(
+    conn: sqlite3.Connection, project_id: str
+) -> list[sqlite3.Row]:
+    """Directories discovery could not walk, longest-standing first (ADR-56).
+
+    Empty is the healthy state. A row here does NOT mean anything was deleted
+    or will be — it means part of the tree went unseen, so nothing under it can
+    be proven absent."""
+    return conn.execute(
+        "SELECT dir_path, consecutive_runs, first_seen_at, last_seen_at,"
+        " last_error, quarantined_at FROM unwalkable_dirs WHERE project_id = ?"
+        " ORDER BY first_seen_at, dir_path",
+        (project_id,),
+    ).fetchall()
+
+
+def count_unwalkable_dirs(conn: sqlite3.Connection, project_id: str) -> tuple[int, int]:
+    """``(unwalkable, quarantined)`` counts for the status surfaces. The second
+    is a subset of the first: ``COUNT(col)`` skips NULLs."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, COUNT(quarantined_at) AS q FROM unwalkable_dirs"
+        " WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+    return int(row["n"]), int(row["q"])
+
+
+def reconcile_unwalkable_dirs(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    reported: Iterable[tuple[str, str]],
+    cleared: Iterable[str],
+    quarantine_after: int,
+) -> None:
+    """Fold one run's directory-level discovery result into the ledger (ADR-56).
+
+    *reported* are this run's ``DiscoveryErrors.dirs`` pairs — each bumps its
+    row's consecutive-failure count. *cleared* are recorded paths this run
+    proved walkable; their rows are deleted, which is what resets the count.
+    The caller decides what "proved walkable" means, because that is path
+    reasoning (``indexer._under`` against the run's unwalked prefixes) and this
+    module owns SQL only.
+
+    Deletes run before inserts. They are disjoint by construction — a path
+    reported this run is by definition under this run's failures — but if that
+    ever stopped holding, this order re-inserts at count 1 and merely DELAYS a
+    quarantine. The other order would drop a row that had just been counted.
+    Erring toward retrying too long is the same fail-safe direction as ADR-51.
+
+    *quarantine_after* is the consecutive-run threshold; ``0`` disables
+    quarantine entirely and leaves ``quarantined_at`` NULL, so the retry
+    behaviour reverts to what shipped in PR #24. ``quarantined_at`` is only
+    ever set, never cleared: recovery deletes the whole row.
+
+    One ``BEGIN IMMEDIATE`` transaction for the same reason
+    :func:`add_dirty_paths` uses one — a half-applied reconcile would either
+    quarantine on a stale count or lose a recovery.
+    """
+    reported = list(reported)
+    cleared = [p for p in cleared]
+    if not reported and not cleared:
+        return
+    now = _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if cleared:
+            conn.executemany(
+                "DELETE FROM unwalkable_dirs WHERE project_id = ? AND dir_path = ?",
+                [(project_id, p) for p in cleared],
+            )
+        if reported:
+            conn.executemany(
+                """
+                INSERT INTO unwalkable_dirs (project_id, dir_path,
+                    consecutive_runs, first_seen_at, last_seen_at, last_error)
+                VALUES (?, ?, 1, ?, ?, ?)
+                ON CONFLICT(project_id, dir_path) DO UPDATE SET
+                  consecutive_runs = unwalkable_dirs.consecutive_runs + 1,
+                  last_seen_at = excluded.last_seen_at,
+                  last_error = excluded.last_error
+                """,
+                [(project_id, path, now, now, err) for path, err in reported],
+            )
+            if quarantine_after > 0:
+                conn.execute(
+                    "UPDATE unwalkable_dirs SET quarantined_at = ?"
+                    " WHERE project_id = ? AND quarantined_at IS NULL"
+                    " AND consecutive_runs >= ?",
+                    (now, project_id, quarantine_after),
+                )
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
+def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
+    """Scoped runs started since the last *completed full walk* (ADR-57).
+
+    A **failed** full run does not reset the count: it did not drain the H1
+    dirty set (``clear_dirty_paths`` and the anchor write both need a clean
+    run), so treating it as a reset would let a project that fails every full
+    walk stop promoting entirely.
+
+    ``scoped IS NULL`` rows predate the column. They are read as full walks for
+    the baseline and never counted as scoped, so the counter simply starts from
+    zero on an upgraded DB rather than inheriting a fabricated history."""
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM index_runs
+        WHERE project_id = ? AND scoped = 1 AND started_at > COALESCE(
+              (SELECT MAX(started_at) FROM index_runs
+               WHERE project_id = ? AND status = 'done'
+                 AND (scoped = 0 OR scoped IS NULL)), '')
+        """,
+        (project_id, project_id),
+    ).fetchone()
+    return int(row["n"])
 
 
 def log_query(
