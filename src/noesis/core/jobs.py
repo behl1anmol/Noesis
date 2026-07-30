@@ -81,26 +81,37 @@ def _promotion_reason(
         indexed = state.indexed_file_count(ctx.conn, project_id)
         if indexed:
             # The H1 dirty set counts toward the threshold only when a
-            # promotion could actually shrink it (PR #30 review). A live
-            # ledger row means every run reports a directory error, so
-            # `clean_run` is false and NEITHER drain fires — `clear_dirty_paths`
-            # and the anchor write are both gated on it. The set is pinned, so
-            # counting it would latch this trigger permanently at the first
-            # crossing and promote every launch thereafter, on a number
-            # promotion is structurally incapable of moving. That is the same
-            # "a guard that can fire forever has no exit" shape this module
-            # exists to remove, reached from the other side. Measured on a
-            # 20-file project with one permanently unreadable directory: 5 of
-            # 12 launches promoted with the set counted, 3 of 12 without —
-            # against 3 of 12 for a healthy project of the same size.
+            # promotion could actually shrink it (PR #30 review). Both drains
+            # are gated on `clean_run`, so after a run that reported ANY
+            # failure the set is pinned — and counting a pinned set latches
+            # this trigger permanently at the first crossing, promoting every
+            # launch thereafter on a number promotion is structurally incapable
+            # of moving. That is the same "a guard that can fire forever has no
+            # exit" shape this module exists to remove, reached from the other
+            # side.
+            #
+            # Keyed on whether the last FULL walk was clean, NOT on whether a
+            # directory is unwalkable. `clean_run` has three terms and the
+            # ledger only records one of them: a persistently unreadable *file*
+            # pins the set identically with no ledger row, and latched this
+            # trigger just the same until round 2 of the review caught it.
+            #
+            # "Full walk" and not "last run": a scoped run never hashes what is
+            # outside its candidate set, so a permanently unhashable file leaves
+            # every scoped run looking clean while the fault is still there.
+            # Keying on the last run of any kind made this alternate — clean
+            # scoped run promotes, the full walk hits the fault, next one does
+            # not, and so on. Measured at shipped defaults over 12 launches:
+            # healthy 1/12, broken directory 0/12, broken file 5/12 before any
+            # guard, 3/12 keyed on the last run, 1/12 keyed on the last full
+            # walk — matching the healthy baseline, which is the point.
             #
             # `pending` is still counted: those paths really did change, a
             # promotion really does clear them, and the cost argument holds.
-            # Triggers 1 and 2 keep covering the unwalkable case on their own
-            # cadence, so nothing stops being re-probed. Draining the pinned
-            # set at all is issue #28.
+            # Triggers 1 and 2 keep re-probing on their own cadence, so nothing
+            # stops being revisited. Draining a pinned set at all is issue #28.
             candidates = set(paths)
-            if not unwalkable:
+            if state.last_full_run_was_clean(ctx.conn, project_id):
                 candidates |= state.get_dirty_paths(ctx.conn, project_id)
             effective = len(candidates)
             if effective >= cfg.promote_candidate_fraction * indexed:

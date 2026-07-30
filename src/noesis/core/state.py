@@ -977,6 +977,53 @@ def reconcile_unwalkable_dirs(
     conn.commit()
 
 
+def last_full_run_was_clean(conn: sqlite3.Connection, project_id: str) -> bool:
+    """Did the most recent finished **full walk** complete with no failures?
+
+    This is the best available answer to "could a promotion drain the H1 dirty
+    set?", which is what the fraction trigger needs to know (ADR-57). Both
+    drains are gated on ``clean_run``, and that is exactly ``files_failed == 0``
+    — so a full walk that reported any failure left the set pinned, and the
+    next one will too until the underlying fault is fixed.
+
+    Keyed on the *outcome* rather than the cause. Keying on ``unwalkable_dirs``
+    rows instead — the first version of this guard — covered only ``dir_errors``,
+    one of ``clean_run``'s three terms; a persistently unreadable **file** pins
+    the set identically with no ledger row and latched the trigger just the same
+    (PR #30 round-2 review). This subsumes the ledger check rather than sitting
+    beside it.
+
+    **Full** runs only, and that restriction is the whole subtlety. A scoped run
+    does not hash what is not in its candidate set, so a file that always fails
+    to hash is simply never touched by one — every scoped run comes back clean
+    while the fault is still there. Asking "was the last run clean" therefore
+    flip-flops: clean scoped run → promote → the full walk hits the fault →
+    not clean → no promote → clean scoped run → promote again. Only a full walk
+    exercises what a full walk would exercise.
+
+    Runs still in flight are skipped (``finished_at IS NOT NULL``): their
+    ``files_failed`` is NULL because they have not reported yet, not because
+    they succeeded. ``scoped IS NULL`` rows predate the column and are read as
+    full walks, consistently with :func:`scoped_runs_since_full`.
+
+    A project with no finished full run reads clean — there is nothing to drain
+    either way, and the first full walk is exactly what reveals whether there is
+    a fault. A NULL ``files_failed`` on a finished run (pre-ADR-41) reads NOT
+    clean: the safe direction, since what this guards against is a permanent
+    latch and the cost of being wrong is a deferred promotion.
+    """
+    row = conn.execute(
+        "SELECT status, files_failed FROM index_runs"
+        " WHERE project_id = ? AND finished_at IS NOT NULL"
+        " AND (scoped = 0 OR scoped IS NULL)"
+        " ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    return row["status"] == "done" and row["files_failed"] == 0
+
+
 def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
     """Scoped runs started since the last *completed full walk* (ADR-57).
 

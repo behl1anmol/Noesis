@@ -408,19 +408,35 @@ def test_promotion_fires_when_the_candidate_set_stops_being_narrow(tmp_path) -> 
     assert reason is not None and "candidate set" in reason
 
 
+def _finish_full(conn, project_id: str, *, files_failed: int) -> None:
+    """A completed full walk. `done` either way — contained per-file failures
+    do not fail a run (ADR-41), which is the whole reason `files_failed` rather
+    than `status` is the signal."""
+    run, _ = state.try_start_run(conn, project_id, scoped=False)
+    state.finish_run(conn, run, "done", files_failed=files_failed)
+
+
+def _finish_scoped(conn, project_id: str, *, files_failed: int = 0) -> None:
+    run, _ = state.try_start_run(conn, project_id, scoped=True)
+    state.finish_run(conn, run, "done", files_failed=files_failed)
+
+
 def test_the_fraction_trigger_does_not_latch_on_an_undrainable_dirty_set(
     tmp_path,
 ) -> None:
-    """Raised by the PR #30 review. A live ledger row means every run reports a
-    directory error, so `clean_run` is false and neither drain fires — the H1
-    dirty set is pinned. Counting it toward the fraction trigger latched that
-    trigger permanently at the first crossing: it fired on a number promotion
-    is structurally incapable of moving, so every launch thereafter promoted to
-    a full walk. Same "guard that can fire forever" shape this module removes,
-    reached from the other side.
+    """Raised by the PR #30 review, then narrowed by its round 2.
 
-    `pending` still counts — those paths really changed and a promotion really
-    does clear them."""
+    Both drains are gated on `clean_run`, so after a full walk that reported
+    any failure the H1 dirty set is pinned. Counting a pinned set latched this
+    trigger permanently at the first crossing — it fired on a number promotion
+    is structurally incapable of moving, so every launch thereafter promoted.
+    Same "guard that can fire forever" shape this module removes, reached from
+    the other side.
+
+    The guard keys on the last full walk's OUTCOME, not on ledger rows.
+    `clean_run` has three terms and the ledger records only `dir_errors`; a
+    persistently unreadable *file* pins the set identically with no ledger row
+    at all, which is the sibling instance round 2 found."""
     ctx = make_ctx(
         tmp_path, promote_after_scoped_runs=0, promote_candidate_fraction=0.25
     )
@@ -431,18 +447,30 @@ def test_the_fraction_trigger_does_not_latch_on_an_undrainable_dirty_set(
         state.upsert_file(ctx.conn, pid, f"f{i}.py", f"h{i}")
     state.add_dirty_paths(ctx.conn, pid, [f"f{i}.py" for i in range(6)])
 
-    # Healthy project: the dirty set is drainable, so it counts and fires.
+    # A clean full walk means the set is drainable, so it counts and fires.
+    _finish_full(ctx.conn, pid, files_failed=0)
     assert jobs._promotion_reason(ctx, pid, ["f0.py"]) is not None
 
-    # Same set, now known-undrainable: it must stop counting.
-    state.reconcile_unwalkable_dirs(
-        ctx.conn, pid, reported=[("pkg", "EACCES")], cleared=[], quarantine_after=99
-    )
+    # A full walk that reported failures pins the set — with NO ledger row,
+    # which is exactly the unreadable-file case the ledger cannot see.
+    _finish_full(ctx.conn, pid, files_failed=1)
+    assert state.list_unwalkable_dirs(ctx.conn, pid) == []
     assert jobs._promotion_reason(ctx, pid, ["f0.py"]) is None
 
-    # ...but a genuinely large pending set still promotes.
-    many = [f"f{i}.py" for i in range(8)]
-    assert jobs._promotion_reason(ctx, pid, many) is not None
+    # A clean SCOPED run afterwards must not re-enable it. A scoped run never
+    # hashes what is outside its candidate set, so it comes back clean while
+    # the fault is still there — keying on "the last run" instead of "the last
+    # full walk" made promotion alternate on exactly this.
+    _finish_scoped(ctx.conn, pid, files_failed=0)
+    assert jobs._promotion_reason(ctx, pid, ["f0.py"]) is None
+
+    # ...but a genuinely large pending set still promotes: those paths really
+    # changed, and a promotion really does clear them.
+    assert jobs._promotion_reason(ctx, pid, [f"f{i}.py" for i in range(8)]) is not None
+
+    # And a later clean full walk re-enables it — the fault was transient.
+    _finish_full(ctx.conn, pid, files_failed=0)
+    assert jobs._promotion_reason(ctx, pid, ["f0.py"]) is not None
 
 
 def test_an_unattributable_ledger_row_forces_a_full_walk(tmp_path) -> None:
