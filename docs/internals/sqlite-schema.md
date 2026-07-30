@@ -11,7 +11,7 @@ All relational state lives in one WAL-mode SQLite file (`src/noesis/core/state.p
 | `busy_timeout` | `5000` ms | retries on lock contention instead of failing immediately |
 | `foreign_keys` | `ON` | FK constraints enforced |
 
-## The eight tables
+## The nine tables
 
 ```mermaid
 erDiagram
@@ -19,6 +19,7 @@ erDiagram
     projects ||--o{ index_runs : "has"
     projects ||--o{ pending_changes : "has"
     projects ||--o{ watcher_stats : "has"
+    projects ||--o{ unwalkable_dirs : "has"
     index_runs ||--o{ run_file_errors : "has"
 
     projects {
@@ -55,6 +56,7 @@ erDiagram
         INTEGER candidate_count
         TEXT triggered_by
         TEXT owner
+        INTEGER scoped
         TEXT error
     }
     pending_changes {
@@ -83,6 +85,15 @@ erDiagram
         INTEGER events_seen
         INTEGER events_coalesced
         INTEGER auto_runs
+    }
+    unwalkable_dirs {
+        TEXT project_id PK, FK
+        TEXT dir_path PK
+        INTEGER consecutive_runs
+        TEXT first_seen_at
+        TEXT last_seen_at
+        TEXT last_error
+        TEXT quarantined_at
     }
     app_settings {
         TEXT key PK
@@ -130,7 +141,24 @@ erDiagram
 | `fast_path_used`, `candidate_count` | INTEGER | git fast-path telemetry — measures the optimization's value per run |
 | `triggered_by` | TEXT | `manual` / watcher provenance |
 | `owner` | TEXT | process identity that owns the run (see below) |
+| `scoped` | INTEGER NULL | `1` when the run was given an explicit candidate set, `0` for a full walk. Written at INSERT, not at completion, so a run that crashes still counts toward the promotion trigger ([ADR-57](../project/decisions.md)). NULL means the row predates the column; `scoped_runs_since_full` reads that as a full walk, so the counter starts from zero on an upgraded DB rather than inheriting a fabricated history |
 | `started_at`, `finished_at`, `error` | TEXT | lifecycle |
+
+### `unwalkable_dirs`
+
+Directories discovery could not walk, and for how long ([ADR-56](../project/decisions.md)). Empty is the healthy state.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `project_id`, `dir_path` | TEXT PK | `dir_path` is exactly what `DiscoveryErrors.dirs` reports: a root-relative prefix, the `<root>` sentinel, or an absolute path when the failure could not be attributed to any subtree |
+| `consecutive_runs` | INTEGER | failures in a row. Incremented by each run that reports the directory; the row is **deleted** — not zeroed — by a run that proves it reachable, so recovery and reset are the same event |
+| `first_seen_at`, `last_seen_at` | TEXT | ISO timestamps. `first_seen_at` survives repeated failures, so the dashboard can show how long this has been going on |
+| `last_error` | TEXT | newest errno/message, so an operator sees the current reason rather than the original one |
+| `quarantined_at` | TEXT NULL | set once `consecutive_runs` reaches `indexing.unwalkable_quarantine_runs`. Only ever set, never cleared — recovery removes the whole row |
+
+Why a table rather than a JSON column on `projects` (as `dirty_paths` is): it needs per-row counters and timestamps, it has to be queryable for the dashboard, and a read-modify-write blob on the event loop is exactly what `add_dirty_paths` already has to guard against.
+
+**A row here is not a deletion record.** Nothing under an unwalked directory is ever purged — "the walk could not look" is not evidence of absence ([ADR-51](../project/decisions.md)). Quarantine bounds only the *retry*: it stops those paths being re-queued into `pending_changes`, which is what lets a permanently unreadable directory's backlog drain. The deletion decision stays keyed on the run's own unwalked prefixes and is untouched by anything in this table.
 
 The remaining tables: `pending_changes` (watcher backlog, PK `(project_id, path)`, `event_type` CHECK `created`/`modified`/`deleted`); `run_file_errors` (per-file failure containment, PK `(run_id, path)`); `query_log` (metadata-only telemetry — interface `rest`/`mcp`, kind `search`/`structural`, channel, reranked, latency, result count — **never query text**, [ADR-25](../project/decisions.md)); `watcher_stats` (per-project per-day event counters); `app_settings` (key/value, e.g. the dashboard compute-device setting).
 

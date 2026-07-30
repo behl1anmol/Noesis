@@ -289,6 +289,8 @@ The following stand exactly as approved and are not re-argued here: Qdrant singl
 
 ## 3.7 Data model deltas
 
+> **Scope of this section.** It records the delta *this revision* introduced, and is not maintained as a running schema reference. Later milestones and decisions added both columns and tables — `pending_changes`, `watcher_stats`, `run_file_errors`, `app_settings` (M8/ADR-40, ADR-41), the ADR-42 per-project scope columns, and the ADR-56 `unwalkable_dirs` ledger with its ADR-57 `index_runs.scoped` companion. Each is recorded in its own Appendix A row; the current schema, table by table, lives in `docs/internals/sqlite-schema.md`.
+
 Smaller than rev 1 — the expanded scope now requires exactly **one** new column on `projects`, zero new tables, plus the two `index_runs` telemetry columns §3.8's observability delta already mandates (made explicit at M7 build time):
 
 ```sql
