@@ -972,10 +972,31 @@ def reconcile_unwalkable_dirs(
 def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
     """Scoped runs started since the last *completed full walk* (ADR-57).
 
-    A **failed** full run does not reset the count: it did not drain the H1
-    dirty set (``clear_dirty_paths`` and the anchor write both need a clean
-    run), so treating it as a reset would let a project that fails every full
-    walk stop promoting entirely.
+    What this measures is "has a full walk happened recently", **not** "has a
+    drain happened". The two come apart, and the distinction is deliberate.
+
+    A full run that finishes ``done`` with contained per-file failures
+    (ADR-41) is not a *clean* run, so it takes neither drain branch —
+    ``clean_run`` gates both ``clear_dirty_paths`` and the anchor write, and it
+    is exactly ``files_failed == 0``. It still resets this counter. That looks
+    wrong until you price the alternative: requiring a clean full run means a
+    project with a **permanently** unreadable directory can never reset, so
+    every launch past the threshold promotes. Measured at threshold 3 over 12
+    watcher runs on such a project: 3 full walks under this rule versus 9 under
+    a clean-only rule — every run, on the population issue #25 is about, where
+    the walk is slowest (9p/network mounts, ADR-45).
+
+    Nor would that buy a drain. The drain is blocked by the discovery error
+    itself, not by the promotion cadence, so promoting harder just re-walks a
+    tree that still cannot be drained. That a latched error blocks the drain
+    forever is a real gap, and it is issue #28's, not this function's.
+
+    The cost of this rule is bounded and self-healing: a *transient* failure on
+    a full run delays the drain by one promotion cycle, and the next full run
+    is clean and drains. A permanent one is #28 either way.
+
+    A **failed** full run is different and does not reset: it may have stopped
+    before walking anything, so it is not evidence a full walk happened at all.
 
     ``scoped IS NULL`` rows predate the column. They are read as full walks for
     the baseline and never counted as scoped, so the counter simply starts from

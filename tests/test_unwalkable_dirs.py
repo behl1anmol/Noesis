@@ -584,9 +584,8 @@ def test_reconcile_is_idempotent_and_delete_project_leaves_no_orphans(
 
 
 def test_scoped_runs_since_full_ignores_failed_full_runs(tmp_path) -> None:
-    """A failed full run did not drain anything — `clear_dirty_paths` and the
-    anchor write both need a clean run — so treating it as a reset would let a
-    project that fails every full walk stop promoting entirely."""
+    """A failed full run may have stopped before walking anything, so it is not
+    evidence that a full walk happened."""
     conn, _, _ = make_env(tmp_path)
     pid = state.register_project(conn, tmp_path / "proj", "m1")
 
@@ -601,6 +600,34 @@ def test_scoped_runs_since_full_ignores_failed_full_runs(tmp_path) -> None:
 
     good_full, _ = state.try_start_run(conn, pid, scoped=False)
     state.finish_run(conn, good_full, "done")
+    assert state.scoped_runs_since_full(conn, pid) == 0
+
+
+def test_a_partially_failed_full_run_still_resets_the_counter(tmp_path) -> None:
+    """Deliberate, and the opposite of what the docstring's first version
+    implied — raised by the PR #30 review, kept after measuring the alternative.
+
+    A `done` run with contained per-file failures (ADR-41) is not a *clean*
+    run, so it takes neither drain branch. It still counts as "a full walk
+    happened", because that is what this counter is for. Requiring a clean full
+    run instead means a project with a permanently unreadable directory can
+    never reset and promotes on every launch past the threshold — measured at
+    3 full walks per 12 watcher runs under this rule versus 9 under a
+    clean-only rule, on exactly the population issue #25 is about.
+
+    Promoting harder would not drain it either: the drain is blocked by the
+    discovery error, not by the cadence. That is issue #28.
+    """
+    conn, _, _ = make_env(tmp_path)
+    pid = state.register_project(conn, tmp_path / "proj", "m1")
+
+    for _ in range(3):
+        run, _ = state.try_start_run(conn, pid, scoped=True)
+        state.finish_run(conn, run, "done")
+    assert state.scoped_runs_since_full(conn, pid) == 3
+
+    partial, _ = state.try_start_run(conn, pid, scoped=False)
+    state.finish_run(conn, partial, "done", files_failed=1)
     assert state.scoped_runs_since_full(conn, pid) == 0
 
 
