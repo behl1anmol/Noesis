@@ -206,6 +206,26 @@
       if (empty) empty.hidden = p.pending_files.length > 0;
     }
 
+    const us = $("#unwalkable-section"), ub = $("#unwalkable-body");
+    if (us && ub && p.unwalkable_dirs) {
+      us.hidden = p.unwalkable_dirs.length === 0;
+      ub.textContent = "";
+      p.unwalkable_dirs.forEach((d) => {
+        const tr = document.createElement("tr");
+        const td = cell(tr, "mono", d.dir_path + " ");
+        if (d.quarantined_at) chipIn(td, "chip-ev-deleted", "quarantined");
+        cell(tr, "mono", String(d.consecutive_runs));
+        cell(tr, "mono", String(d.files_hidden));
+        cell(tr, "mono muted", fmtAgo((now - Date.parse(d.first_seen_at)) / 1000) || "just now");
+        const et = cell(tr);
+        const es = document.createElement("span");
+        es.className = "err-text";
+        es.textContent = d.last_error;
+        et.appendChild(es);
+        ub.appendChild(tr);
+      });
+    }
+
     const fs = $("#failed-section"), fb = $("#failed-body");
     if (fs && fb && p.failed_files) {
       fs.hidden = p.failed_files.length === 0;

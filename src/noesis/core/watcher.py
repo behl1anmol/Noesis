@@ -122,9 +122,7 @@ def _inotify_blind_fstype(root: Path) -> str | None:
         return None
     try:
         resolved = str(root.resolve())
-        mounts_text = Path("/proc/mounts").read_text(
-            encoding="utf-8", errors="replace"
-        )
+        mounts_text = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     fstype = _fstype_for(resolved, mounts_text)
@@ -232,10 +230,27 @@ class WatcherManager:
             self._schedule(row["id"], row["root_path"])
             # Catch-up: pending rows left over from a previous process (or
             # events missed while down) — if auto_reindex is on, run now.
-            if row["auto_reindex"]:
-                pending = state.list_pending_changes(self._ctx.conn, row["id"])
-                if pending:
-                    self._launch_scoped(row["id"], [p["path"] for p in pending])
+            if not row["auto_reindex"]:
+                continue
+            # A project with recorded discovery failures gets a FULL catch-up
+            # walk instead of a scoped one (ADR-56/57). Two reasons, and the
+            # first is the one that matters: once quarantine stops re-pending
+            # an unreadable subtree, that project may have NO pending rows
+            # left — and every other automated trigger fires off a filesystem
+            # event, which a dead mount does not produce. Without this, a
+            # quarantined project would have nothing left that ever re-probes
+            # it. Second, process start is when a fixed mount is most likely to
+            # be noticed, and a full walk is what re-hashes the subtree.
+            #
+            # Exclusive with the scoped launch below: a second call would only
+            # return `already_running` and waste the trip. The full run covers
+            # the pending rows anyway — it clears them project-wide.
+            if state.list_unwalkable_dirs(self._ctx.conn, row["id"]):
+                self._launch(row["id"], None)
+                continue
+            pending = state.list_pending_changes(self._ctx.conn, row["id"])
+            if pending:
+                self._launch(row["id"], [p["path"] for p in pending])
 
     async def stop(self) -> None:
         # Stop the observers first (no new events), then drain what already
@@ -464,9 +479,14 @@ class WatcherManager:
                 continue
             pending = state.list_pending_changes(self._ctx.conn, project_id)
             if pending:
-                self._launch_scoped(project_id, [p["path"] for p in pending])
+                self._launch(project_id, [p["path"] for p in pending])
 
-    def _launch_scoped(self, project_id: str, paths: list[str]) -> None:
+    def _launch(self, project_id: str, paths: list[str] | None) -> None:
+        """Launch a watcher run over *paths*, or a full walk when None.
+
+        ``jobs.launch_index_run`` may still promote a scoped launch to a full
+        one (ADR-57); that decision is deliberately not duplicated here, since
+        all four scoped callers in the codebase go through that one seam."""
         project = state.get_project(self._ctx.conn, project_id)
         if project is None:
             return
@@ -492,7 +512,11 @@ class WatcherManager:
             )
             return
         state.bump_watcher_stats(self._ctx.conn, project_id, auto_runs=1)
-        logger.info("auto-reindex launched for %s (%d pending)", project_id, len(paths))
+        logger.info(
+            "auto-reindex launched for %s (%s)",
+            project_id,
+            "full walk" if paths is None else f"{len(paths)} pending",
+        )
 
 
 class _Handler:

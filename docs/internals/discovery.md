@@ -75,6 +75,22 @@ directory's own subtree and carries on elsewhere, so the rest of the tree
 stays provable; without the narrowing, one permanently unreadable directory
 froze deletion for every path in the project forever.
 
+Directory-level errors are also **accumulated across runs**, not just handled
+within one. Each is folded into a per-project ledger keyed on the same
+`dir_path` recorded here, carrying a consecutive-failure count
+([ADR-56](../project/decisions.md)). That is what lets the indexer tell a
+transient fault from a latched one — a distinction discovery itself cannot
+make, because from inside a single walk the two are identical. The reset is
+the reachability of the directory on a later walk, not a timer: a run that
+reaches it deletes the row outright.
+
+That accumulation relies on a property of this module worth stating plainly:
+`discover_files` walks the **entire tree on every run**. Scoping a run to a
+candidate set narrows only which files get *hashed* downstream — it never
+narrows the walk. So every run, however narrowly scoped, is a full re-probe of
+every directory, and recovery is detected without anything having to schedule
+a probe for it.
+
 Directory paths are recorded relative to the root, or as the sentinel
 `<root>` when the walk failed at the root itself. That distinction is what
 the narrowing turns on: `<root>`, a path that could not be made relative to

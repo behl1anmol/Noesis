@@ -100,6 +100,43 @@
     </div>
   </section>
 
+  <section class="section panel panel-danger fade" id="unwalkable-section" style="animation-delay: 85ms"
+           {% if not p.unwalkable_dirs %}hidden{% endif %}>
+    <div class="section-head"><h2>Unreadable directories</h2></div>
+    <p class="muted" style="margin: 0 0 .75rem">
+      Discovery could not walk these, so nothing under them can be proven
+      deleted. Their indexed content is <strong>kept and still searchable</strong> —
+      it just cannot be confirmed current. A quarantined directory has failed
+      long enough that its files are no longer re-queued for retry; fix it (or
+      narrow the project's index scope) and the next run re-hashes them
+      automatically.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Directory</th><th>Failed runs</th><th>Indexed files behind it</th>
+            <th>First seen</th><th>Error</th>
+          </tr>
+        </thead>
+        <tbody id="unwalkable-body">
+          {% for d in p.unwalkable_dirs %}
+            <tr>
+              <td class="mono">
+                {{ d.dir_path }}
+                {% if d.quarantined_at %}<span class="chip chip-ev-deleted">quarantined</span>{% endif %}
+              </td>
+              <td class="mono">{{ d.consecutive_runs }}</td>
+              <td class="mono">{{ d.files_hidden }}</td>
+              <td class="mono muted" data-rel data-ts="{{ d.first_seen_at }}"></td>
+              <td><span class="err-text">{{ d.last_error }}</span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="section panel panel-danger fade" id="failed-section" style="animation-delay: 100ms"
            {% if not p.failed_files %}hidden{% endif %}>
     <div class="section-head"><h2>Failed files</h2></div>
