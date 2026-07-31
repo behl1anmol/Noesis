@@ -1011,6 +1011,19 @@ def last_full_run_was_clean(conn: sqlite3.Connection, project_id: str) -> bool:
     a fault. A NULL ``files_failed`` on a finished run (pre-ADR-41) reads NOT
     clean: the safe direction, since what this guards against is a permanent
     latch and the cost of being wrong is a deferred promotion.
+
+    **Known gap, documented rather than coded** (PR #30 round-3 review). What
+    re-enables the caller's dirty term is a later clean full walk, and full
+    walks come from the *other* two promotion triggers. So setting
+    ``indexing.promote_after_scoped_runs = 0`` while leaving
+    ``promote_candidate_fraction`` on removes the fraction trigger's own
+    recovery path: one transient failure during a full walk disables its
+    dirty-driven half until some other full run happens. At the shipped
+    defaults this is self-healing — the run-count trigger delivers a clean full
+    walk within its threshold and the term comes back — and ``pending`` keeps
+    counting either way, so the trigger is never wholly dead. Left as a
+    documented interaction because the alternative is config-dependent guard
+    logic that trades this latch for the one the guard exists to prevent.
     """
     row = conn.execute(
         "SELECT status, files_failed FROM index_runs"
