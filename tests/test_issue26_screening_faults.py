@@ -192,6 +192,33 @@ def test_unreadable_gitignore_is_recorded_not_only_logged(tmp_path, monkeypatch)
     assert errors.files == []
 
 
+def test_persisted_screening_detail_carries_no_absolute_path(tmp_path, monkeypatch):
+    """PR #31 review: `str(exc)` interpolates `filename`, so the obvious
+    one-liner persisted the absolute `.gitignore` path into `run_file_errors`
+    and onto the dashboard — while `_record_degraded`'s own docstring promised
+    the opposite. The recorded pair is keyed on the directory rel already, so
+    the path added nothing but the machine-specific root prefix (ADR-25).
+
+    Asserted on the invariant rather than the wording: the errno and the
+    strerror must survive (they are the actionable half), the absolute path
+    must not, and the DEBUG log must still carry it for whoever has to go fix
+    the directory.
+    """
+    root = _tree(tmp_path)
+    (root / "pkg" / ".gitignore").write_text("*.log\n")
+    _fail_method_on(monkeypatch, "read_text", root / "pkg" / ".gitignore")
+
+    errors = DiscoveryErrors()
+    discover_files(root, DiscoveryConfig(), errors=errors)
+
+    _, message = errors.unscreened[0]
+    assert str(root) not in message
+    assert str(root / "pkg" / ".gitignore") not in message
+    # The actionable half is still there.
+    assert "Permission denied" in message
+    assert "13" in message
+
+
 def test_collectorless_callers_still_get_a_log_line(tmp_path, monkeypatch, caplog):
     """`errors=None` keeps the silent-skip contract — but never a silent loss.
 

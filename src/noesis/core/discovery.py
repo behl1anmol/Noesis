@@ -200,14 +200,31 @@ def _record_degraded(
 
     Only *summary* and the errno reach the collector, never *path*: the
     recorded pairs are persisted to `run_file_errors` and rendered on the
-    dashboard, and the key is the directory rel, so an absolute filesystem
-    path in the message would be both redundant and a wider exposure surface
-    than the rest of the table (ADR-25). The log line, which stays local and
-    is already at DEBUG for that reason, carries the full path an operator
-    needs to go fix it.
+    dashboard, and the key is already the directory rel, so an absolute
+    filesystem path in the message adds nothing but the machine-specific root
+    prefix (ADR-25). The log line, which stays local and is at DEBUG for that
+    reason, carries the full path an operator needs to go fix it.
+
+    That is why the detail is rebuilt from ``errno``/``strerror`` rather than
+    taken from ``str(exc)``. `OSError.__str__` interpolates ``filename`` when
+    it is set — the normal shape here, since these faults come from `stat` and
+    `read_text` on a real path — so the obvious one-liner silently persists the
+    absolute path and makes the paragraph above a lie (PR #31 review).
+    ``str(exc)`` is used only when there is no ``strerror`` to rebuild from,
+    and then only when ``filename`` is unset, so it cannot reintroduce a path.
     """
-    detail = str(exc) or type(exc).__name__
-    logger.debug("discovery: %s — %s (%s)", summary, path, detail)
+    if exc.strerror:
+        detail = (
+            f"[Errno {exc.errno}] {exc.strerror}"
+            if exc.errno is not None
+            else exc.strerror
+        )
+    elif exc.filename is None:
+        detail = str(exc) or type(exc).__name__
+    else:
+        detail = type(exc).__name__
+    # The log keeps the full path; only the persisted pair is trimmed.
+    logger.debug("discovery: %s — %s (%s)", summary, path, exc)
     if bucket is not None:
         bucket.append((key, f"{summary} ({detail})"))
 
