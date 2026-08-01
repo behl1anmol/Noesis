@@ -120,6 +120,32 @@ class DiscoveryErrors:
     ``dirs``: a directory whose scandir failed mid-walk — its whole subtree
     went unseen, so deletion evidence from this walk is untrustworthy.
 
+    The two lists above are about a path's EXISTENCE. The two below are not:
+    the walk reached the directory and enumerated it fine, and every file in
+    it is accounted for — what failed is an input to *screening*, so the
+    result may be the wrong SHAPE rather than incomplete (ADR-58).
+
+    ``unscreened``: a directory whose .gitignore could not be tested for or
+    read, so its ignore rules were never applied. Unlike every other failure
+    in this module this one runs in BOTH directions. The obvious half is
+    under-ignoring — excluded files reach the index, a retrievable surface.
+    The half that is easy to miss, and the reason this is not merely
+    cosmetic: git's last-match-wins semantics mean a deeper .gitignore can
+    NEGATE a shallower exclusion (``*.log`` at the root, ``!important.log``
+    in ``logs/``). Lose the deeper spec and the outer exclusion stands
+    unopposed, the file drops out of the results, and "absent from
+    discovery" is read downstream as deletion. So this list DOES suppress
+    deletion — under its own directory prefix only, via the ADR-54
+    machinery — even though nothing about the walk was incomplete.
+
+    ``unidentified``: a directory whose identity could not be established —
+    the ``follow_symlinks`` cycle-guard ``stat``, or the per-child
+    ``is_symlink`` test. This one can only make the walk OVER-inclusive (a
+    subtree walked twice under two rel paths, or a symlink descended into
+    that would normally be skipped); it can never remove a path from the
+    results, so it is never deletion evidence and suppresses nothing.
+    Recorded anyway, so that no filesystem fault in this module is invisible.
+
     ``entries_seen`` counts every file entry the walk enumerated, *before*
     any filter runs. It is not an error, but it lives here because only the
     caller that cares about the errors cares about it: an empty result with
@@ -134,11 +160,93 @@ class DiscoveryErrors:
     files: list[tuple[str, str]] = field(default_factory=list)
     dirs: list[tuple[str, str]] = field(default_factory=list)
     entries_seen: int = 0
+    # Keyed on the root-relative directory, using the same ``<root>`` sentinel
+    # ``dirs`` uses, so `indexer.is_attributable_prefix` classifies all three
+    # lists with one rule.
+    unscreened: list[tuple[str, str]] = field(default_factory=list)
+    unidentified: list[tuple[str, str]] = field(default_factory=list)
 
 
 def is_secret_path(rel_posix: str) -> bool:
     """True if a project-relative POSIX path matches the secret skip-list."""
     return bool(_SECRET_SPEC.match_file(rel_posix))
+
+
+def _dir_key(dir_rel: str) -> str:
+    """Collector key for a directory: its rel path, or the root sentinel.
+
+    The walk root's rel path is the empty string, which describes no subtree
+    and would silently match nothing in `indexer._under`. ``<root>`` is the
+    sentinel `_walk_error` already records for the same situation, and
+    `indexer.is_attributable_prefix` already rejects it — so reusing it here
+    means the new lists need no new classification rule.
+    """
+    return dir_rel or "<root>"
+
+
+def _record_degraded(
+    bucket: list[tuple[str, str]] | None,
+    key: str,
+    path: str | Path,
+    exc: OSError,
+    summary: str,
+) -> None:
+    """Report a screening fault: always logged, recorded when asked (ADR-58).
+
+    The DEBUG log fires unconditionally, including for the ``errors=None``
+    callers (structural search, the registration preview) that keep the
+    historical silent-skip contract — "silent" was never meant to include
+    "leaves no trace at all".
+
+    Only *summary* and the errno reach the collector, never *path*: the
+    recorded pairs are persisted to `run_file_errors` and rendered on the
+    dashboard, and the key is already the directory rel, so an absolute
+    filesystem path in the message adds nothing but the machine-specific root
+    prefix (ADR-25). The log line, which stays local and is at DEBUG for that
+    reason, carries the full path an operator needs to go fix it.
+
+    That is why the detail is rebuilt from ``errno``/``strerror`` rather than
+    taken from ``str(exc)``. `OSError.__str__` interpolates ``filename`` when
+    it is set — the normal shape here, since these faults come from `stat` and
+    `read_text` on a real path — so the obvious one-liner silently persists the
+    absolute path and makes the paragraph above a lie (PR #31 review).
+    ``str(exc)`` is used only when there is no ``strerror`` to rebuild from,
+    and then only when ``filename`` is unset, so it cannot reintroduce a path.
+    """
+    if exc.strerror:
+        detail = exc.strerror
+        prefix_errno = True
+    elif exc.filename is None:
+        # No strerror to rebuild from. Safe only because `filename` is unset,
+        # so `str(exc)` cannot carry a path — and `str(exc)` already renders
+        # its own "[Errno N] " when errno is set, so this branch must NOT be
+        # prefixed again or it doubles (PR #31 round-2 review).
+        detail = str(exc) or type(exc).__name__
+        prefix_errno = False
+    else:
+        detail = type(exc).__name__
+        prefix_errno = True
+    if prefix_errno and exc.errno is not None:
+        # Prefixed on the branches that built `detail` themselves. An earlier
+        # version built the errno into the first branch only, so the shape with
+        # a filename but no strerror dropped it — losing the actionable half to
+        # protect the path, when both are available (PR #31 review).
+        detail = f"[Errno {exc.errno}] {detail}"
+    # The log keeps the full path; only the persisted pair is trimmed.
+    logger.debug("discovery: %s — %s (%s)", summary, path, exc)
+    if bucket is None:
+        return
+    # One row per directory, not per event. Under ``follow_symlinks`` a failing
+    # directory is stat'd twice — once as a child in its parent's loop, once as
+    # the walk dir when `os.walk` descends into it — and recorded identically
+    # both times. `record_file_errors` is INSERT OR REPLACE on (run_id, path),
+    # so the duplicate collapsed on write while still inflating
+    # `discovery_degraded`, making an operator-facing count disagree with the
+    # rows behind it (PR #31 review). The key IS the unit of report here: a
+    # second fault on the same directory tells an operator nothing new.
+    if any(existing == key for existing, _ in bucket):
+        return
+    bucket.append((key, f"{summary} ({detail})"))
 
 
 def _is_binary(path: Path) -> bool:
@@ -158,34 +266,16 @@ class _IgnoreStack:
         self._specs: list[tuple[str, GitIgnoreSpec]] = []
 
     def push(self, base_rel_posix: str, gitignore: Path) -> None:
-        try:
-            lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError as exc:
-            # The second declared exception to "no filesystem fault vanishes
-            # without a trace" (ADR-51), and the one whose consequence points
-            # the opposite way from every other error in this module. Losing a
-            # .gitignore does not risk over-deleting — it risks
-            # UNDER-IGNORING: the rules that should have excluded this
-            # directory's files never load, so files the user asked to keep
-            # out can enter the index, which is a retrievable surface.
-            #
-            # Skipping is still what happens, for now, because the
-            # alternative is failing the whole walk over one unreadable
-            # ignore file. Which of those is right is a taxonomy decision
-            # tracked in issue #26 alongside the sibling `is_file()` call
-            # three lines below; this only stops the failure being invisible
-            # while that is decided (PR #24 round-8 review).
-            #
-            # Bounded, and worth knowing: the secret and generated-file
-            # skip-lists are applied independently of this stack, so a lost
-            # .gitignore is never a secret-exposure path.
-            logger.debug(
-                "discovery: could not read %s (%s) — its ignore rules are "
-                "not applied, so this directory may be under-ignored",
-                gitignore,
-                exc,
-            )
-            return
+        """Load one .gitignore onto the stack.
+
+        Lets ``OSError`` propagate deliberately (issue #26, ADR-58). It used
+        to be swallowed here with a bare ``return``, which put the only
+        record of the failure out of reach of the collector; `discover_files`
+        is the single caller and owns every other fault report in this
+        module, so the handling belongs there next to the sibling
+        ``is_file()`` test that fails the same way for the same reasons.
+        """
+        lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
         self._specs.append((base_rel_posix, GitIgnoreSpec.from_lines(lines)))
 
     def ignored(self, rel_posix: str, *, is_dir: bool = False) -> bool:
@@ -204,34 +294,42 @@ class _IgnoreStack:
         return decision
 
 
-def _cycle_guard_identity(path: str | Path) -> tuple[int, int] | None:
+def _cycle_guard_identity(
+    path: str | Path,
+    *,
+    bucket: list[tuple[str, str]] | None = None,
+    key: str = "<root>",
+) -> tuple[int, int] | None:
     """``(st_dev, st_ino)`` for the ``follow_symlinks`` cycle guard, or None.
 
-    A failure here is deliberately NOT recorded in ``DiscoveryErrors.dirs``.
-    ``os.walk`` has already scandir'd this directory successfully — its files
-    are enumerated and reach ``results`` — so this stat is evidence about
-    directory *identity*, never about whether a file exists. Routing it to
-    ``errors.dirs`` would suppress deletion and orphan pruning for a subtree
-    that was fully walked and block the git anchor (ADR-51, narrowed by
-    ADR-54), on a question it did not answer: exactly the over-correction
-    ADR-54 exists to undo, reached from the other direction.
+    A failure here is recorded in ``DiscoveryErrors.unidentified`` and
+    deliberately NOT in ``dirs`` or ``files``. ``os.walk`` has already
+    scandir'd this directory successfully — its files are enumerated and reach
+    ``results`` — so this stat is evidence about directory *identity*, never
+    about whether a file exists. Routing it to ``errors.dirs`` would suppress
+    deletion and orphan pruning for a subtree that was fully walked and block
+    the git anchor (ADR-51, narrowed by ADR-54), on a question it did not
+    answer: exactly the over-correction ADR-54 exists to undo, reached from
+    the other direction. ``unidentified`` exists precisely so the failure can
+    be reported without being mistaken for evidence (ADR-58).
 
     What actually degrades is the duplicate guard, and only under
     ``follow_symlinks=True``. An unseeded directory is not pruned, so a symlink
     pointing back at it re-walks that subtree and yields the same files a
-    second time under a different rel path. Logged rather than dropped: after
-    ADR-51 this module's contract is that no filesystem fault vanishes without
-    a trace, and a reader is entitled to see the one place where the trace is a
-    log line instead of a recorded error (PR #24 round-7 review).
+    second time under a different rel path. That can only ADD paths to the
+    result, which is why it is safe to suppress nothing.
     """
     try:
         st = os.stat(path)
     except OSError as exc:
-        logger.debug(
-            "discovery: cycle-guard stat failed for %s (%s) — symlink "
-            "duplicate-detection degraded for this directory",
+        _record_degraded(
+            bucket,
+            key,
             path,
             exc,
+            "cycle-guard stat failed, so symlink duplicate-detection is "
+            "degraded for this directory — it may be walked twice under two "
+            "rel paths, never omitted",
         )
         return None
     return (st.st_dev, st.st_ino)
@@ -286,6 +384,13 @@ def discover_files(
                 rel = "<root>"
         errors.dirs.append((rel, str(exc) or type(exc).__name__))
 
+    # `errors=None` keeps the historical silent-skip contract for the callers
+    # that do no change detection (structural search, the ADR-42 registration
+    # preview). `_record_degraded` still logs in that case — these are the
+    # buckets, not the reporting switch.
+    unscreened = None if errors is None else errors.unscreened
+    unidentified = None if errors is None else errors.unidentified
+
     ignores = _IgnoreStack()
     extra_spec = (
         GitIgnoreSpec.from_lines(cfg.extra_ignore_patterns)
@@ -302,17 +407,56 @@ def discover_files(
     for dirpath, dirnames, filenames in os.walk(
         root_path, topdown=True, followlinks=cfg.follow_symlinks, onerror=_walk_error
     ):
-        if cfg.follow_symlinks:
-            ident = _cycle_guard_identity(dirpath)
-            if ident is not None:
-                visited.add(ident)
         dir_rel = PurePosixPath(Path(dirpath).relative_to(root_path)).as_posix()
         if dir_rel == ".":
             dir_rel = ""
+        # Computed before the cycle guard purely so the guard has a key to
+        # report against; it reads nothing from the filesystem.
+        dir_key = _dir_key(dir_rel)
 
+        if cfg.follow_symlinks:
+            ident = _cycle_guard_identity(dirpath, bucket=unidentified, key=dir_key)
+            if ident is not None:
+                visited.add(ident)
+
+        # Both .gitignore faults land in `unscreened` and both are non-fatal.
+        # Before issue #26 the first one RAISED — CPython's `_ignore_error`
+        # covers only (ENOENT, ENOTDIR, EBADF, ELOOP), so `is_file()` re-raises
+        # EACCES and ESTALE — and it ran unconditionally once per walked
+        # directory, so a single unstattable path took down the whole run, and
+        # with it `structural_search` (an unhandled 500) and the registration
+        # preview. The second was swallowed with a bare `return`.
+        #
+        # Continuing is not the same as ignoring: the directory prefix is
+        # recorded, and the indexer suppresses deletion under it (ADR-58),
+        # because a lost .gitignore can drop a file OUT of the results as well
+        # as let one in — a deeper spec's negation of a shallower exclusion
+        # stops applying, and downstream "absent from the walk" means deleted.
         gitignore = Path(dirpath) / ".gitignore"
-        if gitignore.is_file():
-            ignores.push(dir_rel, gitignore)
+        try:
+            has_gitignore = gitignore.is_file()
+        except OSError as exc:
+            has_gitignore = False
+            _record_degraded(
+                unscreened,
+                dir_key,
+                gitignore,
+                exc,
+                "could not test whether this directory holds a .gitignore, so "
+                "any rules it holds were not applied",
+            )
+        if has_gitignore:
+            try:
+                ignores.push(dir_rel, gitignore)
+            except OSError as exc:
+                _record_degraded(
+                    unscreened,
+                    dir_key,
+                    gitignore,
+                    exc,
+                    "this directory's .gitignore exists but could not be read, "
+                    "so its rules were not applied",
+                )
 
         kept_dirs = []
         for d in sorted(dirnames):
@@ -321,10 +465,38 @@ def discover_files(
             child_rel = f"{dir_rel}/{d}" if dir_rel else d
             if ignores.ignored(child_rel, is_dir=True):
                 continue
-            if not cfg.follow_symlinks and (Path(dirpath) / d).is_symlink():
-                continue
+            if not cfg.follow_symlinks:
+                try:
+                    is_link = (Path(dirpath) / d).is_symlink()
+                except OSError as exc:
+                    # Same re-raise mechanism as the .gitignore test above, and
+                    # before issue #26 this also killed the run. Treated as
+                    # "not a symlink" so the directory is still walked: pruning
+                    # it would hide whatever it holds from the deletion path,
+                    # handing downstream a set of "absent" files nobody looked
+                    # for — purge on doubt, which ADR-51 refuses. That is the
+                    # same call the `follow_symlinks=True` branch below already
+                    # makes for an unstattable child.
+                    #
+                    # Recorded in `unidentified`, which suppresses nothing,
+                    # because the cost runs only one way: `os.walk` may now
+                    # descend into a link it would normally skip, so the result
+                    # can gain paths. It cannot lose any.
+                    is_link = False
+                    _record_degraded(
+                        unidentified,
+                        child_rel,
+                        Path(dirpath) / d,
+                        exc,
+                        "could not determine whether this child directory is a "
+                        "symlink, so it is walked unguarded",
+                    )
+                if is_link:
+                    continue
             if cfg.follow_symlinks:
-                child_ident = _cycle_guard_identity(Path(dirpath) / d)
+                child_ident = _cycle_guard_identity(
+                    Path(dirpath) / d, bucket=unidentified, key=child_rel
+                )
                 if child_ident is None:
                     # Keep walking it. Skipping an unstattable directory would
                     # hide whatever it holds and hand the deletion path a set

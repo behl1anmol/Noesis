@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS pending_changes (
   PRIMARY KEY (project_id, path)
 );
 
+-- Per-run failure detail. `path` is usually a project-relative file, but the
+-- key space is deliberately wider: the '<root>' sentinel, a directory rel for
+-- an unwalked subtree, and the '<screening>:'/'<identity>:' synthetic keys for
+-- screening faults (ADR-58). Those prefixes are load-bearing rather than
+-- cosmetic — a directory missing execute permission produces a real per-file
+-- error AND a screening fault for the same .gitignore, and the INSERT OR
+-- REPLACE below would otherwise let one silently overwrite the other.
 CREATE TABLE IF NOT EXISTS run_file_errors (
   run_id TEXT NOT NULL REFERENCES index_runs(id),
   path   TEXT NOT NULL,
@@ -160,6 +167,17 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # depend on. NULL means "recorded before this column existed", which
     # `scoped_runs_since_full` reads as not-scoped.
     ("index_runs", "scoped", "INTEGER"),
+    # ADR-58: the run's own `clean_run` verdict, PERSISTED rather than
+    # re-derived. `last_full_run_was_clean` used to reconstruct it as
+    # `files_failed == 0`, which held only while every term of `clean_run` was
+    # a file-level failure. It has now drifted three times — dir errors (PR #30
+    # round 2), then screening-held deletions, which are deliberately NOT
+    # counted in `files_failed` because nothing failed to index. A reader that
+    # re-derives a verdict the writer already computed will drift again; this
+    # makes the next added term safe by construction. NULL means "recorded
+    # before this column existed", which the reader falls back to the old
+    # derivation for — correct, since those rows predate any term it missed.
+    ("index_runs", "clean", "INTEGER"),
 )
 
 
@@ -671,6 +689,7 @@ def finish_run(
     fast_path_used: bool | None = None,
     candidate_count: int | None = None,
     files_failed: int | None = None,
+    clean: bool | None = None,
     error: str | None = None,
 ) -> None:
     """Close out a run row: status, counters, finish time, error.
@@ -691,6 +710,12 @@ def finish_run(
     ``status``, ``error`` and ``finished_at`` stay unconditional: the whole
     point of the second call is to overwrite those three, and ``error`` must
     be able to move back to NULL as well as to a message.
+
+    ``clean`` is the caller's own ``clean_run`` verdict and is COALESCE'd with
+    the counters rather than written unconditionally, for the same reason: the
+    second call does not recompute it. That is safe because every reader pairs
+    it with ``status``, so a run that reaches the failure path is excluded by
+    the status test regardless of the verdict recorded before it (ADR-58).
     """
     conn.execute(
         """
@@ -702,6 +727,7 @@ def finish_run(
           fast_path_used  = COALESCE(?, fast_path_used),
           candidate_count = COALESCE(?, candidate_count),
           files_failed    = COALESCE(?, files_failed),
+          clean           = COALESCE(?, clean),
           finished_at = ?, error = ?
         WHERE id = ?
         """,
@@ -713,6 +739,7 @@ def finish_run(
             None if fast_path_used is None else int(fast_path_used),
             candidate_count,
             files_failed,
+            None if clean is None else int(clean),
             _now(),
             error,
             run_id,
@@ -982,9 +1009,24 @@ def last_full_run_was_clean(conn: sqlite3.Connection, project_id: str) -> bool:
 
     This is the best available answer to "could a promotion drain the H1 dirty
     set?", which is what the fraction trigger needs to know (ADR-57). Both
-    drains are gated on ``clean_run``, and that is exactly ``files_failed == 0``
-    — so a full walk that reported any failure left the set pinned, and the
-    next one will too until the underlying fault is fixed.
+    drains are gated on ``clean_run``, so a full walk that was not clean left
+    the set pinned, and the next one will too until the underlying fault is
+    fixed.
+
+    Reads the run's **persisted** ``clean`` verdict rather than re-deriving it
+    (ADR-58). It used to reconstruct it as ``files_failed == 0``, which was
+    true only while every term of ``clean_run`` was a file-level failure — and
+    that has now drifted twice. Directory errors were the first (PR #30
+    round 2). Screening-held deletions were the second: they are deliberately
+    absent from ``files_failed`` because nothing failed to index, so a degraded
+    run reported ``files_failed == 0`` while ``clean_run`` was False, and this
+    function said "clean" about a run that had drained nothing — re-latching
+    the fraction trigger on a dirty set promotion cannot shrink (PR #31
+    review). Persisting the writer's own verdict removes the class.
+
+    ``clean IS NULL`` means the row predates the column, so it falls back to
+    the old derivation. That is right rather than merely compatible: those rows
+    were written by code whose ``clean_run`` had no term the derivation missed.
 
     Keyed on the *outcome* rather than the cause. Keying on ``unwalkable_dirs``
     rows instead — the first version of this guard — covered only ``dir_errors``,
@@ -1026,7 +1068,7 @@ def last_full_run_was_clean(conn: sqlite3.Connection, project_id: str) -> bool:
     logic that trades this latch for the one the guard exists to prevent.
     """
     row = conn.execute(
-        "SELECT status, files_failed FROM index_runs"
+        "SELECT status, files_failed, clean FROM index_runs"
         " WHERE project_id = ? AND finished_at IS NOT NULL"
         " AND (scoped = 0 OR scoped IS NULL)"
         " ORDER BY started_at DESC, rowid DESC LIMIT 1",
@@ -1034,7 +1076,11 @@ def last_full_run_was_clean(conn: sqlite3.Connection, project_id: str) -> bool:
     ).fetchone()
     if row is None:
         return True
-    return row["status"] == "done" and row["files_failed"] == 0
+    if row["status"] != "done":
+        return False
+    if row["clean"] is not None:
+        return bool(row["clean"])
+    return row["files_failed"] == 0
 
 
 def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
@@ -1045,8 +1091,11 @@ def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
 
     A full run that finishes ``done`` with contained per-file failures
     (ADR-41) is not a *clean* run, so it takes neither drain branch —
-    ``clean_run`` gates both ``clear_dirty_paths`` and the anchor write, and it
-    is exactly ``files_failed == 0``. It still resets this counter. That looks
+    ``clean_run`` gates both ``clear_dirty_paths`` and the anchor write. (It is
+    no longer ``files_failed == 0``: screening-held deletions are a term of
+    ``clean_run`` that ``files_failed`` deliberately excludes, which is why the
+    verdict is persisted on the run row now rather than re-derived — ADR-58.)
+    It still resets this counter. That looks
     wrong until you price the alternative: requiring a clean full run means a
     project with a **permanently** unreadable directory can never reset, so
     every launch past the threshold promotes. Measured at threshold 3 over 12

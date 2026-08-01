@@ -57,6 +57,7 @@ erDiagram
         TEXT triggered_by
         TEXT owner
         INTEGER scoped
+        INTEGER clean
         TEXT error
     }
     pending_changes {
@@ -142,6 +143,7 @@ erDiagram
 | `triggered_by` | TEXT | `manual` / watcher provenance |
 | `owner` | TEXT | process identity that owns the run (see below) |
 | `scoped` | INTEGER NULL | `1` when the run was given an explicit candidate set, `0` for a full walk. Written at INSERT, not at completion, so a run that crashes still counts toward the promotion trigger ([ADR-57](../project/decisions.md)). NULL means the row predates the column; `scoped_runs_since_full` reads that as a full walk, so the counter starts from zero on an upgraded DB rather than inheriting a fabricated history |
+| `clean` | INTEGER NULL | The run's own `clean_run` verdict — `1` when it took both drains (`clear_dirty_paths`/the anchor write), `0` when any term blocked them ([ADR-58](../project/decisions.md)). Persisted rather than re-derived: `last_full_run_was_clean` used to reconstruct it as `files_failed == 0`, which held only while every term was a file-level failure. That drifted twice — directory errors, then screening-held deletions, which are deliberately *not* counted in `files_failed` because nothing failed to index — and each time a reader claimed a run was clean when it had drained nothing. NULL means the row predates the column and falls back to the old derivation, which is correct for rows written before any term it missed existed |
 | `started_at`, `finished_at`, `error` | TEXT | lifecycle |
 
 ### `unwalkable_dirs`
@@ -160,7 +162,7 @@ Why a table rather than a JSON column on `projects` (as `dirty_paths` is): it ne
 
 **A row here is not a deletion record.** Nothing under an unwalked directory is ever purged — "the walk could not look" is not evidence of absence ([ADR-51](../project/decisions.md)). Quarantine bounds only the *retry*: it stops those paths being re-queued into `pending_changes`, which is what lets a permanently unreadable directory's backlog drain. The deletion decision stays keyed on the run's own unwalked prefixes and is untouched by anything in this table.
 
-The remaining tables: `pending_changes` (watcher backlog, PK `(project_id, path)`, `event_type` CHECK `created`/`modified`/`deleted`); `run_file_errors` (per-file failure containment, PK `(run_id, path)`); `query_log` (metadata-only telemetry — interface `rest`/`mcp`, kind `search`/`structural`, channel, reranked, latency, result count — **never query text**, [ADR-25](../project/decisions.md)); `watcher_stats` (per-project per-day event counters); `app_settings` (key/value, e.g. the dashboard compute-device setting).
+The remaining tables: `pending_changes` (watcher backlog, PK `(project_id, path)`, `event_type` CHECK `created`/`modified`/`deleted`); `run_file_errors` (per-file failure containment, PK `(run_id, path)` — `path` is usually a project-relative file, but also carries the `<root>` sentinel, a directory rel for an unwalked subtree, and the `<screening>:` / `<identity>:` synthetic keys of [ADR-58](../project/decisions.md), which exist precisely so a screening fault and a real per-file error on the same `.gitignore` cannot overwrite each other through `INSERT OR REPLACE`); `query_log` (metadata-only telemetry — interface `rest`/`mcp`, kind `search`/`structural`, channel, reranked, latency, result count — **never query text**, [ADR-25](../project/decisions.md)); `watcher_stats` (per-project per-day event counters); `app_settings` (key/value, e.g. the dashboard compute-device setting).
 
 ## Design decisions
 

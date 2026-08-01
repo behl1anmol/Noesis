@@ -411,7 +411,18 @@ def test_promotion_fires_when_the_candidate_set_stops_being_narrow(tmp_path) -> 
 def _finish_full(conn, project_id: str, *, files_failed: int) -> None:
     """A completed full walk. `done` either way — contained per-file failures
     do not fail a run (ADR-41), which is the whole reason `files_failed` rather
-    than `status` is the signal."""
+    than `status` is the signal.
+
+    Deliberately does NOT pass `clean`, so these rows land with `clean IS NULL`
+    and `last_full_run_was_clean` resolves them through its legacy fallback
+    (ADR-58). That is what this helper is now pinning: the upgrade path for
+    databases written before the column existed. It is NOT coverage of the
+    current mechanism — `execute_run` always writes the verdict — so do not
+    read a pass here as proof that the persisted column works. That is covered
+    end-to-end by `test_a_held_back_deletion_makes_the_run_not_clean_for_
+    readers_too` in `tests/test_issue26_screening_faults.py` (PR #31 round-2
+    review, which flagged that this helper reads as though it still protects
+    the live path)."""
     run, _ = state.try_start_run(conn, project_id, scoped=False)
     state.finish_run(conn, run, "done", files_failed=files_failed)
 
