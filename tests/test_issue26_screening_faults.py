@@ -62,7 +62,12 @@ from pathlib import Path
 import pytest
 
 from noesis.core import state
-from noesis.core.discovery import DiscoveryConfig, DiscoveryErrors, discover_files
+from noesis.core.discovery import (
+    DiscoveryConfig,
+    DiscoveryErrors,
+    _record_degraded,
+    discover_files,
+)
 from noesis.core.indexer import execute_run, prepare_run
 from noesis.core.structural import structural_search
 
@@ -218,6 +223,39 @@ def test_persisted_screening_detail_carries_no_absolute_path(tmp_path, monkeypat
     # The actionable half is still there.
     assert "Permission denied" in message
     assert "13" in message
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        PermissionError(13, "Permission denied", "/abs/pkg/.gitignore"),
+        OSError(13, None, "/abs/pkg/.gitignore"),
+        OSError(13, None),
+        OSError("opaque failure"),
+    ],
+    ids=["normal", "no-strerror-with-filename", "no-strerror-no-filename", "bare"],
+)
+def test_recorded_detail_states_the_errno_at_most_once(exc):
+    """PR #31 round-2 review: the errno prefix stacked on one fallback branch.
+
+    `str(OSError(13, None))` is already `"[Errno 13] None"`, so prepending
+    unconditionally produced `[Errno 13] [Errno 13] None`. Unreachable from
+    `stat`/`read_text` — CPython fills `strerror` from the errno table — but it
+    is the defensive branch, and a defensive branch that prints nonsense is
+    worse than none.
+
+    Driven through the real helper across all four shapes rather than asserting
+    one string, so the invariant (state the errno once, never leak the path)
+    holds however the branches are later rearranged.
+    """
+    bucket: list[tuple[str, str]] = []
+    _record_degraded(bucket, "pkg", "/abs/pkg/.gitignore", exc, "summary")
+
+    (_, message) = bucket[0]
+    assert message.count("[Errno") <= 1
+    if exc.errno is not None:
+        assert f"[Errno {exc.errno}]" in message
+    assert "/abs/pkg/.gitignore" not in message
 
 
 def test_collectorless_callers_still_get_a_log_line(tmp_path, monkeypatch, caplog):

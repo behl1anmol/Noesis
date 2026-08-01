@@ -215,14 +215,19 @@ def _record_degraded(
     """
     if exc.strerror:
         detail = exc.strerror
+        prefix_errno = True
     elif exc.filename is None:
         # No strerror to rebuild from. Safe only because `filename` is unset,
-        # so `str(exc)` cannot carry a path.
+        # so `str(exc)` cannot carry a path — and `str(exc)` already renders
+        # its own "[Errno N] " when errno is set, so this branch must NOT be
+        # prefixed again or it doubles (PR #31 round-2 review).
         detail = str(exc) or type(exc).__name__
+        prefix_errno = False
     else:
         detail = type(exc).__name__
-    if exc.errno is not None:
-        # Prepended on every branch, including the two fallbacks. An earlier
+        prefix_errno = True
+    if prefix_errno and exc.errno is not None:
+        # Prefixed on the branches that built `detail` themselves. An earlier
         # version built the errno into the first branch only, so the shape with
         # a filename but no strerror dropped it — losing the actionable half to
         # protect the path, when both are available (PR #31 review).
