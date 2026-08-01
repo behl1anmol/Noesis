@@ -46,6 +46,37 @@ def is_attributable_prefix(dir_rel: str) -> bool:
     )
 
 
+def _error_prefixes(
+    reported: Sequence[tuple[str, str]], *, follow_symlinks: bool
+) -> tuple[str, ...] | None:
+    """Root-relative prefixes under which *reported* voids deletion evidence.
+
+    ``()`` means nothing is blocked. ``None`` means the failures cannot be
+    attributed to a subtree and the whole run's deletion evidence is void:
+
+    * the ``<root>`` sentinel — the walk root itself failed, or the empty-scan
+      guard fired, so nothing at all was seen;
+    * a path outside the root (``relative_to`` failed, so discovery recorded
+      the absolute name) — no prefix of the project's rel paths matches it;
+    * ``follow_symlinks`` — the same directory is reachable under rel paths
+      that are not under its own, so prefix containment stops implying
+      "unseen".
+
+    Shared by the two collector lists that suppress deletion, so they cannot
+    drift apart on any of those three edge cases.
+    """
+    if not reported:
+        return ()
+    if follow_symlinks:
+        return None
+    prefixes: list[str] = []
+    for dir_rel, _ in reported:
+        if not is_attributable_prefix(dir_rel):
+            return None
+        prefixes.append(dir_rel)
+    return tuple(prefixes)
+
+
 def _unwalked_prefixes(
     disc_errors: DiscoveryErrors, *, follow_symlinks: bool
 ) -> tuple[str, ...] | None:
@@ -59,27 +90,12 @@ def _unwalked_prefixes(
     deletion processing and orphan pruning for the whole project forever
     (PR #24 review).
 
-    ``()`` means nothing is blocked. ``None`` means the failures cannot be
-    attributed to a subtree and the whole run's deletion evidence is void:
-
-    * the ``<root>`` sentinel — the walk root itself failed, or the empty-scan
-      guard fired, so nothing at all was seen;
-    * a path outside the root (``relative_to`` failed, so discovery recorded
-      the absolute name) — no prefix of the project's rel paths matches it;
-    * ``follow_symlinks`` — the same directory is reachable under rel paths
-      that are not under its own, so prefix containment stops implying
-      "unseen".
+    Reads ``dirs`` ONLY. ``unscreened`` blocks deletion too but is not the same
+    question and is deliberately kept out: this value also drives the ADR-56
+    ledger, quarantine, and the recovery reset, and a directory that was walked
+    perfectly well must never be counted as unwalkable there (ADR-58).
     """
-    if not disc_errors.dirs:
-        return ()
-    if follow_symlinks:
-        return None
-    prefixes: list[str] = []
-    for dir_rel, _ in disc_errors.dirs:
-        if not is_attributable_prefix(dir_rel):
-            return None
-        prefixes.append(dir_rel)
-    return tuple(prefixes)
+    return _error_prefixes(disc_errors.dirs, follow_symlinks=follow_symlinks)
 
 
 def _under(path: str, prefixes: tuple[str, ...]) -> bool:
@@ -125,6 +141,14 @@ class IndexResult:
     # finds the directory walkable again re-hashes them all. Reported here so
     # "we stopped retrying N paths" is never a silent drop.
     unverified_suppressed: int = 0
+    # Directories whose SCREENING inputs failed this run (ADR-58): a .gitignore
+    # that could not be read or tested for, or a directory whose symlink
+    # identity could not be established. Not a file count and not a failure
+    # count — deliberately absent from `files_failed`, because nothing failed
+    # to be indexed. It is the "this run's results may be the wrong shape"
+    # signal: `unscreened` entries additionally hold back deletions under their
+    # own prefix, which is reported separately in the run log.
+    discovery_degraded: int = 0
 
 
 # Live-progress callback: (files_done, files_to_index, chunks_written).
@@ -413,9 +437,22 @@ async def execute_run(
         # `discovery_config` may still be None here (no persisted scope row);
         # discover_files defaults it the same way, so read the flag from the
         # same default rather than assuming what it is.
-        unwalked = _unwalked_prefixes(
-            disc_errors,
-            follow_symlinks=(discovery_config or DiscoveryConfig()).follow_symlinks,
+        follow_symlinks = (discovery_config or DiscoveryConfig()).follow_symlinks
+        unwalked = _unwalked_prefixes(disc_errors, follow_symlinks=follow_symlinks)
+        # Prefixes where the walk saw everything but could not apply the ignore
+        # rules (ADR-58). These block deletion for a reason that is the reverse
+        # of `unwalked`'s: nothing went unseen, but a lost .gitignore can push a
+        # file OUT of the results — git is last-match-wins, so a deeper spec's
+        # negation of a shallower exclusion stops applying — and downstream
+        # every absence reads as a deletion.
+        #
+        # Kept in its own value rather than merged into `unwalked`, because
+        # `unwalked` also feeds the ADR-56 ledger, the quarantine test and the
+        # recovery reset. A directory that walked fine must not accumulate
+        # consecutive-failure counts toward quarantine, and a ledger row must
+        # not be denied its reset because an unrelated .gitignore was degraded.
+        unscreened = _error_prefixes(
+            disc_errors.unscreened, follow_symlinks=follow_symlinks
         )
 
         # Directory-failure ledger (ADR-56). READ here, WRITTEN after the file
@@ -533,10 +570,14 @@ async def execute_run(
                 # walked normally and stay provable. Cost of skipping is one
                 # more drift-gate firing next run; cost of pruning wrongly is
                 # content gone from search.
+                #
+                # `unscreened` is spared on the same rule (ADR-58): under a
+                # directory whose ignore rules never loaded, "not in
+                # discovered_set" can mean "wrongly excluded", not "gone".
                 errored_files = {p for p, _ in disc_errors.files}
                 orphan_paths = (
                     []
-                    if unwalked is None
+                    if unwalked is None or unscreened is None
                     else [
                         p
                         for p in per_file
@@ -544,6 +585,7 @@ async def execute_run(
                         and p not in discovered_set
                         and p not in errored_files
                         and not _under(p, unwalked)
+                        and not _under(p, unscreened)
                     ]
                 )
                 if disc_errors.dirs:
@@ -721,6 +763,16 @@ async def execute_run(
         # here that really was deleted is simply re-detected and deleted by the
         # next run, which then clears its pending row.
         unverified: tuple[str, ...] = ()
+        # Deletions held back because the ignore rules that decide membership
+        # could not be loaded (ADR-58). Kept OUT of `unverified` on purpose:
+        # that name feeds the re-pend and the ADR-56 quarantine, and these
+        # paths need neither. Discovery walks the entire tree on every run, and
+        # deletion is recomputed from that walk — so the first run that reads
+        # the .gitignore again reaches the right answer on its own, with no
+        # retry queued and no backlog to drain. What it does drive is the
+        # anchor: a stored file wrongly excluded this run is a file whose hash
+        # may now be stale, which is exactly what the anchor must not skip past.
+        screening_held: tuple[str, ...] = ()
         if diff.deleted:
             if unwalked is None:
                 provable: tuple[str, ...] = ()
@@ -730,6 +782,14 @@ async def execute_run(
                 unverified = tuple(p for p in diff.deleted if _under(p, unwalked))
             else:
                 provable = tuple(diff.deleted)
+            # Second filter, applied only to what the first one already cleared
+            # — so a path blocked by both is counted once, as unverified.
+            if unscreened is None:
+                screening_held = provable
+                provable = ()
+            elif unscreened:
+                screening_held = tuple(p for p in provable if _under(p, unscreened))
+                provable = tuple(p for p in provable if not _under(p, unscreened))
             if provable:
                 await asyncio.to_thread(store.delete_file_chunks, project_id, provable)
                 state.delete_files(conn, project_id, provable)
@@ -830,9 +890,53 @@ async def execute_run(
             )
             for dir_rel, msg in disc_errors.dirs
         ]
-        if file_errors or hash_errors or dir_errors:
+        # Screening faults (ADR-58). Recorded so an operator can see them, and
+        # kept out of `total_failed` / `all_failed` / `run_error`, because
+        # nothing failed to be indexed — the run's results may just be the
+        # wrong shape.
+        #
+        # The synthetic key prefixes are load-bearing, not decoration.
+        # `record_file_errors` is INSERT OR REPLACE on (run_id, path), and the
+        # r-without-x case that motivates this whole change produces a REAL
+        # `errors.files` row for `<dir>/.gitignore` at the same time as the
+        # screening row for `<dir>` — different questions, and on a root
+        # .gitignore the keys would otherwise be one character apart. Round 6
+        # of PR #24 already lost an operator's errno to exactly this collision,
+        # with a generic sentinel overwriting the real one. A real rel path can
+        # never begin with `<`, so these cannot collide with anything.
+        screening_errors = [
+            (f"<screening>:{dir_rel}", f"screening degraded: {msg}")
+            for dir_rel, msg in disc_errors.unscreened
+        ] + [
+            (f"<identity>:{dir_rel}", f"screening degraded: {msg}")
+            for dir_rel, msg in disc_errors.unidentified
+        ]
+        if file_errors or hash_errors or dir_errors or screening_errors:
             state.record_file_errors(
-                conn, run_id, [*file_errors, *hash_errors, *dir_errors]
+                conn,
+                run_id,
+                [*file_errors, *hash_errors, *dir_errors, *screening_errors],
+            )
+        if screening_errors:
+            logger.warning(
+                "index run %s: %d discovery screening fault(s) — this run's "
+                "results may be over- or under-inclusive under %s. %d deletion(s) "
+                "held back as a result; indexed content is untouched and a run "
+                "that loads the rules again reaches the right answer on its own",
+                run_id,
+                len(screening_errors),
+                ", ".join(
+                    sorted(
+                        {
+                            dir_rel or "<root>"
+                            for dir_rel, _ in (
+                                *disc_errors.unscreened,
+                                *disc_errors.unidentified,
+                            )
+                        }
+                    )
+                ),
+                len(screening_held),
             )
         # Fold this run's directory result into the ledger. Deliberately AFTER
         # the file loop and the re-admission above: a crash before this point
@@ -924,7 +1028,21 @@ async def execute_run(
         # A run with failed files must not advance the git anchor either:
         # the failed files' state rows are stale, and anchoring past them
         # would let the next fast path carry them forward as unchanged.
-        clean_run = not file_errors and not hash_errors and not dir_errors
+        #
+        # `screening_held` joins them for the same reason, and only when it is
+        # non-empty (ADR-58). A stored file that a lost .gitignore pushed out of
+        # the results is a file this run did not hash, so its stored hash may be
+        # stale; anchoring past it would leave the next fast path with no reason
+        # to look at it again. The test is on what was actually held back rather
+        # than on the fault itself, so an unreadable .gitignore that excludes
+        # nothing currently indexed — the common case — still advances the
+        # anchor instead of latching the project onto full walks forever.
+        clean_run = (
+            not file_errors
+            and not hash_errors
+            and not dir_errors
+            and not screening_held
+        )
         if head is not None and clean_run:
             # Persist the working-tree-dirty set with the anchor (H1). The
             # fast path already captured it at run start (git_info); a
@@ -994,6 +1112,7 @@ async def execute_run(
                 *repend,
             ),
             unverified_suppressed=suppressed,
+            discovery_degraded=len(screening_errors),
         )
     except BaseException as exc:
         # BaseException: CancelledError (e.g. server shutdown) must also mark

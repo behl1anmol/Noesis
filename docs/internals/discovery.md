@@ -46,7 +46,9 @@ flowchart TB
 ## Failures are reported, not swallowed
 
 `discover_files(root, config, errors=…)` takes an optional `DiscoveryErrors`
-collector with two lists of `(path, message)` pairs: `files` and `dirs`. When
+collector with four lists of `(path, message)` pairs — `files` and `dirs` for
+faults that put a path's *existence* in doubt, `unscreened` and `unidentified`
+for faults that only degrade *screening* ([ADR-58](../project/decisions.md)). When
 it is omitted, failures are skipped silently exactly as before — the
 structural-search and registration-preview callers rely on that.
 
@@ -59,8 +61,57 @@ and a path that could not be *read*:
 | the same errors on the **walk root itself** | recorded in `errors.dirs` as `<root>` | `os.walk` routes the root's own scandir failure through the same hook, and an unmounted or renamed root arrives as `FileNotFoundError`. A missing root is never evidence that files were deleted — it is evidence the scan could not run |
 | any other `OSError` on a file (`EACCES`, `EIO`, `ESTALE`, …) | recorded in `errors.files` | the file still exists; it was merely unreadable this run |
 | any other `OSError` from `os.walk` (via its `onerror` hook) | recorded in `errors.dirs` | part of the tree went unwalked; its contents are unknown |
-| `OSError` reading a `.gitignore` (`_IgnoreStack.push`) | **logged at DEBUG, not recorded** | the exception that runs the other way. Losing an ignore file cannot cause over-deletion; it causes **under-ignoring** — the rules that should have excluded this directory's files never load, so excluded files can reach the index. Skipping beats failing the whole walk over one unreadable ignore file, but which is right is deferred to [issue #26](https://github.com/behl1anmol/Noesis/issues/26). Bounded: the secret and generated skip-lists apply independently of this stack |
-| `OSError` from the cycle-guard `stat` (`follow_symlinks` only) | **logged at DEBUG, not recorded** | the other deliberate exception. `os.walk` already scandir'd that directory successfully and its files are in the result, so the stat answers a question about directory *identity*, not about whether a file exists. Recording it would suppress deletion for a fully-walked subtree on evidence that says nothing about it. What degrades is duplicate detection: an unseeded directory is not pruned, so a symlink back into it yields the same files under a second rel path |
+| `OSError` reading or stat-ing a `.gitignore` (`_IgnoreStack.push`, `gitignore.is_file()`) | recorded in `errors.unscreened` | this directory's ignore rules never loaded, so its *membership decisions* are unreliable — see below, this one runs in **both** directions. The walk itself was complete |
+| `OSError` from the cycle-guard `stat`, or from the per-child `is_symlink()` | recorded in `errors.unidentified` | `os.walk` already scandir'd that directory successfully and its files are in the result, so the stat answers a question about directory *identity*, not about whether a file exists. It can only make the walk over-inclusive, so it suppresses nothing — recording it in `dirs` would freeze deletion for a fully-walked subtree on evidence that says nothing about it |
+
+## Screening faults: the walk was fine, the *shape* may not be
+
+`files` and `dirs` are about a path's **existence**. `unscreened` and
+`unidentified` are not: the directory was reached and enumerated, every file in
+it is accounted for, and what failed is an input to screening. They are recorded
+so no fault is invisible, but they are never existence evidence, and they never
+fail the run or count toward `files_failed`.
+
+The `.gitignore` case is the one worth understanding, because the obvious
+reading of it is wrong — and was shipped wrong, in this file and in the ADR-51
+row, until issue #26.
+
+The obvious half is **under-ignoring**: rules that should have excluded files
+never load, so excluded files reach the index. Real, but self-correcting — the
+walk is complete on every run, so the first run that reads the file again
+excludes them and they leave.
+
+The half that matters is the reverse. Git is **last-match-wins**, so a deeper
+`.gitignore` can *negate* a shallower exclusion:
+
+```
+.gitignore              *.gen.py            → generated/important.gen.py excluded
+generated/.gitignore    !important.gen.py   → …re-included. Net: kept.
+```
+
+Lose the deeper spec and the outer exclusion stands unopposed. The file drops
+out of the results — and everything downstream reads absence as deletion, so
+its chunks are purged and its state row deleted. That is why `unscreened`
+suppresses deletion and orphan pruning under its own directory prefix, using
+the same `_under` containment as [ADR-54](../project/decisions.md), rather than
+just being logged.
+
+It blocks the git anchor too, but only when it actually held a deletion back.
+Gating on the fault instead would latch any project with a permanently
+unreadable `.gitignore` onto full walks forever — the "guard that can never be
+satisfied" shape [ADR-55](../project/decisions.md) exists to avoid.
+
+Bounded, and worth stating so it is not over-read: the secret and generated
+skip-lists apply independently of the ignore stack, so a lost `.gitignore` is
+never a secret-exposure path.
+
+Both lists are written to `run_file_errors` under synthetic `<screening>:` and
+`<identity>:` keys and surface on the project page. The prefixes are not
+decoration: `Path.is_file()` reaches `stat()`, so a directory missing execute
+permission fails the screening test *and* the per-file stat of that same
+`.gitignore`, and `record_file_errors` is `INSERT OR REPLACE` on
+`(run_id, path)`. Without distinct keys one row would silently overwrite the
+other, which is how an operator lost a real errno once already.
 
 This matters because everything downstream infers deletion from *absence*. A
 path missing from the walk is indistinguishable from a path deleted on disk,

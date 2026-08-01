@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS pending_changes (
   PRIMARY KEY (project_id, path)
 );
 
+-- Per-run failure detail. `path` is usually a project-relative file, but the
+-- key space is deliberately wider: the '<root>' sentinel, a directory rel for
+-- an unwalked subtree, and the '<screening>:'/'<identity>:' synthetic keys for
+-- screening faults (ADR-58). Those prefixes are load-bearing rather than
+-- cosmetic — a directory missing execute permission produces a real per-file
+-- error AND a screening fault for the same .gitignore, and the INSERT OR
+-- REPLACE below would otherwise let one silently overwrite the other.
 CREATE TABLE IF NOT EXISTS run_file_errors (
   run_id TEXT NOT NULL REFERENCES index_runs(id),
   path   TEXT NOT NULL,

@@ -152,9 +152,19 @@ def test_unreadable_gitignore_under_ignores_rather_than_deleting(tmp_path, monke
     """OVER-CORRECTION GUARD — passes before and after the fix by design.
 
     Documents the consequence that makes this different from every other
-    error in the module, and pins the decision not to escalate it: the
-    failure must stay out of DiscoveryErrors, or a lost ignore file would
-    start suppressing deletions for a directory that was read perfectly well.
+    error in the module: a lost ignore file lets excluded content INTO the
+    index rather than dropping content out of it, so the walk keeps going and
+    the directory keeps being indexed.
+
+    Round 8 left this test pinning "the failure must stay out of
+    DiscoveryErrors" while the taxonomy was deferred to issue #26. That half is
+    now superseded by ADR-58: the failure IS recorded, in `unscreened`, and it
+    does suppress deletion under its own prefix — because the round-8 reasoning
+    missed that git is last-match-wins, so a lost spec can also cancel a deeper
+    negation and push a file OUT of the results
+    (`tests/test_issue26_screening_faults.py`). The assertions below are
+    unchanged and still hold: what must never happen is this reaching `dirs` or
+    `files`, which would freeze deletion for a subtree that was walked fine.
     """
     root = _tree(tmp_path)
     _unreadable_gitignore(monkeypatch, root / ".gitignore")
