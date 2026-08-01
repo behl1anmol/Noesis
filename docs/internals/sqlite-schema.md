@@ -57,6 +57,7 @@ erDiagram
         TEXT triggered_by
         TEXT owner
         INTEGER scoped
+        INTEGER clean
         TEXT error
     }
     pending_changes {
@@ -142,6 +143,7 @@ erDiagram
 | `triggered_by` | TEXT | `manual` / watcher provenance |
 | `owner` | TEXT | process identity that owns the run (see below) |
 | `scoped` | INTEGER NULL | `1` when the run was given an explicit candidate set, `0` for a full walk. Written at INSERT, not at completion, so a run that crashes still counts toward the promotion trigger ([ADR-57](../project/decisions.md)). NULL means the row predates the column; `scoped_runs_since_full` reads that as a full walk, so the counter starts from zero on an upgraded DB rather than inheriting a fabricated history |
+| `clean` | INTEGER NULL | The run's own `clean_run` verdict — `1` when it took both drains (`clear_dirty_paths`/the anchor write), `0` when any term blocked them ([ADR-58](../project/decisions.md)). Persisted rather than re-derived: `last_full_run_was_clean` used to reconstruct it as `files_failed == 0`, which held only while every term was a file-level failure. That drifted twice — directory errors, then screening-held deletions, which are deliberately *not* counted in `files_failed` because nothing failed to index — and each time a reader claimed a run was clean when it had drained nothing. NULL means the row predates the column and falls back to the old derivation, which is correct for rows written before any term it missed existed |
 | `started_at`, `finished_at`, `error` | TEXT | lifecycle |
 
 ### `unwalkable_dirs`

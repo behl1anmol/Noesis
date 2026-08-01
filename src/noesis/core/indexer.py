@@ -599,6 +599,26 @@ async def execute_run(
                         if unwalked is None
                         else "skipped under the failed director(ies)",
                     )
+                if disc_errors.unscreened:
+                    # Reported separately, and not folded into the line above,
+                    # because a screening fault can skip pruning with NO
+                    # directory error to explain it — that line would never
+                    # fire and the skip was the one thing about this run an
+                    # operator could not see anywhere (PR #31 review). The
+                    # screening warning further down talks about deletions held
+                    # back, which is a different decision on a different set.
+                    logger.warning(
+                        "index run %s: %d director(ies) had unloadable ignore "
+                        "rules — orphan point pruning %s, because a file that "
+                        "the missing rules wrongly excluded is absent from the "
+                        "walk without being absent from disk; a run that loads "
+                        "them prunes normally",
+                        run_id,
+                        len(disc_errors.unscreened),
+                        "skipped for the whole run"
+                        if unscreened is None
+                        else "skipped under those director(ies)",
+                    )
                 logger.warning(
                     "index run %s: drift detected project=%s expected=%d "
                     "actual=%d — re-embedding %d drifted file(s), pruning %d "
@@ -1000,6 +1020,32 @@ async def execute_run(
             )
         else:
             run_error = f"all {total_failed} files failed"
+        # Computed BEFORE `finish_run` so the run row can carry the verdict
+        # rather than leave a reader to reconstruct it (ADR-58). Both drains
+        # below are gated on it, and so is `state.last_full_run_was_clean`,
+        # which used to re-derive it as `files_failed == 0` — true only while
+        # every term here was a file-level failure, which stopped being true
+        # when dir errors were added (PR #30 round 2) and again with
+        # `screening_held`, which `files_failed` deliberately excludes because
+        # nothing failed to index. A degraded run therefore reported
+        # `files_failed == 0` while draining nothing, and the promotion policy
+        # counted a dirty set it could not shrink (PR #31 review). One writer,
+        # one persisted answer.
+        #
+        # `screening_held` earns its place here for the same reason as the
+        # others: a stored file that a lost .gitignore pushed out of the
+        # results is a file this run did not hash, so its stored hash may be
+        # stale, and anchoring past it would leave the next fast path with no
+        # reason to look at it again. The test is on what was actually held
+        # back rather than on the fault itself, so an unreadable .gitignore
+        # that excludes nothing currently indexed — the common case — still
+        # advances the anchor instead of latching the project onto full walks.
+        clean_run = (
+            not file_errors
+            and not hash_errors
+            and not dir_errors
+            and not screening_held
+        )
         state.finish_run(
             conn,
             run_id,
@@ -1012,6 +1058,7 @@ async def execute_run(
             if fast_path_active and candidates is not None
             else None,
             files_failed=total_failed,
+            clean=clean_run,
             error=run_error,
         )
         if paths is not None:
@@ -1025,24 +1072,10 @@ async def execute_run(
             indexed_ok = [rel for rel in to_index if rel not in failed]
             if indexed_ok:
                 state.add_dirty_paths(conn, project_id, indexed_ok)
-        # A run with failed files must not advance the git anchor either:
-        # the failed files' state rows are stale, and anchoring past them
-        # would let the next fast path carry them forward as unchanged.
-        #
-        # `screening_held` joins them for the same reason, and only when it is
-        # non-empty (ADR-58). A stored file that a lost .gitignore pushed out of
-        # the results is a file this run did not hash, so its stored hash may be
-        # stale; anchoring past it would leave the next fast path with no reason
-        # to look at it again. The test is on what was actually held back rather
-        # than on the fault itself, so an unreadable .gitignore that excludes
-        # nothing currently indexed — the common case — still advances the
-        # anchor instead of latching the project onto full walks forever.
-        clean_run = (
-            not file_errors
-            and not hash_errors
-            and not dir_errors
-            and not screening_held
-        )
+        # A run with failed files must not advance the git anchor either: the
+        # failed files' state rows are stale, and anchoring past them would let
+        # the next fast path carry them forward as unchanged. `clean_run` is
+        # computed above, next to the `finish_run` that persists it.
         if head is not None and clean_run:
             # Persist the working-tree-dirty set with the anchor (H1). The
             # fast path already captured it at run start (git_info); a

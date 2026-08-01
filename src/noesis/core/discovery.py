@@ -214,19 +214,34 @@ def _record_degraded(
     and then only when ``filename`` is unset, so it cannot reintroduce a path.
     """
     if exc.strerror:
-        detail = (
-            f"[Errno {exc.errno}] {exc.strerror}"
-            if exc.errno is not None
-            else exc.strerror
-        )
+        detail = exc.strerror
     elif exc.filename is None:
+        # No strerror to rebuild from. Safe only because `filename` is unset,
+        # so `str(exc)` cannot carry a path.
         detail = str(exc) or type(exc).__name__
     else:
         detail = type(exc).__name__
+    if exc.errno is not None:
+        # Prepended on every branch, including the two fallbacks. An earlier
+        # version built the errno into the first branch only, so the shape with
+        # a filename but no strerror dropped it — losing the actionable half to
+        # protect the path, when both are available (PR #31 review).
+        detail = f"[Errno {exc.errno}] {detail}"
     # The log keeps the full path; only the persisted pair is trimmed.
     logger.debug("discovery: %s — %s (%s)", summary, path, exc)
-    if bucket is not None:
-        bucket.append((key, f"{summary} ({detail})"))
+    if bucket is None:
+        return
+    # One row per directory, not per event. Under ``follow_symlinks`` a failing
+    # directory is stat'd twice — once as a child in its parent's loop, once as
+    # the walk dir when `os.walk` descends into it — and recorded identically
+    # both times. `record_file_errors` is INSERT OR REPLACE on (run_id, path),
+    # so the duplicate collapsed on write while still inflating
+    # `discovery_degraded`, making an operator-facing count disagree with the
+    # rows behind it (PR #31 review). The key IS the unit of report here: a
+    # second fault on the same directory tells an operator nothing new.
+    if any(existing == key for existing, _ in bucket):
+        return
+    bucket.append((key, f"{summary} ({detail})"))
 
 
 def _is_binary(path: Path) -> bool:

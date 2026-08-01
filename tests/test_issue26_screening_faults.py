@@ -56,6 +56,7 @@ established the monkeypatch pattern reused here.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -353,6 +354,79 @@ async def test_identity_fault_never_suppresses_a_deletion(tmp_path, monkeypatch)
 
 
 # --- 6: the anchor rule, in both directions ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_held_back_deletion_makes_the_run_not_clean_for_readers_too(
+    tmp_path, monkeypatch
+):
+    """PR #31 review, P1: the reader of "was it clean" must agree with the writer.
+
+    `clean_run` gained `screening_held` as a fourth term, but
+    `state.last_full_run_was_clean` re-derived the verdict as
+    `files_failed == 0` — and `screening_held` is deliberately excluded from
+    `files_failed`, because nothing failed to index. So a degraded run drained
+    nothing while that function reported "clean", and `jobs._promotion_reason`
+    counted the pinned H1 dirty set toward its fraction — on a number promotion
+    is structurally incapable of moving, which is the latch PR #30 round 2
+    closed. It does not self-clear: the wrongly-excluded file stays excluded
+    every run, so `screening_held` stays non-empty forever.
+
+    Fixed by persisting the writer's verdict on the run row instead of
+    re-deriving it. Asserted as the invariant — drained and reported-clean must
+    not disagree — rather than on either value alone.
+    """
+    conn, store, embedder = make_env(tmp_path)
+    root = _negation_tree(tmp_path)
+
+    project_id, _ = await _run(conn, store, embedder, root)
+    state.add_dirty_paths(conn, project_id, ["keep.py"])
+    assert state.get_dirty_paths(conn, project_id)
+
+    _fail_method_on(monkeypatch, "read_text", root / "generated" / ".gitignore")
+    _, second = await _run(conn, store, embedder, root)
+
+    drained = not state.get_dirty_paths(conn, project_id)
+    reported_clean = state.last_full_run_was_clean(conn, project_id)
+    assert second.files_failed == 0, "the premise: this is not a file failure"
+    assert drained == reported_clean, (
+        f"writer and reader disagree: drained={drained} "
+        f"last_full_run_was_clean={reported_clean}"
+    )
+    assert not reported_clean
+
+
+def test_one_unidentified_row_per_directory(tmp_path, monkeypatch):
+    """PR #31 review: under `follow_symlinks` a failing directory is stat'd
+    twice — as a child in its parent's loop, and as the walk dir when `os.walk`
+    descends — and was recorded identically both times. `record_file_errors` is
+    INSERT OR REPLACE, so the duplicate collapsed on write while still
+    inflating `discovery_degraded`, leaving an operator-facing count that
+    disagreed with the rows behind it.
+    """
+    root = _tree(tmp_path)
+    real_stat = os.stat
+    target = (root / "pkg").resolve()
+
+    def flaky(path, *args, **kwargs):
+        # Delegate lstat: `is_symlink` reaches `os.stat` through a different
+        # door and failing it would exercise an unrelated site.
+        if kwargs.get("follow_symlinks", True) is False:
+            return real_stat(path, *args, **kwargs)
+        try:
+            same = Path(path) == target
+        except TypeError:  # an fd or bytes path — never our target
+            same = False
+        if same:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", flaky)
+
+    errors = DiscoveryErrors()
+    discover_files(root, DiscoveryConfig(follow_symlinks=True), errors=errors)
+
+    assert [key for key, _ in errors.unidentified] == ["pkg"]
 
 
 @requires_git
