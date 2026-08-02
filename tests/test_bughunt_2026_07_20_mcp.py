@@ -32,7 +32,17 @@ from qdrant_client import QdrantClient
 from noesis.app import AppContext, create_app
 from noesis.core import jobs, state, telemetry
 from noesis.core.embedder import FakeEmbedder
+from noesis.core.telemetry import QueryTelemetry
 from noesis.core.vectorstore import VectorStore
+
+
+def _rows(db_path) -> int:
+    """query_log count read through a connection nobody in the test owns."""
+    fresh = sqlite3.connect(db_path)
+    try:
+        return fresh.execute("SELECT COUNT(*) FROM query_log").fetchone()[0]
+    finally:
+        fresh.close()
 
 
 @pytest.fixture()
@@ -55,7 +65,12 @@ def ctx(db_path):
     embedder = FakeEmbedder(dim=8)
     store = VectorStore(QdrantClient(":memory:"))
     store.ensure_collection(embedder)
-    return AppContext(conn=conn, store=store, embedder=embedder)
+    context = AppContext(conn=conn, store=store, embedder=embedder)
+    yield context
+    # Each context owns its telemetry writer (ADR-59); production closes it in
+    # close_runtime_context, and a hand-built context has no such hook — so
+    # close it here rather than leaving a thread and a DB handle behind.
+    context.telemetry.close(timeout=5.0)
 
 
 # --- MCP-2: index_status thread placement ------------------------------------
@@ -116,7 +131,7 @@ async def test_record_query_lands_via_dedicated_conn_off_loop(
 
     monkeypatch.setattr(telemetry.state, "log_query", spy_log)
 
-    await telemetry.record_query(
+    await ctx.telemetry.record_query(
         ctx.conn,
         interface="rest",
         kind="search",
@@ -127,7 +142,7 @@ async def test_record_query_lands_via_dedicated_conn_off_loop(
     )
     # The write is asynchronous now (PR #24 review): the row is queued, not
     # written, when record_query returns. Barrier before reading it back.
-    await telemetry.flush()
+    await ctx.telemetry.flush()
 
     assert seen["thread"] is not threading.current_thread()
     assert seen["conn"] is not ctx.conn
@@ -149,7 +164,7 @@ async def test_record_query_under_foreign_writer_lock_neither_raises_nor_blocks(
     blocker.execute("BEGIN IMMEDIATE")
     try:
         t0 = time.perf_counter()
-        await telemetry.record_query(
+        await ctx.telemetry.record_query(
             ctx.conn, interface="mcp", kind="search", project_id=None
         )
         elapsed = time.perf_counter() - t0
@@ -159,9 +174,7 @@ async def test_record_query_under_foreign_writer_lock_neither_raises_nor_blocks(
     assert elapsed < 1.0, f"telemetry blocked the caller for {elapsed:.2f}s"
 
 
-def test_search_request_unaffected_by_foreign_writer_lock(
-    db_path, ctx, project_dir
-):
+def test_search_request_unaffected_by_foreign_writer_lock(db_path, ctx, project_dir):
     """Route-level pin (surface unchanged pre/post fix): with the writer lock
     held by another connection, POST /search still succeeds and returns well
     under ctx.conn's 5s busy_timeout. Pre-fix the telemetry INSERT on
@@ -199,7 +212,7 @@ async def test_record_query_does_not_wait_for_a_blocked_writer(ctx, db_path):
     try:
         t0 = time.perf_counter()
         for _ in range(5):
-            await telemetry.record_query(
+            await ctx.telemetry.record_query(
                 ctx.conn, interface="rest", kind="search", project_id=None
             )
         elapsed = time.perf_counter() - t0
@@ -219,32 +232,42 @@ async def test_telemetry_close_drains_and_releases_the_db_handle(ctx, db_path):
     path it outlives ctx.conn for the process lifetime, which blocks
     temp-directory cleanup on Windows/WSL and survives a DB-file removal.
     """
-    await telemetry.record_query(
+    await ctx.telemetry.record_query(
         ctx.conn, interface="rest", kind="search", project_id=None
     )
-    await asyncio.to_thread(telemetry.close)
+    await asyncio.to_thread(ctx.telemetry.close)
 
     # Queued row was drained, not dropped, and the writer is stopped.
-    assert telemetry._worker is None
-    fresh = sqlite3.connect(db_path)
-    try:
-        count = fresh.execute("SELECT COUNT(*) FROM query_log").fetchone()[0]
-    finally:
-        fresh.close()
-    assert count == 1
+    assert not ctx.telemetry._worker.is_alive()
+    assert _rows(db_path) == 1
 
-    # A later record_query restarts the writer rather than silently dropping.
-    await telemetry.record_query(
+    # A later record_query is DROPPED, not written on a resurrected worker.
+    #
+    # This assertion is inverted from the one it replaces (ADR-59, issue #27).
+    # While the writer lived in module globals, close() could not be terminal:
+    # a terminal flag there would have been a global every test building a
+    # second context had to reset, so close() only retired the worker and the
+    # next record_query started a fresh one — including one arriving after
+    # teardown had decided to close, which opened a state.connect() handle the
+    # closing context would never reap. Instance state makes terminality free,
+    # because a second context simply builds a second writer.
+    await ctx.telemetry.record_query(
         ctx.conn, interface="rest", kind="search", project_id=None
     )
-    await telemetry.flush()
-    await asyncio.to_thread(telemetry.close)
-    fresh = sqlite3.connect(db_path)
+    await ctx.telemetry.flush()
+    assert _rows(db_path) == 1, "a closed writer accepted a row"
+
+    # And the other half of "free": a NEW writer starts open, with no global
+    # to reset between the two.
+    fresh_writer = QueryTelemetry()
     try:
-        count = fresh.execute("SELECT COUNT(*) FROM query_log").fetchone()[0]
+        await fresh_writer.record_query(
+            ctx.conn, interface="rest", kind="search", project_id=None
+        )
+        await fresh_writer.flush()
     finally:
-        fresh.close()
-    assert count == 2
+        await asyncio.to_thread(fresh_writer.close)
+    assert _rows(db_path) == 2
 
 
 async def test_index_status_tolerates_a_commit_during_the_qdrant_count(
@@ -256,9 +279,7 @@ async def test_index_status_tolerates_a_commit_during_the_qdrant_count(
     itself across the window counts as evidence."""
     pid = state.register_project(ctx.conn, project_dir, "fake")
     totals = iter([10, 20])
-    monkeypatch.setattr(
-        state, "expected_chunk_total", lambda *_a, **_k: next(totals)
-    )
+    monkeypatch.setattr(state, "expected_chunk_total", lambda *_a, **_k: next(totals))
     monkeypatch.setattr(ctx.store, "count_project_points", lambda *_a, **_k: 20)
 
     status = await jobs.index_status(ctx, pid)
@@ -270,9 +291,7 @@ async def test_index_status_tolerates_a_commit_during_the_qdrant_count(
     assert status["vector_count"] == 20
 
 
-async def test_index_status_still_reports_genuine_drift(
-    ctx, project_dir, monkeypatch
-):
+async def test_index_status_still_reports_genuine_drift(ctx, project_dir, monkeypatch):
     """Guard against over-correcting: a total that is stable across the
     window and disagrees with Qdrant is real drift (ADR-49) and must still
     be surfaced."""
@@ -321,70 +340,47 @@ async def test_drift_still_reported_when_the_total_holds_still(
     assert status["drift"] is True
 
 
-async def test_telemetry_close_drains_rows_queued_behind_the_sentinel(
-    ctx, db_path, tmp_path
-):
-    """`_queue` is module-global and outlives close().
+async def test_close_leaves_no_row_for_another_writer_to_inherit(ctx, tmp_path):
+    """Replaces two round-3 tests that pinned the *generation* mechanism.
 
-    A record_query racing the sentinel enqueues behind it, so the worker
-    returns on the sentinel and leaves the row queued. The next context's
-    writer would pick it up as its first item — carrying a db_path from the
-    torn-down runtime, which `state.connect` would then mkdir -p back into
-    existence as an empty, schema-less DB. close() must leave the queue
-    empty, or flush()'s no-worker early return is a lie.
+    Those tests modelled a `record_query` racing `close()` onto a shared
+    module-global queue: the racing row could sit behind a consumed sentinel
+    and be picked up by the NEXT runtime's writer, carrying a `db_path` from
+    the torn-down one — which `state.connect` would `mkdir -p` back into
+    existence as an empty, schema-less DB. Per-generation queues made that
+    unrepresentable; per-`AppContext` writers (ADR-59) make it unrepresentable
+    twice over, since there is no shared queue left to race onto and
+    `_submit` refuses once `_closed` is set under the lock `close()` holds.
+
+    The two guarantees those tests bought are what this asserts: `close()`
+    leaves an empty queue and no inheritable row, and a `flush()` waiter is
+    never stranded on a barrier no worker will reach.
     """
     gone = tmp_path / "torn-down" / "state.sqlite"
-    await telemetry.record_query(
+    await ctx.telemetry.record_query(
         ctx.conn, interface="rest", kind="search", project_id=None
     )
-    work = telemetry._queue  # this generation's queue
-    await asyncio.to_thread(telemetry.close)
-    # Model the racing row: enqueued onto the retired generation's queue
-    # after its sentinel was consumed.
-    work.put_nowait((str(gone), {"interface": "rest", "kind": "search"}))
-    telemetry._queue = work  # close() retires it again
-    await asyncio.to_thread(telemetry.close)
+    work = ctx.telemetry._queue
+    await asyncio.to_thread(ctx.telemetry.close)
 
     assert work.qsize() == 0
+    # The row this writer accepted went to ITS db, and nothing it held names
+    # a torn-down path that a later state.connect() could recreate.
     assert not gone.parent.exists(), "a torn-down DB directory was recreated"
 
-    # A waiter blocked on a barrier must not be stranded by the drain.
-    barrier = telemetry._Barrier()
-    work.put_nowait(barrier)
-    telemetry._queue = work
-    await asyncio.to_thread(telemetry.close)
-    assert barrier.event.is_set()
+    # A record_query landing after the sentinel is refused outright, so it can
+    # neither be written nor left behind for anyone to inherit.
+    await ctx.telemetry.record_query(
+        ctx.conn, interface="rest", kind="search", project_id=None
+    )
     assert work.qsize() == 0
 
-
-async def test_close_only_ever_touches_its_own_generation(ctx):
-    """The queue belongs to the worker generation, not to the module.
-
-    With one shared queue, a record_query racing close() started a fresh
-    worker that blocked on the SAME queue — so the new worker could consume
-    the `_SHUTDOWN` sentinel, leaving the old worker running forever with its
-    connections open (the exact handle leak close() exists to prevent), while
-    close()'s drain threw away rows the new worker was about to write. A
-    per-generation queue makes both unrepresentable.
-    """
-    await telemetry.record_query(
-        ctx.conn, interface="rest", kind="search", project_id=None
-    )
-    gen_a = telemetry._queue
-    assert gen_a is not None
-    await asyncio.to_thread(telemetry.close)
-    # A fully retired generation leaves nothing behind to inherit.
-    assert telemetry._worker is None and telemetry._queue is None
-
-    await telemetry.record_query(
-        ctx.conn, interface="rest", kind="search", project_id=None
-    )
-    gen_b = telemetry._queue
-    assert gen_b is not None and gen_b is not gen_a
-
-    # A row landing on the retired generation can never reach gen B's worker,
-    # and retiring gen B must not touch gen A's queue.
-    gen_a.put_nowait(("/nonexistent/x.sqlite", {"interface": "rest", "kind": "search"}))
-    await telemetry.flush()  # gen B's barrier still works
-    await asyncio.to_thread(telemetry.close)
-    assert gen_a.qsize() == 1, "close() drained a generation it does not own"
+    # A waiter blocked on a barrier must not be stranded by the drain. Put it
+    # on a live writer, then close underneath it.
+    other = QueryTelemetry()
+    barrier = telemetry._Barrier()
+    assert other._submit((str(gone), dict(interface="rest", kind="search")))
+    other._queue.put_nowait(barrier)
+    await asyncio.to_thread(other.close)
+    assert barrier.event.is_set()
+    assert other._queue.qsize() == 0

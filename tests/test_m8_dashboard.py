@@ -14,7 +14,7 @@ from qdrant_client import QdrantClient
 
 from noesis.app import AppContext, create_app
 from noesis.core import dashboard as core_dashboard
-from noesis.core import indexer, jobs, state, telemetry
+from noesis.core import indexer, jobs, state
 from noesis.core.embedder import FakeEmbedder
 from noesis.core.vectorstore import VectorStore
 
@@ -39,13 +39,20 @@ def make_ctx(tmp_path) -> AppContext:
 
 @pytest.fixture()
 def ctx(tmp_path):
-    return make_ctx(tmp_path)
+    context = make_ctx(tmp_path)
+    yield context
+    # A context owns its telemetry writer (ADR-59). close_runtime_context does
+    # this in production; a hand-built context needs its fixture to.
+    context.telemetry.close(timeout=5.0)
 
 
 @pytest.fixture()
 def client(tmp_path):
     with TestClient(create_app(ctx=make_ctx(tmp_path))) as tc:
-        yield tc
+        try:
+            yield tc
+        finally:
+            tc.app.state.ctx.telemetry.close(timeout=5.0)
 
 
 async def _wait_done(client: TestClient, run_id: str, timeout: float = 5.0) -> dict:
@@ -350,8 +357,8 @@ def test_search_logs_metadata_only(client, project_dir):
     # Telemetry writes are queued to a dedicated writer thread (PR #24
     # review), so a query is not guaranteed readable the instant the
     # response returns. Barrier before asserting on the row.
-    asyncio.run(telemetry.flush())
     ctx = client.app.state.ctx
+    asyncio.run(ctx.telemetry.flush())
     rows = ctx.conn.execute("SELECT * FROM query_log").fetchall()
     assert len(rows) == 1
     row = dict(rows[0])
@@ -367,7 +374,7 @@ def test_usage_aggregation(client, project_dir):
     body = client.post("/projects", json={"root_path": str(project_dir)}).json()
     asyncio.run(_wait_done(client, body["run_id"]))
     client.post("/search", json={"query": "q", "project_id": body["project_id"]})
-    asyncio.run(telemetry.flush())  # queued write; see the note above
+    asyncio.run(client.app.state.ctx.telemetry.flush())  # see the note above
     usage = client.get("/api/usage").json()
     assert usage["index_activity"]["total_runs"] == 1
     assert usage["search_usage"]["total_queries"] == 1

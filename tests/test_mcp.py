@@ -62,7 +62,11 @@ def ctx(tmp_path):
     embedder = FakeEmbedder(dim=8)
     store = VectorStore(QdrantClient(":memory:"))
     store.ensure_collection(embedder)
-    return AppContext(conn=conn, store=store, embedder=embedder)
+    context = AppContext(conn=conn, store=store, embedder=embedder)
+    yield context
+    # This context owns its telemetry writer (ADR-59); production closes it in
+    # close_runtime_context, a test fixture here.
+    context.telemetry.close(timeout=5.0)
 
 
 @pytest.fixture()

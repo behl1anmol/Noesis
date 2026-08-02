@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from noesis.core import jobs, state, telemetry
+from noesis.core import jobs, state
 from noesis.core import retriever
 from noesis.core import structural as structural_mod
 
@@ -74,7 +74,7 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             rerank=rerank,
             candidates=ctx.rerank_candidates,
         )
-        await telemetry.record_query(
+        await ctx.telemetry.record_query(
             ctx.conn,
             interface="mcp",
             kind="search",
@@ -121,7 +121,7 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             )
         except structural_mod.StructuralSearchError as exc:
             raise ToolError(f"{exc.error_type}: {exc.message}") from exc
-        await telemetry.record_query(
+        await ctx.telemetry.record_query(
             ctx.conn,
             interface="mcp",
             kind="structural",

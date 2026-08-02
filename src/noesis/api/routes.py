@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from noesis.api.security import verify_local_origin
-from noesis.core import jobs, state, telemetry
+from noesis.core import jobs, state
 from noesis.core.retriever import search_code
 from noesis.core.state import MixedModelError
 from noesis.core.structural import StructuralSearchError, structural_search
@@ -156,7 +156,7 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
         rerank=req.rerank,
         candidates=ctx.rerank_candidates,
     )
-    await telemetry.record_query(
+    await ctx.telemetry.record_query(
         ctx.conn,
         interface="rest",
         kind="search",
@@ -196,7 +196,7 @@ async def structural_search_route(
             status_code=status,
             detail={"type": exc.error_type, "message": exc.message},
         ) from exc
-    await telemetry.record_query(
+    await ctx.telemetry.record_query(
         ctx.conn,
         interface="rest",
         kind="structural",

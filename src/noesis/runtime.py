@@ -16,10 +16,11 @@ from sqlite3 import Connection
 
 from qdrant_client import QdrantClient
 
-from noesis.core import state, telemetry
+from noesis.core import state
 from noesis.core.config import IndexingSettings, Settings, StructuralSettings
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
+from noesis.core.telemetry import QueryTelemetry
 from noesis.core.vectorstore import VectorStore
 
 
@@ -46,6 +47,12 @@ class AppContext:
     # passed into execute_run (quarantine). Defaulted so every existing test
     # context and any adapter that builds an AppContext by hand keeps working.
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
+    # This context's query-telemetry writer (ADR-59). Owned here rather than
+    # kept in module globals so its lifecycle matches the lifecycle that
+    # closes it: close_runtime_context tears down THIS context's writer and
+    # can no longer reach anyone else's. Defaulted so every adapter and test
+    # that builds an AppContext by hand gets a working writer for free.
+    telemetry: QueryTelemetry = field(default_factory=QueryTelemetry)
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
     # M8 (ADR-40): live run progress (jobs.run_progress reads it) and the
     # watcher manager, both owned by the lifespan.
@@ -191,6 +198,8 @@ async def close_runtime_context(ctx: AppContext) -> None:
             await asyncio.to_thread(close)
     # Same reason, and it must happen here rather than at process exit: the
     # writer holds its own handle to the state DB, which would otherwise
-    # outlive ctx.conn and survive a DB-file removal.
-    await asyncio.to_thread(telemetry.close)
+    # outlive ctx.conn and survive a DB-file removal. Scoped to this context's
+    # own writer (ADR-59) — it was process-wide, so a second live context's
+    # teardown used to discard rows this one had just enqueued.
+    await asyncio.to_thread(ctx.telemetry.close)
     ctx.conn.close()

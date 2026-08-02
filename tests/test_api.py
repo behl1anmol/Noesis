@@ -47,13 +47,23 @@ def make_client(tmp_path, reranker=None):
 @pytest.fixture()
 def client(tmp_path):
     with make_client(tmp_path) as tc:
-        yield tc
+        try:
+            yield tc
+        finally:
+            # This context owns its telemetry writer (ADR-59); production
+            # closes it in close_runtime_context, a test fixture here.
+            tc.app.state.ctx.telemetry.close(timeout=5.0)
 
 
 @pytest.fixture()
 def client_with_reranker(tmp_path):
     with make_client(tmp_path, reranker=FakeReranker()) as tc:
-        yield tc
+        try:
+            yield tc
+        finally:
+            # This context owns its telemetry writer (ADR-59); production
+            # closes it in close_runtime_context, a test fixture here.
+            tc.app.state.ctx.telemetry.close(timeout=5.0)
 
 
 async def _wait_done(client: TestClient, run_id: str, timeout: float = 5.0) -> dict:
