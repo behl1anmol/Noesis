@@ -139,19 +139,26 @@ async def _index(ctx, repo) -> str:
 @pytest.fixture()
 def nan_client(tmp_path):
     with make_client(tmp_path, reranker=NaNReranker()) as tc:
-        yield tc
+        try:
+            yield tc
+        finally:
+            # This context owns its telemetry writer (ADR-59); production
+            # closes it in close_runtime_context, a test fixture here.
+            tc.app.state.ctx.telemetry.close(timeout=5.0)
 
 
 @pytest.fixture()
 def mcp_nan(tmp_path):
     ctx = make_ctx(tmp_path, reranker=NaNReranker())
-    return build_mcp(lambda: ctx), ctx
+    yield build_mcp(lambda: ctx), ctx
+    ctx.telemetry.close(timeout=5.0)
 
 
 @pytest.fixture()
 def mcp_inf(tmp_path):
     ctx = make_ctx(tmp_path, reranker=InfReranker())
-    return build_mcp(lambda: ctx), ctx
+    yield build_mcp(lambda: ctx), ctx
+    ctx.telemetry.close(timeout=5.0)
 
 
 def _strict_loads(raw: str):

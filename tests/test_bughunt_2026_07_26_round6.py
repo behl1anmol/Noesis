@@ -25,16 +25,16 @@ from __future__ import annotations
 
 import logging
 import os
-import queue
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from noesis.core import discovery, state, telemetry
+from noesis.core import discovery, state
 from noesis.core.discovery import DiscoveryConfig
 from noesis.core.indexer import execute_run, prepare_run
+from noesis.core.telemetry import QueryTelemetry
 
 from tests.test_gitfast import make_env
 
@@ -263,9 +263,7 @@ async def test_unreadable_files_are_not_credited_to_the_filters(
     assert set(state.get_file_states(conn, pid)) == {"a.py"}
 
 
-async def test_a_real_purge_is_still_logged_with_its_escape(
-    tmp_path, caplog
-) -> None:
+async def test_a_real_purge_is_still_logged_with_its_escape(tmp_path, caplog) -> None:
     """Over-correction guard: the branch exists so an operator reading the log
     after the fact can see which escape emptied the project. Where a purge does
     follow, it must still say so."""
@@ -307,12 +305,24 @@ async def test_a_real_purge_is_still_logged_with_its_escape(
 # --- finding 3: telemetry flush must not drop its barrier ----------------------
 
 
-@pytest.fixture
-def _stop_the_writer():
-    """These tests deliberately stall a writer; never leave that generation of
-    the module globals behind for the next test."""
-    yield
-    telemetry.close(timeout=5.0)
+@pytest.fixture()
+def writers():
+    """Factory for writers these tests deliberately stall.
+
+    Per-`AppContext` writers (ADR-59, issue #27) replaced the module globals
+    this section used to drive, so a stalled writer is now confined to the test
+    that made it — but it still owns a thread and a DB handle, so close them.
+    """
+    made: list[QueryTelemetry] = []
+
+    def _make(**kwargs) -> QueryTelemetry:
+        tel = QueryTelemetry(**kwargs)
+        made.append(tel)
+        return tel
+
+    yield _make
+    for tel in made:
+        tel.close(timeout=5.0)
 
 
 def _db(tmp_path) -> str:
@@ -334,23 +344,19 @@ _FIELDS = dict(
 )
 
 
-def _fill_the_queue(db_path: str) -> int:
-    work = telemetry._ensure_worker()
+def _fill_the_queue(tel: QueryTelemetry, db_path: str) -> int:
     queued = 0
-    while True:
-        try:
-            work.put_nowait((db_path, dict(_FIELDS)))
-        except queue.Full:
-            return queued
+    while tel._submit((db_path, dict(_FIELDS))):
         queued += 1
+    return queued
 
 
 async def test_flush_does_not_report_success_with_a_full_backlog(
-    tmp_path, monkeypatch, _stop_the_writer
+    tmp_path, monkeypatch, writers
 ) -> None:
     """Dropping ROWS on overflow is the documented contract; dropping the
     BARRIER is a different promise. Before the fix this returned in 0.000s with
-    the queue at `_QUEUE_MAX` and nothing written."""
+    the queue at its bound and nothing written."""
     db_path = _db(tmp_path)
     real_log_query = state.log_query
 
@@ -359,12 +365,16 @@ async def test_flush_does_not_report_success_with_a_full_backlog(
         return real_log_query(conn, **fields)
 
     monkeypatch.setattr(state, "log_query", slow)
-    monkeypatch.setattr(telemetry, "_QUEUE_MAX", 8)
+    # A small bound is a constructor argument now, not a monkeypatched module
+    # constant — the writer under test is this test's alone (ADR-59).
+    tel = writers(queue_max=8)
 
-    queued = _fill_the_queue(db_path)
-    assert queued == 8
+    queued = _fill_the_queue(tel, db_path)
+    # The worker pulls the first row as soon as it starts, so the queue admits
+    # its bound plus whatever the writer has already taken off it.
+    assert queued >= 8
 
-    await telemetry.flush(timeout=10.0)
+    await tel.flush(timeout=10.0)
 
     conn = state.connect(db_path)
     try:
@@ -377,7 +387,7 @@ async def test_flush_does_not_report_success_with_a_full_backlog(
 
 
 async def test_flush_gives_up_after_its_timeout_on_a_wedged_writer(
-    tmp_path, monkeypatch, _stop_the_writer
+    tmp_path, monkeypatch, writers
 ) -> None:
     """The other half: a barrier that can never be queued must cost the caller
     its stated budget and no more. Returning instantly is the bug; blocking
@@ -391,12 +401,12 @@ async def test_flush_gives_up_after_its_timeout_on_a_wedged_writer(
         return real_log_query(conn, **fields)
 
     monkeypatch.setattr(state, "log_query", wedged)
-    monkeypatch.setattr(telemetry, "_QUEUE_MAX", 4)
-    _fill_the_queue(db_path)
+    tel = writers(queue_max=4)
+    _fill_the_queue(tel, db_path)
 
     try:
         started = time.monotonic()
-        await telemetry.flush(timeout=0.3)
+        await tel.flush(timeout=0.3)
         elapsed = time.monotonic() - started
     finally:
         released.set()
@@ -405,15 +415,16 @@ async def test_flush_gives_up_after_its_timeout_on_a_wedged_writer(
 
 
 async def test_flush_still_returns_promptly_when_nothing_is_backed_up(
-    tmp_path, _stop_the_writer
+    tmp_path, writers
 ) -> None:
     """Over-correction guard: the retry loop must not add latency to the normal
     path, which is every call the dashboard tests make."""
     db_path = _db(tmp_path)
-    telemetry._ensure_worker().put_nowait((db_path, dict(_FIELDS)))
+    tel = writers()
+    assert tel._submit((db_path, dict(_FIELDS)))
 
     started = time.monotonic()
-    await telemetry.flush(timeout=5.0)
+    await tel.flush(timeout=5.0)
     elapsed = time.monotonic() - started
 
     assert elapsed < 1.0
