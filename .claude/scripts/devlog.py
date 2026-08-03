@@ -25,6 +25,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = REPO_ROOT / "dev" / "devlog.sqlite"
 LESSONS_MD_PATH = REPO_ROOT / "dev" / "LESSONS.md"
+# Retired and promoted lessons, committed but NEVER injected. §5.6 says a
+# non-active lesson "stays in the DB for audit" — which was only true on the
+# machine that retired it, since the DB is gitignored, so a fresh clone lost
+# the record of every lesson the project had ever decided against or graduated.
+# They cannot go in LESSONS.md: `session_start.py` injects that file verbatim,
+# so a retired lesson there would keep influencing sessions after being
+# retired, and the archive would grow the injected surface the 15-cap exists to
+# bound. A second committed file gets durability without either cost.
+LESSONS_ARCHIVE_PATH = REPO_ROOT / "dev" / "LESSONS-archive.md"
 
 LESSON_CAP = 15
 
@@ -375,17 +384,18 @@ def _lessons_missing_from_db(conn: sqlite3.Connection) -> list[str]:
     lost file — and rendering from it would delete that lesson from the only
     durable copy.
     """
-    if not LESSONS_MD_PATH.exists():
-        return []
     known = {
         (r["category"], r["mistake"])
         for r in conn.execute("SELECT category, mistake FROM lessons")
     }
-    return [
-        f"[{m['id']}] {m['category']}"
-        for m in _lesson_blocks(LESSONS_MD_PATH.read_text())
-        if (m["category"], m["mistake"]) not in known
-    ]
+    missing = []
+    for path in (LESSONS_MD_PATH, LESSONS_ARCHIVE_PATH):
+        if not path.exists():
+            continue
+        for m in _lesson_blocks(path.read_text()):
+            if (m["category"], m["mistake"]) not in known:
+                missing.append(f"[{m['id']}] {m['category']} ({path.name})")
+    return missing
 
 
 def cmd_render_lessons(args: argparse.Namespace) -> None:
@@ -398,9 +408,9 @@ def cmd_render_lessons(args: argparse.Namespace) -> None:
     missing = _lessons_missing_from_db(conn)
     if missing and not getattr(args, "force", False):
         print(
-            f"REFUSING to render: {len(missing)} lesson(s) in {LESSONS_MD_PATH} are"
-            " absent from this DB, so rendering would DELETE them from the only"
-            " durable copy.\n  "
+            f"REFUSING to render: {len(missing)} committed lesson(s) are absent from"
+            " this DB, so rendering would DELETE them from the only durable copy."
+            "\n  "
             + "\n  ".join(missing)
             + "\n\nThe file is the source of truth on a fresh clone; the DB is a local"
             " cache.\nRun `devlog.py lessons import` first, then render."
@@ -454,6 +464,42 @@ def cmd_render_lessons(args: argparse.Namespace) -> None:
             " promote or retire one before adding more (do not silently exceed it)."
         )
 
+    # The audit half. Same render, different file, and NOT injected — so
+    # retiring a lesson stops it influencing sessions (the point of retiring)
+    # without destroying the record that it existed and why.
+    archived = conn.execute(
+        "SELECT * FROM lessons WHERE status != 'active'"
+        " ORDER BY status, occurrences DESC, id DESC"
+    ).fetchall()
+    arch = [
+        "# Retired & Promoted Lessons (archive)",
+        "",
+        "Rendered from `dev/devlog.sqlite` by `.claude/scripts/devlog.py render-lessons`,",
+        "alongside `LESSONS.md`. Do not hand-edit.",
+        "",
+        "**This file is NOT injected into context** — that is the whole point of it.",
+        "A *retired* lesson stopped being guidance; a *promoted* one became a CLAUDE.md",
+        "hard rule or a mechanical guard and no longer needs repeating. Both are kept",
+        "here because the `lessons` table is machine-local and gitignored, so without a",
+        "committed copy a fresh clone loses every lesson the project ever decided",
+        "against or graduated — including the reason it did. `devlog.py lessons import`",
+        "reads this file too, and restores each row with the status recorded below.",
+        "",
+    ]
+    if not archived:
+        arch.append("_(nothing retired or promoted yet)_")
+    for r in archived:
+        arch.append(
+            f"## [{r['id']}] {r['category']} (occurrences: {r['occurrences']},"
+            f" status: {r['status']})"
+        )
+        arch.append(f"**Mistake:** {r['mistake']}")
+        arch.append(f"**Lesson:** {r['lesson']}")
+        arch.append(f"**Rationale:** {r['rationale']}")
+        arch.append("")
+    LESSONS_ARCHIVE_PATH.write_text("\n".join(arch).rstrip() + "\n")
+    print(f"rendered {len(archived)} archived lesson(s) to {LESSONS_ARCHIVE_PATH}")
+
 
 LESSON_BLOCK_RE = (
     None  # compiled lazily to keep import cost near zero for other subcommands
@@ -475,30 +521,47 @@ def _lesson_blocks(text: str) -> list[dict]:
     global LESSON_BLOCK_RE
     if LESSON_BLOCK_RE is None:
         LESSON_BLOCK_RE = re.compile(
-            r"^## \[(?P<id>\d+)\] (?P<category>.+?) \(occurrences: (?P<occurrences>\d+)\)\n"
+            r"^## \[(?P<id>\d+)\] (?P<category>.+?) \(occurrences: (?P<occurrences>\d+)"
+            r"(?:, status: (?P<status>\w+))?\)\n"
             r"\*\*Mistake:\*\* (?P<mistake>.+)\n"
             r"\*\*Lesson:\*\* (?P<lesson>.+)\n"
             r"\*\*Rationale:\*\* (?P<rationale>.+)$",
             re.MULTILINE,
         )
-    return [m.groupdict() for m in LESSON_BLOCK_RE.finditer(text)]
+    out = []
+    for m in LESSON_BLOCK_RE.finditer(text):
+        d = m.groupdict()
+        # The status suffix appears only in the archive, so its absence means
+        # active — which keeps LESSONS.md's heading byte-identical to what it
+        # has always been, and lets one parser read both files.
+        d["status"] = d["status"] or "active"
+        out.append(d)
+    return out
 
 
 def cmd_lessons_import(args: argparse.Namespace) -> None:
-    if not LESSONS_MD_PATH.exists():
+    if not LESSONS_MD_PATH.exists() and not LESSONS_ARCHIVE_PATH.exists():
         print(f"{LESSONS_MD_PATH} does not exist — nothing to import")
         return
 
     conn = connect()
     imported = 0
-    for m in _lesson_blocks(LESSONS_MD_PATH.read_text()):
+    # Both files, so a fresh clone rehydrates the FULL ledger — active lessons
+    # and the retired/promoted record alike. Reading only LESSONS.md is what
+    # made a rehydrate silently drop every non-active row.
+    blocks = []
+    for path in (LESSONS_MD_PATH, LESSONS_ARCHIVE_PATH):
+        if path.exists():
+            blocks.extend(_lesson_blocks(path.read_text()))
+    for m in blocks:
         # Resolved explicitly rather than with an upsert: the table carries TWO
         # uniqueness rules — the `id` primary key and a UNIQUE(category,
         # mistake) index — and SQLite takes only one ON CONFLICT target, so an
         # upsert on either one raises IntegrityError the moment the other is
         # the one that collides.
         existing = conn.execute(
-            "SELECT id, occurrences FROM lessons WHERE category = ? AND mistake = ?",
+            "SELECT id, occurrences, status FROM lessons"
+            " WHERE category = ? AND mistake = ?",
             (m["category"], m["mistake"]),
         ).fetchone()
         if existing is not None:
@@ -517,6 +580,14 @@ def cmd_lessons_import(args: argparse.Namespace) -> None:
                         existing["id"],
                     ),
                 )
+            # A local row that is still `active` while the committed archive
+            # says retired/promoted means this machine never saw the lifecycle
+            # change. The files are the shared record, so they win.
+            if m["status"] != "active" and existing["status"] != m["status"]:
+                conn.execute(
+                    "UPDATE lessons SET status = ? WHERE id = ?",
+                    (m["status"], existing["id"]),
+                )
         else:
             # New to this DB — the rehydrate path. Take the file's id when it
             # is free, so a fresh clone round-trips to a byte-identical file;
@@ -527,7 +598,7 @@ def cmd_lessons_import(args: argparse.Namespace) -> None:
             ).fetchone()
             conn.execute(
                 "INSERT INTO lessons (id, created_at, category, mistake, lesson,"
-                " rationale, occurrences, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+                " rationale, occurrences, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     None if taken else int(m["id"]),
                     now(),
@@ -536,6 +607,7 @@ def cmd_lessons_import(args: argparse.Namespace) -> None:
                     m["lesson"],
                     m["rationale"],
                     int(m["occurrences"]),
+                    m["status"],
                 ),
             )
         imported += 1
@@ -546,7 +618,10 @@ def cmd_lessons_import(args: argparse.Namespace) -> None:
         " WHERE name = 'lessons' AND seq < (SELECT MAX(id) FROM lessons)"
     )
     conn.commit()
-    print(f"imported/updated {imported} lesson(s) from {LESSONS_MD_PATH}")
+    print(
+        f"imported/updated {imported} lesson(s) from {LESSONS_MD_PATH.name}"
+        f" + {LESSONS_ARCHIVE_PATH.name}"
+    )
 
 
 # ---------------------------------------------------------------------------
