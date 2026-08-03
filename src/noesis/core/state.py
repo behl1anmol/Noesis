@@ -370,9 +370,19 @@ def set_last_indexed_commit(
     run would let the next fast path skip files the failed run never
     finished indexing.
 
-    *dirty_paths* (when provided) records the working-tree-dirty set as of
-    this anchor so the next run re-admits them as candidates (H1). Passing
-    an empty iterable clears the stored set; None leaves it untouched."""
+    *dirty_paths* (when provided) records the set the next run must re-admit
+    as candidates (H1). Two populations since ADR-60, and the second is why
+    this parameter is load-bearing rather than bookkeeping: the working-tree
+    -dirty paths as of this anchor, PLUS every path the run could not verify.
+    A run is allowed to anchor past a *nameable* failure precisely because
+    those paths ride along here — the guarantee "the next fast path never
+    skips a file whose state is unknown" is met by recording them, not by
+    refusing to move (issue #28). The anchor and the set are written in ONE
+    statement, so there is no window where the anchor advanced but the
+    re-admission list did not.
+
+    Passing an empty iterable clears the stored set; None leaves it
+    untouched."""
     if dirty_paths is None:
         conn.execute(
             "UPDATE projects SET last_indexed_commit = ?, updated_at = ? WHERE id = ?",
@@ -441,19 +451,32 @@ def add_dirty_paths(
     conn.commit()
 
 
-def clear_dirty_paths(conn: sqlite3.Connection, project_id: str) -> None:
-    """Empty the persisted H1 dirty set without touching the anchor.
+def set_dirty_paths(
+    conn: sqlite3.Connection, project_id: str, paths: Iterable[str]
+) -> None:
+    """REPLACE the persisted H1 dirty set without touching the anchor.
 
     :func:`set_last_indexed_commit` is the only other writer that shrinks it,
     and it requires a commit — so a project with no git anchor (non-git root,
     or git unavailable) had no way to shrink the set at all and grew it
-    without bound. Callers must have completed a clean FULL walk: that
-    re-hashes every discovered file, so nothing is left needing H1
-    re-admission. A blind write, unlike :func:`add_dirty_paths`'s
-    read-modify-write, so it needs no explicit transaction."""
+    without bound. Callers must have completed a FULL walk: that re-hashes
+    every discovered file, so the only paths still owed H1 re-admission are
+    the ones the walk could not verify.
+
+    *paths* is exactly that remainder (ADR-60). It was an unconditional clear
+    until the caller was allowed to finish a walk that had contained failures:
+    a full walk with, say, one unreadable subdirectory has re-hashed
+    everything else, so clearing outright would drop the one set that must
+    survive, while refusing to write at all is what froze the set in the first
+    place (issue #28). Pass an empty iterable for the clean case — that is
+    still the common one, and it behaves exactly as the old clear did.
+
+    A blind write, unlike :func:`add_dirty_paths`'s read-modify-write, so it
+    needs no explicit transaction: the caller is replacing the set with a value
+    it derived from a walk of the whole tree, not merging into what is there."""
     conn.execute(
         "UPDATE projects SET dirty_paths = ?, updated_at = ? WHERE id = ?",
-        (json.dumps([]), _now(), project_id),
+        (json.dumps(sorted(paths)), _now(), project_id),
     )
     conn.commit()
 
@@ -1008,10 +1031,21 @@ def last_full_run_was_clean(conn: sqlite3.Connection, project_id: str) -> bool:
     """Did the most recent finished **full walk** complete with no failures?
 
     This is the best available answer to "could a promotion drain the H1 dirty
-    set?", which is what the fraction trigger needs to know (ADR-57). Both
-    drains are gated on ``clean_run``, so a full walk that was not clean left
-    the set pinned, and the next one will too until the underlying fault is
-    fixed.
+    set?", which is what the fraction trigger needs to know (ADR-57).
+
+    **Deliberately left conservative by ADR-60, and this is the one paragraph
+    to read before "fixing" it.** The drains are no longer gated on
+    ``clean_run``: a full walk whose failures are all *attributable* now
+    rewrites the dirty set to just the paths it could not verify. So a
+    not-clean full walk does drain — but only down to a **pinned floor**, the
+    unresolved set, which the next run re-derives identically while the fault
+    is live. Counting that floor here would promote on a number promotion
+    cannot move, which is exactly the latch the PR #30 review closed over two
+    rounds: a broken subtree holding more than ``promote_candidate_fraction``
+    of the index would satisfy the threshold on every launch, forever. So this
+    keeps reading ``clean``, and keeps meaning "could a promotion drain the set
+    **to empty**". The cost is a deferred promotion on a faulted project, which
+    is the safe direction and no worse than before ADR-60.
 
     Reads the run's **persisted** ``clean`` verdict rather than re-deriving it
     (ADR-58). It used to reconstruct it as ``files_failed == 0``, which was
@@ -1030,7 +1064,8 @@ def last_full_run_was_clean(conn: sqlite3.Connection, project_id: str) -> bool:
 
     Keyed on the *outcome* rather than the cause. Keying on ``unwalkable_dirs``
     rows instead — the first version of this guard — covered only ``dir_errors``,
-    one of ``clean_run``'s three terms; a persistently unreadable **file** pins
+    one of ``clean_run``'s terms (three then, four since ADR-58 added
+    ``screening_held``); a persistently unreadable **file** pins
     the set identically with no ledger row and latched the trigger just the same
     (PR #30 round-2 review). This subsumes the ledger check rather than sitting
     beside it.
@@ -1090,12 +1125,13 @@ def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
     drain happened". The two come apart, and the distinction is deliberate.
 
     A full run that finishes ``done`` with contained per-file failures
-    (ADR-41) is not a *clean* run, so it takes neither drain branch —
-    ``clean_run`` gates both ``clear_dirty_paths`` and the anchor write. (It is
-    no longer ``files_failed == 0``: screening-held deletions are a term of
-    ``clean_run`` that ``files_failed`` deliberately excludes, which is why the
-    verdict is persisted on the run row now rather than re-derived — ADR-58.)
-    It still resets this counter. That looks
+    (ADR-41) is not a *clean* run, and it still resets this counter. Since
+    ADR-60 such a run does take the drain branch when its failures are all
+    attributable — the set is rewritten to the paths it could not verify — but
+    it does not drain to empty, and an unattributable failure still takes no
+    drain at all. So the gap between "a full walk happened" and "a drain
+    happened" narrowed without closing, and what this counter measures is
+    still the former. That looks
     wrong until you price the alternative: requiring a clean full run means a
     project with a **permanently** unreadable directory can never reset, so
     every launch past the threshold promotes. Measured at threshold 3 over 12
@@ -1111,14 +1147,19 @@ def scoped_runs_since_full(conn: sqlite3.Connection, project_id: str) -> int:
     compounded and the real figure at defaults was worse than the 3 quoted here
     — which is what the PR #30 review caught.
 
-    Nor would that buy a drain. The drain is blocked by the discovery error
-    itself, not by the promotion cadence, so promoting harder just re-walks a
-    tree that still cannot be drained. That a latched error blocks the drain
-    forever is a real gap, and it is issue #28's, not this function's.
+    Nor would that have bought a drain at the time. Until ADR-60 the drain was
+    blocked by the discovery error itself rather than by the promotion cadence,
+    so promoting harder just re-walked a tree that still could not be drained
+    — the gap issue #28 recorded. ADR-60 closed it in the other direction:
+    a promoted full walk on a project with an attributable fault now rewrites
+    the dirty set to the unverified remainder instead of leaving it pinned, so
+    the periodic promotion this counter drives is what turns the old unbounded
+    ramp into a bounded sawtooth. Promoting harder still would not help — the
+    remainder is the floor, and no cadence gets under it.
 
     The cost of this rule is bounded and self-healing: a *transient* failure on
     a full run delays the drain by one promotion cycle, and the next full run
-    is clean and drains. A permanent one is #28 either way.
+    is clean and drains to empty.
 
     A **failed** full run is different and does not reset: it may have stopped
     before walking anything, so it is not evidence a full walk happened at all.

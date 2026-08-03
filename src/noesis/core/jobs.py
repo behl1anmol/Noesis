@@ -51,7 +51,7 @@ def _promotion_reason(
 
     Every automated trigger in the service is scoped (``watcher``'s two, and
     the dashboard's two), and only a FULL run drains the H1 dirty set or
-    advances the git anchor: ``clear_dirty_paths`` needs ``candidates is None``
+    advances the git anchor: ``set_dirty_paths`` needs ``candidates is None``
     and ``set_last_indexed_commit`` needs a commit, neither of which a scoped
     run can produce (ADR-40). So without a promotion rule a watched project
     never gets a full walk again after its first one, and both the dirty set
@@ -81,20 +81,27 @@ def _promotion_reason(
         indexed = state.indexed_file_count(ctx.conn, project_id)
         if indexed:
             # The H1 dirty set counts toward the threshold only when a
-            # promotion could actually shrink it (PR #30 review). Both drains
-            # are gated on `clean_run`, so after a run that reported ANY
-            # failure the set is pinned — and counting a pinned set latches
-            # this trigger permanently at the first crossing, promoting every
-            # launch thereafter on a number promotion is structurally incapable
-            # of moving. That is the same "a guard that can fire forever has no
-            # exit" shape this module exists to remove, reached from the other
-            # side.
+            # promotion could shrink it TO EMPTY (PR #30 review; sharpened by
+            # ADR-60). Counting a set promotion cannot move latches this
+            # trigger permanently at the first crossing, promoting every launch
+            # thereafter on a fixed number. That is the same "a guard that can
+            # fire forever has no exit" shape this module exists to remove,
+            # reached from the other side.
+            #
+            # ADR-60 changed what a non-clean full walk does — it now rewrites
+            # the set to the paths it could not verify instead of leaving the
+            # whole accumulation pinned — but NOT this test, deliberately. That
+            # remainder is a floor the next run re-derives identically, so a
+            # broken subtree larger than the fraction would satisfy the
+            # threshold on every launch forever: the original latch, one level
+            # down. `last_full_run_was_clean` carries the full argument.
             #
             # Keyed on whether the last FULL walk was clean, NOT on whether a
-            # directory is unwalkable. `clean_run` has three terms and the
-            # ledger only records one of them: a persistently unreadable *file*
-            # pins the set identically with no ledger row, and latched this
-            # trigger just the same until round 2 of the review caught it.
+            # directory is unwalkable. `clean_run` has four terms (three when
+            # this was written; ADR-58 added `screening_held`) and the ledger
+            # records only one of them: a persistently unreadable *file* pins
+            # the set identically with no ledger row, and latched this trigger
+            # just the same until round 2 of the review caught it.
             #
             # "Full walk" and not "last run": a scoped run never hashes what is
             # outside its candidate set, so a permanently unhashable file leaves
@@ -109,7 +116,9 @@ def _promotion_reason(
             # `pending` is still counted: those paths really did change, a
             # promotion really does clear them, and the cost argument holds.
             # Triggers 1 and 2 keep re-probing on their own cadence, so nothing
-            # stops being revisited. Draining a pinned set at all is issue #28.
+            # stops being revisited — and since ADR-60 the full walk trigger 2
+            # delivers actually drains the drainable part, which is what turns
+            # the old unbounded ramp into a bounded sawtooth (issue #28).
             candidates = set(paths)
             if state.last_full_run_was_clean(ctx.conn, project_id):
                 candidates |= state.get_dirty_paths(ctx.conn, project_id)

@@ -43,7 +43,9 @@ A watcher-triggered run is scoped to exactly the pending paths — but it still 
 
 Not advancing the anchor has a consequence worth spelling out. The dirty-set write that normally rides along with an anchor advance never fires for a scoped run, so a scoped run records the paths it indexed into `dirty_paths` itself. Without that, a file whose only indexed version came from a scoped run would be missing from the set the next fast path re-admits — and if it were reverted to its committed content in the meantime, neither `git diff` nor `git status` would mention it, leaving the stale content indexed indefinitely. The write is union-only, so it can only ever widen the next candidate set.
 
-Union-only keeps it correct but not bounded, and the set is normally trimmed by the same write that advances the anchor — which needs a resolvable HEAD. A clean **full** walk clears it even with no commit to record: a full walk re-hashes every discovered file, so nothing is left owing re-admission. A run with any file, hash, or discovery error does not clear it — that run did not re-hash everything.
+Union-only keeps it correct but not bounded, and the set is normally trimmed by the same write that advances the anchor — which needs a resolvable HEAD. A **full** walk trims it even with no commit to record: a full walk re-hashes every discovered file, so the only thing left owing re-admission is whatever it could not reach.
+
+That remainder is the point. A full walk that hit a fault does not clear the set outright — it *replaces* it with exactly the paths it could not verify ([ADR-60](../project/decisions.md)): files that failed to index or to hash, paths under a subtree it could not walk, and deletions a screening fault held back. On a clean run that remainder is empty and the set is cleared, which is what it always did.
 
 Both of those drains need a *full* run, and that used to be the catch: every automatic trigger is scoped. The watcher's quiet-period run, its start-up catch-up, and the dashboard's two catch-up paths all pass an explicit candidate set, so none of them could take either drain branch. After a project's first full run the set only grew, and each accumulated path was unioned back into the next scoped run's candidate set — so the scoped path decayed toward re-hashing every file any scoped run had ever touched. Not a correctness bug (widening is always safe) but a steadily worsening one, and invisible, since scoped runs report no candidate count.
 
@@ -72,7 +74,7 @@ Only candidates get hashed; deletions from both sources feed the stale-chunk pru
 1. The fast path may only **shrink** the set of files that get hashed. It never marks a file unchanged on its own authority.
 2. Directory-level entries (nested repos, submodule gitlinks) match as *prefixes* — which can only widen the hash set.
 3. **Fallback to a full hash-walk** — silent, logged, never an error — on any of: not a git repo, git binary absent, no stored anchor, anchor not an ancestor of HEAD (`git merge-base --is-ancestor`, which catches history rewrites even before gc), detached HEAD, repo mid-merge/rebase/cherry-pick/bisect, non-zero git exit, or a 30 s timeout.
-4. The anchor advances **only after a clean, successful full run**.
+4. The anchor advances after a successful run whose failures — if any — can be **named**. It never advances past a run that finished `failed`, nor past a failure no path set describes (an unreadable walk root, a path outside the root, or a directory error under `follow_symlinks`): there the walk proved nothing about *which* files are affected, so there is nothing honest to carry. Anything else it could not verify rides along in `dirty_paths` and is re-hashed next run ([ADR-60](../project/decisions.md)).
 
 Per-run telemetry (`fast_path_used`, `candidate_count` vs `files_total`) makes the optimization's value measurable on the usage page — on this repo's own runs, a 3-file change hashes ~3 files instead of hundreds.
 
@@ -92,6 +94,8 @@ Noesis now tracks each failing directory with a consecutive-failure count ([ADR-
 That last part is what makes it safe to stop re-queueing. A file edited while its directory was unreadable has already lost its watcher event, so without something to retry it the stale content would sit in the index until a human forced a full run. The re-admission is a better answer than the retry queue was: it is derived fresh from the recovery itself rather than depending on a queued row surviving.
 
 The record also clears if the directory was genuinely deleted, or has been filtered out of the project's index scope. Both are correct resets — in each case the walk reached the location and legitimately found nothing, so the files leave the index the ordinary way.
+
+**Meanwhile the rest of the project stays fast.** An unreadable directory used to freeze the git anchor for the whole project, so every later run diffed against an ever-older commit and re-hashed a candidate set that grew with each commit. It does not any more: the anchor keeps up with HEAD and takes the unverifiable paths with it in `dirty_paths` ([ADR-60](../project/decisions.md)). Measured on a project with one permanently unreadable directory over eight commits, the candidate set went from `1, 2, 3, 4, 5, 6, 7, 8` — climbing without limit — to `1, 4, 4, 4, 4, 4, 4, 4`: this run's real change plus the three files behind the broken directory, which cost nothing to carry because a candidate that discovery never sees is never hashed.
 
 ## Why hashing stays the source of truth
 

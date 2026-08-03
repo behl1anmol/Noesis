@@ -381,12 +381,26 @@ async def test_clean_full_run_clears_the_dirty_set_without_a_commit(
     assert state.get_dirty_paths(conn, pid) == frozenset()
 
 
-async def test_dirty_set_survives_a_full_run_that_was_not_clean(
+async def test_dirty_set_keeps_exactly_what_a_failed_full_run_could_not_verify(
     tmp_path, monkeypatch
 ) -> None:
-    """Over-correction guard: the clear is only sound because a clean full
-    walk re-hashed everything. A run with any discovery error did not, so the
-    re-admission set must stay."""
+    """Over-correction guard: the clear is only sound for what the walk
+    actually re-hashed. Anything it could not reach must stay owed.
+
+    Rewritten for ADR-60 (issue #28), and the reason is worth stating because
+    the assertion moved. This test used to demand the *whole* prior set survive
+    a non-clean full walk, which encoded the old mechanism — "a run with any
+    error takes no drain" — rather than the property that mechanism existed to
+    protect. The property is "no path that is still owed re-admission is
+    dropped", and it is unchanged here.
+
+    What changed is that the walk below genuinely DID re-hash `a.py`: it is a
+    full walk, so `partition` hashes every discovered file, and `a.py` is
+    discovered — only `pkg/` failed. So `a.py` is no longer owed anything,
+    while `pkg/mod.py` — which this run never saw — now is. Keeping `a.py`
+    forever was the pinned set issue #28 is about; dropping `pkg/mod.py` would
+    be the real bug, and that is what the second assertion pins.
+    """
     root = tmp_path / "proj"
     (root / "pkg").mkdir(parents=True)
     (root / "a.py").write_text("x = 1\n")
@@ -413,10 +427,18 @@ async def test_dirty_set_survives_a_full_run_that_was_not_clean(
     assert state.get_dirty_paths(conn, pid) == frozenset({"a.py"})
 
     _fail_scandir_on(monkeypatch, "pkg")
-    await run()
+    result = await run()
     monkeypatch.undo()
 
-    assert state.get_dirty_paths(conn, pid) == frozenset({"a.py"})
+    # `a.py` was re-hashed by this walk, so it is settled and drops out;
+    # `pkg/mod.py` was never seen, so it is owed and must be carried. Asserting
+    # the exact set catches both directions — a regression that drops the
+    # unverified path, and one that keeps re-admitting a verified one.
+    assert state.get_dirty_paths(conn, pid) == frozenset({"pkg/mod.py"})
+    # And the reason it is owed rather than gone: an unwalked subtree is never
+    # deletion evidence (ADR-51/54). Unchanged by ADR-60.
+    assert result.files_deleted == 0
+    assert "pkg/mod.py" in state.get_file_states(conn, pid)
 
 
 # --- findings 4 and 5: what the operator reads --------------------------------
@@ -454,8 +476,9 @@ async def test_discovery_errors_are_labelled_by_their_own_stage(
     second = await run()
     monkeypatch.undo()
 
-    errors = {row["path"]: row["error"] for row in
-              state.list_file_errors(conn, second.run_id)}
+    errors = {
+        row["path"]: row["error"] for row in state.list_file_errors(conn, second.run_id)
+    }
     assert errors["a.py"].startswith("discovery failed: ")
     assert "hash failed" not in errors["a.py"]
 
@@ -481,4 +504,6 @@ async def test_dir_only_failure_does_not_claim_files_failed(tmp_path) -> None:
 
     row = state.get_latest_run(conn, pid)
     assert row["status"] == "failed"
-    assert row["error"] == "discovery failed for 1 location(s); no files could be verified"
+    assert (
+        row["error"] == "discovery failed for 1 location(s); no files could be verified"
+    )

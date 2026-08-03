@@ -424,6 +424,11 @@ async def test_a_held_back_deletion_makes_the_run_not_clean_for_readers_too(
     _fail_method_on(monkeypatch, "read_text", root / "generated" / ".gitignore")
     _, second = await _run(conn, store, embedder, root)
 
+    # "Drained" means drained to EMPTY. Since ADR-60 a non-clean walk can drain
+    # partially — here it settles `keep.py` and carries the held path — so the
+    # two are no longer the same question in general. They still coincide on
+    # this population, which is what keeps the equality below a live guard
+    # against the reader claiming "clean" over a set nothing emptied.
     drained = not state.get_dirty_paths(conn, project_id)
     reported_clean = state.last_full_run_was_clean(conn, project_id)
     assert second.files_failed == 0, "the premise: this is not a file failure"
@@ -469,11 +474,22 @@ def test_one_unidentified_row_per_directory(tmp_path, monkeypatch):
 
 @requires_git
 @pytest.mark.asyncio
-async def test_held_back_deletion_blocks_the_anchor(tmp_path, monkeypatch):
-    """A file wrongly excluded is a file whose stored hash may now be stale.
+async def test_a_held_back_deletion_is_carried_past_the_anchor(tmp_path, monkeypatch):
+    """A file wrongly excluded is a file whose stored hash may now be stale, so
+    the next fast path must have a reason to look at it again.
 
-    Advancing past it would leave the next fast path with no reason to look at
-    it again — the same rule `file_errors` and `dir_errors` already follow.
+    Renamed and re-pointed by ADR-60 (issue #28). The property is ADR-58's and
+    is untouched: that file must not be silently skipped. What changed is how
+    it is delivered — the anchor no longer *stops* for a failure whose paths
+    can be named, it *carries* them in `dirty_paths`, which the H1 re-admission
+    unions into the next run's candidate set. So the same file is re-examined,
+    without freezing `last_indexed_commit` for the whole project on one
+    unreadable `.gitignore`.
+
+    Asserted as the invariant rather than as either mechanism: the held path
+    is in the re-admission set. That assertion fails on a regression in EITHER
+    direction — dropping the path, or reverting to a frozen anchor while
+    forgetting to record it.
     """
     conn, store, embedder = make_env(tmp_path)
     root = _negation_tree(tmp_path)
@@ -493,12 +509,21 @@ async def test_held_back_deletion_blocks_the_anchor(tmp_path, monkeypatch):
     _fail_method_on(monkeypatch, "read_text", root / "generated" / ".gitignore")
     _, second = await _run(conn, store, embedder, root)
 
-    # Anchor first, deliberately: pre-fix BOTH of these are wrong, and if the
-    # deletion assertion ran first the recorded failure would only ever prove
-    # the deletion half. Ordered this way, the `bfa5104` run fails on the anchor
-    # line, which is what this test is named for.
-    assert state.get_project(conn, project_id)["last_indexed_commit"] == first_anchor
+    # The point of the test, first: the wrongly-excluded file is owed a
+    # re-hash, and the run says so. Ordered first deliberately — it is the
+    # assertion the test is named for, and letting the deletion check run first
+    # would let a failure prove only the deletion half.
+    held = "generated/important.gen.py"
+    assert held in state.get_dirty_paths(conn, project_id)
+    # Still not deleted: ADR-58 holds the deletion back, and ADR-60 changed
+    # nothing about that. Carrying a path forward is a RETRY decision, never a
+    # deletion one — the separation PR #24 and PR #30 both turn on.
     assert second.files_deleted == 0
+    assert held in state.get_file_states(conn, project_id)
+    # And the anchor did move, which is the ADR-60 half: one unreadable
+    # .gitignore no longer freezes the project's fast path.
+    assert state.get_project(conn, project_id)["last_indexed_commit"] == git_head(root)
+    assert git_head(root) != first_anchor
 
 
 @requires_git

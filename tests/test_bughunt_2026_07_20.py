@@ -3,8 +3,11 @@
 PIPE-1 (high): a transient fs error during discovery must never purge live
 files as "deleted". Discovery now reports per-file and per-directory errors
 (DiscoveryErrors); partition gives discovery-errored files the H7 carry-
-forward; the indexer skips deletions when a subtree went unwalked and blocks
-anchor advance on any discovery error.
+forward; the indexer skips deletions when a subtree went unwalked, and every
+path it could not verify is re-admitted as a candidate on the next run. That
+last part was originally done by blocking anchor advance on any discovery
+error; ADR-60 (issue #28) delivers it by carrying those paths in dirty_paths
+so the anchor can keep up. The deletion guarantees below are unchanged.
 
 PIPE-2 (medium): scoped (watcher) runs never advance the anchor, so they
 never persisted dirty_paths — content indexed only by scoped runs was
@@ -120,9 +123,7 @@ def test_partition_discovery_errored_carries_forward(tmp_path):
     (tmp_path / "b.py").write_text("y = 2\n")
     stored = {"a.py": "STORED_HASH", "b.py": "OLD_HASH"}
 
-    res = partition(
-        tmp_path, ["b.py"], stored, discovery_errored=[("a.py", "EACCES")]
-    )
+    res = partition(tmp_path, ["b.py"], stored, discovery_errored=[("a.py", "EACCES")])
 
     # a.py never entered `discovered`, yet it must not read as deleted.
     assert "a.py" not in res.deleted
@@ -146,7 +147,7 @@ def test_partition_discovery_errored_unknown_file_reported_only(tmp_path):
 
 
 @requires_git
-async def test_file_discovery_error_not_a_deletion_and_blocks_anchor(
+async def test_file_discovery_error_not_a_deletion_and_is_carried(
     tmp_path, monkeypatch
 ) -> None:
     root = tmp_path / "repo"
@@ -179,14 +180,18 @@ async def test_file_discovery_error_not_a_deletion_and_blocks_anchor(
     monkeypatch.undo()
 
     # alpha.py errored in discovery: pre-fix it fell out of the walk silently
-    # and was purged as deleted. Now its state and chunks survive, the run is
-    # honest about the failure, and the anchor stays put.
+    # and was purged as deleted. Now its state and chunks survive and the run is
+    # honest about the failure.
     assert "alpha.py" in state.get_file_states(conn, pid)
     assert store.per_file_point_counts(pid).get("alpha.py", 0) > 0
     assert result.files_deleted == 0
     assert result.files_failed == 1
     assert "alpha.py" in result.failed_paths
-    assert anchor_of(conn, pid) == c0
+    # ADR-60: the anchor advances and takes the unverified path with it, rather
+    # than stopping at c0. Either way alpha.py is a candidate again next run —
+    # which is the property; the deletion assertions above are the finding.
+    assert anchor_of(conn, pid) == c1
+    assert "alpha.py" in state.get_dirty_paths(conn, pid)
     run_row = state.get_latest_run(conn, pid)
     assert run_row["status"] == "done"
 
@@ -197,7 +202,7 @@ async def test_file_discovery_error_not_a_deletion_and_blocks_anchor(
 
 
 @requires_git
-async def test_dir_walk_error_skips_deletions_and_blocks_anchor(
+async def test_dir_walk_error_skips_deletions_and_carries_the_subtree(
     tmp_path, monkeypatch
 ) -> None:
     root = tmp_path / "repo"
@@ -236,13 +241,15 @@ async def test_dir_walk_error_skips_deletions_and_blocks_anchor(
     monkeypatch.undo()
 
     # pkg/ went unwalked: its file must survive (deletion evidence is
-    # untrustworthy this run), the dir error must count as a failure, and
-    # the anchor must not advance past it.
+    # untrustworthy this run) and the dir error must count as a failure.
     assert "pkg/mod.py" in state.get_file_states(conn, pid)
     assert store.per_file_point_counts(pid).get("pkg/mod.py", 0) > 0
     assert result.files_deleted == 0
     assert result.files_failed >= 1
-    assert anchor_of(conn, pid) == c0
+    # ADR-60: the anchor advances carrying what the unwalked subtree hid, so
+    # one unreadable directory no longer freezes the whole project's fast path.
+    assert anchor_of(conn, pid) == c1
+    assert "pkg/mod.py" in state.get_dirty_paths(conn, pid)
     assert state.get_latest_run(conn, pid)["status"] == "done"
 
     # Clean run: pkg/mod.py is rediscovered unchanged, anchor advances.
@@ -327,7 +334,9 @@ async def test_scoped_run_persists_dirty_paths_so_revert_is_reindexed(
     committed = "def alpha():\n    return 1\n"
     dirty = "def alpha():\n    return 999\n"
     root = tmp_path / "repo"
-    build_git_repo(root, {"alpha.py": committed, "beta.py": "def beta():\n    return 2\n"})
+    build_git_repo(
+        root, {"alpha.py": committed, "beta.py": "def beta():\n    return 2\n"}
+    )
     conn, store, embedder = make_env(tmp_path)
 
     async def run(paths=None):
@@ -632,9 +641,7 @@ def test_add_dirty_paths_does_not_lose_a_concurrent_union(tmp_path, monkeypatch)
 
     check = state.connect(db)
     try:
-        assert state.get_dirty_paths(check, pid) == frozenset(
-            {"a.py", "b.py", "c.py"}
-        )
+        assert state.get_dirty_paths(check, pid) == frozenset({"a.py", "b.py", "c.py"})
     finally:
         check.close()
 

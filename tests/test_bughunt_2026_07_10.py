@@ -4,8 +4,9 @@ One test (or pair) per confirmed finding, in severity order:
 
 1. (high) Transient hash OSError under the git fast path must not strand a
    committed file with stale index content: partition surfaces the error,
-   the run refuses to advance the anchor, and the path re-enters the retry
-   loop via failed_paths.
+   the path re-enters the retry loop via failed_paths, and it is re-nominated
+   as a candidate on the next run — originally by holding the anchor back,
+   since ADR-60 by riding along with it in dirty_paths.
 2. (medium) Hybrid RRF prefetch depth must stay `candidates` deep when no
    reranker runs — not collapse to top_k.
 3. (medium) The already-running launch guard is atomic (BEGIN IMMEDIATE)
@@ -106,12 +107,18 @@ def test_hash_error_new_file_is_skipped_but_reported(tmp_path):
 
 
 @requires_git
-def test_hash_error_blocks_anchor_advance_and_repends(tmp_path, monkeypatch):
+def test_hash_error_carries_the_path_past_the_anchor_and_repends(tmp_path, monkeypatch):
     """The full stranding loop from the finding, now closed.
 
-    A file modified in a commit is a fast-path candidate exactly once; if
-    its hash errors transiently in that run, the anchor must stay put (else
-    no future run ever re-nominates it and its stale chunks serve forever).
+    A file modified in a commit is a fast-path candidate exactly once. If its
+    hash errors transiently in that run, something must re-nominate it, or no
+    future run ever will and its stale chunks serve forever.
+
+    Renamed by ADR-60 (issue #28): the re-nomination used to come from holding
+    the anchor back, and now comes from carrying the path in `dirty_paths`.
+    The loop this test is named for — error, then a healthy run that re-hashes
+    and re-indexes — is asserted at the end and is unchanged; only the middle
+    assertion, which pinned the mechanism, moved.
     """
     root = tmp_path / "repo"
     build_git_repo(root)
@@ -144,21 +151,26 @@ def test_hash_error_blocks_anchor_advance_and_repends(tmp_path, monkeypatch):
     monkeypatch.undo()
 
     # The run completes (old chunks keep serving) but is honest about the
-    # failure, keeps the anchor at c0, and re-queues the path.
+    # failure and re-queues the path.
     assert result.files_failed == 1
     assert result.failed_paths == ("alpha.py",)
-    assert anchor_of(conn, pid) == c0
+    # Carried rather than blocked: the anchor keeps up, and the path it could
+    # not verify travels with it so the next run still re-nominates it.
+    assert anchor_of(conn, pid) == c1
+    assert "alpha.py" in state.get_dirty_paths(conn, pid)
     run_row = state.get_latest_run(conn, pid)
     assert run_row["status"] == "done"
     assert run_row["files_failed"] == 1
 
-    # Next run (hash healthy again): alpha.py is still a candidate because
-    # the anchor never passed c1 — it re-hashes, re-indexes, and the anchor
-    # advances. Pre-fix, this run carried the stale hash forward silently.
+    # Next run (hash healthy again): alpha.py is still a candidate — via the
+    # dirty set now rather than via a held-back anchor — so it re-hashes and
+    # re-indexes. Pre-fix, this run carried the stale hash forward silently.
+    # This block is the finding itself and passes against either mechanism.
     result = asyncio.run(run())
     assert result.files_failed == 0
     assert result.files_indexed == 1  # alpha.py re-indexed
     assert anchor_of(conn, pid) == c1
+    assert state.get_dirty_paths(conn, pid) == frozenset()
 
 
 # --- 2. hybrid prefetch depth without a reranker ------------------------------
