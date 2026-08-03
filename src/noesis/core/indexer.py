@@ -876,9 +876,13 @@ async def execute_run(
             for path, msg in diff.errored
         ]
         # Dir-level discovery errors are run failures too: an unseen subtree
-        # leaves its files' true state unknown, so they must block anchor
-        # advance exactly like hash failures. (File-level discovery errors
-        # already arrive here via diff.errored / discovery_errored.)
+        # leaves its files' true state unknown, so they count toward
+        # `files_failed` and `clean_run` exactly like hash failures. They no
+        # longer block the anchor, though — ADR-60 carries the stored paths
+        # they hid (`unverified`) forward in the dirty set instead, which meets
+        # the same guarantee without freezing the project. (File-level
+        # discovery errors already arrive here via diff.errored /
+        # discovery_errored.)
         #
         # Kept in their OWN list rather than folded into hash_errors, because
         # they are the only entries here that are not file paths — a directory

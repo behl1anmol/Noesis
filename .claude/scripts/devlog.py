@@ -400,7 +400,7 @@ def _lessons_missing_from_db(conn: sqlite3.Connection) -> list[str]:
 
 def cmd_render_lessons(args: argparse.Namespace) -> None:
     conn = connect()
-    # Rule 9 / lesson 11, enforced rather than remembered. This command
+    # Lesson 11, enforced rather than remembered (ADR-61). This command
     # regenerates a COMMITTED file from a gitignored, machine-local DB, so on
     # any machine where the DB is behind the file it is a delete, not a
     # refresh — and it reports success either way. It has destroyed the
@@ -436,7 +436,8 @@ def cmd_render_lessons(args: argparse.Namespace) -> None:
         "Rendered from `dev/devlog.sqlite` (`lessons` table, `status='active'`) by",
         "`.claude/scripts/devlog.py render-lessons`. Do not hand-edit — edits made here",
         "are overwritten on the next render and are not reflected in the DB. To rehydrate",
-        "the DB from this file on a fresh clone, run `devlog.py lessons import`.",
+        "the DB on a fresh clone, run `devlog.py lessons import`, which reads this file",
+        "and `LESSONS-archive.md` together and restores ids and statuses (ADR-61).",
         "",
         "Injected verbatim into context at the start of every session",
         "(`.claude/hooks/session_start.py`). Subordinate to `CLAUDE.md` rules 1-6 — a",
