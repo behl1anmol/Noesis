@@ -100,9 +100,17 @@ def _ci_qdrant_service() -> dict:
 
 
 def _env_mapping(raw) -> dict[str, str]:
-    """compose and Actions both accept a mapping or a `KEY=VALUE` list."""
+    """compose and Actions both accept a mapping or a `KEY=VALUE` list.
+
+    A bare `- KEY` is valid compose — it passes the value through from the
+    host environment — and carries no value in the file, so it maps to `""`
+    and fails the caller's assertion with that test's own message. Splitting
+    on `=` unconditionally would raise a bare ValueError from `dict()`
+    instead, which is the same "opaque error where a verdict belongs" the
+    variant-tag parse was split out to remove.
+    """
     if isinstance(raw, list):
-        return dict(item.split("=", 1) for item in raw)
+        return {key: value for key, _sep, value in (str(i).partition("=") for i in raw)}
     return {str(k): str(v) for k, v in (raw or {}).items()}
 
 

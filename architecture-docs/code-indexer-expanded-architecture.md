@@ -83,7 +83,7 @@ Versions verified against PyPI/GitHub as of **2026-07-02**. Re-pin from the regi
 | ASGI server | uvicorn | 0.49.x | BSD-3 | Via `fastapi[standard]` |
 | Agent protocol | fastmcp (standalone, PrefectHQ) | 3.x (latest 3.4.x) | Apache-2.0 | **Not** the bundled `mcp.server.fastmcp`. Mount via `http_app()` + shared lifespan |
 | MCP SDK | mcp | resolved by fastmcp; if imported directly, `>=1.27,<2` | MIT | v1.28.1 current stable. **v2 stable targeted 2026-07-28 — breaking.** v2.0.0b1 (2026-06-30) removes `mcp.server.fastmcp`. Do not float; see M8 |
-| Vector DB | qdrant (Docker) + qdrant-client | server 1.15.x+ / client 1.18.x | Apache-2.0 | Server ≥1.15.2 for native BM25 (`Modifier.IDF` + `models.Document(model="Qdrant/bm25")`) |
+| Vector DB | qdrant (Docker) + qdrant-client | server 1.18.x / client 1.18.x | Apache-2.0 | ≥1.15.2 is the native-BM25 floor (`Modifier.IDF` + `models.Document(model="Qdrant/bm25")`), not the pin: the two versions are one decision and move together on the same minor (ADR-62) |
 | Embedding runtime | sentence-transformers | 5.x (5.4+) | Apache-2.0 | Loads CodeRankEmbed (`trust_remote_code=True`) and the CrossEncoder reranker |
 | Default embedder | nomic-ai/CodeRankEmbed | 137M, **768-dim**, 8192 ctx | **MIT** | Query-only prefix: `Represent this query for searching relevant code:` |
 | Reranker | BAAI/bge-reranker-v2-m3 | ~568M | Apache-2.0 (per HF card) | `CrossEncoder("BAAI/bge-reranker-v2-m3")`; lazy-loaded |

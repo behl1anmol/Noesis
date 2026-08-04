@@ -19,7 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --all-groups
+      # --locked: fail if uv.lock is stale against pyproject.toml rather than
+      # silently re-locking. tests/test_qdrant_pin_compat.py takes the client
+      # version from the RESOLVED environment, so a CI run that quietly
+      # re-resolved would be checking a pair nobody committed (PR #41 review).
+      - run: uv sync --all-groups --locked
       # Default suite: FakeEmbedder + in-memory Qdrant. Since M3, upserts
       # exercise the real BM25 sparse path, so the first run fetches the
       # ~100 KB Qdrant/bm25 tokenizer assets (ADR-32) — no model weights.
@@ -55,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --all-groups
+      - run: uv sync --all-groups --locked
       # The Qdrant image ships no curl/wget, so an in-container `--health-cmd`
       # has nothing to run — wait from the runner instead.
       - name: Wait for Qdrant to become ready
