@@ -84,6 +84,11 @@ Every automated trigger (the watcher's two paths, the dashboard's two) runs
 git anchor — so without these a project that hits a snag stays there until a
 human clicks Reindex.
 
+These only govern *when* a full walk happens. Whether that walk is allowed to
+record its position — and what it carries forward if it could not read
+everything — is not configurable and is decided per run
+([ADR-60](../project/decisions.md)).
+
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `promote_after_scoped_runs` | int ≥ 0 | `20` | Promote a scoped run to a full walk once this many scoped runs have started since the last **completed** full one. A failed full run does not reset the counter — it did not drain anything. `0` disables. |
@@ -91,13 +96,21 @@ human clicks Reindex.
 | `unwalkable_quarantine_runs` | int ≥ 0 | `5` | Consecutive runs a directory must fail to be walked before the indexed paths it hides stop being re-queued for retry. `0` disables, restoring a permanently non-draining backlog. |
 
 !!! info "Why the dirty set is conditional"
-    Both drains of the working-tree-dirty set are gated on a run completing
-    with **no** failures. So after a full walk that reported any failure — an
-    unreadable directory, but equally an unreadable *file* — the set is pinned
-    and no amount of promoting can shrink it. Counting a pinned set made
+    A full walk that reported any failure — an unreadable directory, but
+    equally an unreadable *file* — cannot empty the working-tree-dirty set. It
+    drains to a **floor**: the paths it could not verify, which the next run
+    re-derives identically while the fault is live
+    ([ADR-60](../project/decisions.md)). Counting that floor made
     `promote_candidate_fraction` fire on every launch forever, on a number
-    promotion is structurally incapable of moving. It is therefore counted only
-    while the last **full walk** was clean.
+    promotion is structurally incapable of moving. The set is therefore counted
+    only while the last **full walk** was clean, which is when a promotion
+    could take it to zero.
+
+    Before ADR-60 the set did not drain at all on a faulted project, so the
+    same guard was needed for a stronger reason. What changed is the size of
+    the problem, not its shape — and the guard is worth keeping either way,
+    since a broken subtree larger than this fraction would otherwise satisfy
+    the threshold from its floor on every launch.
 
     "Full walk" and not "last run": a scoped run never hashes what is outside
     its candidate set, so a permanently unhashable file leaves scoped runs

@@ -96,10 +96,17 @@ suppresses deletion and orphan pruning under its own directory prefix, using
 the same `_under` containment as [ADR-54](../project/decisions.md), rather than
 just being logged.
 
-It blocks the git anchor too, but only when it actually held a deletion back.
+It reaches the git anchor too, but only when it actually held a deletion back.
 Gating on the fault instead would latch any project with a permanently
 unreadable `.gitignore` onto full walks forever — the "guard that can never be
 satisfied" shape [ADR-55](../project/decisions.md) exists to avoid.
+
+What "reaching the anchor" means changed with
+[ADR-60](../project/decisions.md), and it is the same reasoning taken one step
+further. A held-back deletion no longer *stops* the anchor; it *rides* with it,
+recorded in `dirty_paths` so the next run re-admits that path as a candidate.
+The file is re-examined either way — but the project's fast path is no longer
+frozen for as long as the `.gitignore` stays unreadable.
 
 Bounded, and worth stating so it is not over-read: the secret and generated
 skip-lists apply independently of the ignore stack, so a lost `.gitignore` is
@@ -117,7 +124,12 @@ This matters because everything downstream infers deletion from *absence*. A
 path missing from the walk is indistinguishable from a path deleted on disk,
 so a transient fault on a network mount used to purge every chunk under an
 unreadable subtree — and then advance the git anchor, making the loss
-permanent. The indexer now gives file-level errors the same carry-forward
+permanent. (The anchor advances past an unreadable subtree again today, under
+[ADR-60](../project/decisions.md), but the two halves of that old failure are
+now independent: nothing under such a subtree is ever purged, and the paths it
+hides advance *with* the anchor instead of being forgotten by it. What made the
+loss permanent was anchoring past a deletion, not anchoring as such.)
+The indexer now gives file-level errors the same carry-forward
 treatment as a hash-time failure, and a directory-level error suppresses
 deletion and orphan pruning ([ADR-51](../project/decisions.md)) — for the
 paths under that directory, not for the whole project

@@ -445,7 +445,7 @@ def test_the_fraction_trigger_does_not_latch_on_an_undrainable_dirty_set(
     the other side.
 
     The guard keys on the last full walk's OUTCOME, not on ledger rows.
-    `clean_run` has three terms and the ledger records only `dir_errors`; a
+    `clean_run` has four terms and the ledger records only `dir_errors`; a
     persistently unreadable *file* pins the set identically with no ledger row
     at all, which is the sibling instance round 2 found."""
     ctx = make_ctx(

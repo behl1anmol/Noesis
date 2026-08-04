@@ -876,9 +876,13 @@ async def execute_run(
             for path, msg in diff.errored
         ]
         # Dir-level discovery errors are run failures too: an unseen subtree
-        # leaves its files' true state unknown, so they must block anchor
-        # advance exactly like hash failures. (File-level discovery errors
-        # already arrive here via diff.errored / discovery_errored.)
+        # leaves its files' true state unknown, so they count toward
+        # `files_failed` and `clean_run` exactly like hash failures. They no
+        # longer block the anchor, though — ADR-60 carries the stored paths
+        # they hid (`unverified`) forward in the dirty set instead, which meets
+        # the same guarantee without freezing the project. (File-level
+        # discovery errors already arrive here via diff.errored /
+        # discovery_errored.)
         #
         # Kept in their OWN list rather than folded into hash_errors, because
         # they are the only entries here that are not file paths — a directory
@@ -1046,6 +1050,53 @@ async def execute_run(
             and not dir_errors
             and not screening_held
         )
+        # ADR-60. `clean_run` above is the run's HEALTH verdict and keeps every
+        # term it had. The two drains below ask a different question — "which
+        # files is this run unsure about?" — and its honest answer is a SET,
+        # not a boolean.
+        #
+        # Every stored path lands in exactly one bucket, and this names the
+        # ones left in doubt: hashed-then-failed-to-index (`file_errors`),
+        # failed to hash or to be screened (`hash_errors`, which carries the
+        # stale stored hash forward), never seen because a directory could not
+        # be walked (`unverified`), and held back from deletion because the
+        # ignore rules that decide membership never loaded (`screening_held`).
+        # The enumeration is exhaustive rather than hopeful: `diff.deleted` is
+        # `stored - seen`, and the deletion block above partitions all of it
+        # into `unverified` / `screening_held` / `provable`, the last of which
+        # leaves `stored` entirely.
+        unresolved = frozenset(p for p, _ in (*file_errors, *hash_errors)).union(
+            unverified, screening_held
+        )
+        # So the gate becomes "advance when the doubt can be NAMED", not
+        # "advance when there is none". What the old gate protected — the next
+        # fast path must never skip a file whose state is unknown — is
+        # delivered by recording those paths in `dirty_paths`, which already
+        # means "owed re-admission next run" and which the H1 union above feeds
+        # straight back into the candidate set. Blocking instead froze
+        # `last_indexed_commit` for the whole project on one unreadable
+        # directory (or one unreadable FILE, which leaves no ledger row at
+        # all), and `compute_candidates` then diffed against an ever-older
+        # commit forever (issue #28).
+        #
+        # Two conditions still block completely, and they are the point:
+        #
+        # * `unwalked is None` — the `<root>` sentinel, a path outside the
+        #   root, or `follow_symlinks`. `unverified` does technically enumerate
+        #   the paths even then, so this is a judgement rather than a
+        #   necessity: under `<root>` that enumeration is the ENTIRE index, so
+        #   advancing would write every path in the project into a JSON column
+        #   on every run to buy a next run that hashes everything anyway. The
+        #   walk proved nothing; ADR-57's trigger 1 already forces a full walk
+        #   for these projects.
+        # * `all_failed` — §3.2 rule 4 is untouched. A run that finishes
+        #   `failed` never advances the anchor.
+        #
+        # Note this SUBSUMES the old rule rather than sitting beside it: when
+        # `clean_run` is true, all four terms are empty and `unwalked` is `()`,
+        # so `unresolved` is empty and both branches do exactly what they did
+        # before. A healthy project cannot observe this change.
+        may_advance = not all_failed and unwalked is not None
         state.finish_run(
             conn,
             run_id,
@@ -1072,11 +1123,19 @@ async def execute_run(
             indexed_ok = [rel for rel in to_index if rel not in failed]
             if indexed_ok:
                 state.add_dirty_paths(conn, project_id, indexed_ok)
-        # A run with failed files must not advance the git anchor either: the
-        # failed files' state rows are stale, and anchoring past them would let
-        # the next fast path carry them forward as unchanged. `clean_run` is
-        # computed above, next to the `finish_run` that persists it.
-        if head is not None and clean_run:
+        # The anchor may advance past a failure whose paths this run can name,
+        # because those paths ride along in the same write (ADR-60). It may not
+        # advance past one it cannot: `may_advance` is computed above, next to
+        # the `unresolved` set it travels with.
+        #
+        # Tracked rather than re-derived for the log below: `may_advance` says
+        # the run was ALLOWED to record a position, not that it did. A scoped
+        # run has no anchor to write (`head is None`) and is not a full walk
+        # (`candidates is not None`), so it takes neither branch however clean
+        # it was — claiming otherwise would be a log line that lies about the
+        # commonest run in the service.
+        position_recorded = False
+        if head is not None and may_advance:
             # Persist the working-tree-dirty set with the anchor (H1). The
             # fast path already captured it at run start (git_info); a
             # full-walk run re-queries `git status` here.
@@ -1087,20 +1146,51 @@ async def execute_run(
                     await asyncio.to_thread(gitfast.status_dirty_paths, root_path)
                     or frozenset()
                 )
-            state.set_last_indexed_commit(conn, project_id, head, dirty_paths=new_dirty)
-        elif candidates is None and clean_run:
-            # Clean FULL walk with no anchor to record — a non-git root, or
-            # git unavailable. `set_last_indexed_commit` is the only other
-            # writer that shrinks the H1 dirty set, and it needs a commit, so
-            # without this the union in `add_dirty_paths` only ever grows: on a
-            # non-git watched project every scoped run adds what it indexed and
-            # nothing ever removes it, and indexer's H1 re-admission unions the
-            # whole accumulation back into the next scoped candidate set. It
-            # would creep toward "re-hash every file ever indexed" on every
-            # watcher run. Safe to drop here and only here: a full walk hashed
-            # every discovered file, so no stored hash is stale and nothing is
-            # owed re-admission.
-            state.clear_dirty_paths(conn, project_id)
+            state.set_last_indexed_commit(
+                conn, project_id, head, dirty_paths=set(new_dirty) | unresolved
+            )
+            position_recorded = True
+        elif candidates is None and may_advance:
+            # FULL walk with no anchor to record — a non-git root, or git
+            # unavailable. `set_last_indexed_commit` is the only other writer
+            # that shrinks the H1 dirty set, and it needs a commit, so without
+            # this the union in `add_dirty_paths` only ever grows: on a non-git
+            # watched project every scoped run adds what it indexed and nothing
+            # ever removes it, and indexer's H1 re-admission unions the whole
+            # accumulation back into the next scoped candidate set. It would
+            # creep toward "re-hash every file ever indexed" on every watcher
+            # run.
+            #
+            # Safe here and only here because a full walk hashed every
+            # discovered file — so the only stored hashes still in doubt are
+            # the ones it could not reach, which is precisely `unresolved`.
+            # Writing that (rather than clearing outright) is what lets this
+            # branch run at all on a project with a contained fault; before
+            # ADR-60 it was gated on `clean_run` and a single permanently
+            # unreadable path pinned the set forever (issue #28).
+            state.set_dirty_paths(conn, project_id, unresolved)
+            position_recorded = True
+        if unresolved and position_recorded:
+            # The visibility half of issue #28: the old behaviour was a
+            # `last_indexed_commit` that silently stopped moving, with nothing
+            # anywhere saying why. Say plainly that the position advanced and
+            # what it is carrying, so "it moved despite errors" is something an
+            # operator can read rather than infer. Count only — the paths are
+            # at DEBUG below, per ADR-25 exposure.
+            #
+            # Deliberately NOT reported against `total_failed`: screening-held
+            # deletions are carried here but excluded from that count (nothing
+            # failed to index), so pairing the two printed "despite 0
+            # failure(s)" on exactly the run this line exists to explain. The
+            # carried count is the honest one — it is the number of paths this
+            # sentence is actually about.
+            logger.info(
+                "index run %s: index position recorded with %d path(s) still "
+                "unverified — they are carried forward for re-hashing, so none "
+                "of them is skipped and the next run re-examines every one",
+                run_id,
+                len(unresolved),
+            )
         # Completion milestone: counts + duration, so a finished run is visible
         # even when the dashboard isn't being watched. errors is a count; the
         # failed paths themselves stay at DEBUG (ADR-25 exposure).

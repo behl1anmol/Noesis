@@ -616,9 +616,22 @@ async def test_anchor_advances_after_successful_fast_run(tmp_path: Path) -> None
 
 
 @requires_git
-async def test_anchor_not_updated_on_failed_run(tmp_path: Path) -> None:
-    """§3.2 rule 4: a run with failed files must not advance
-    last_indexed_commit."""
+async def test_anchor_advances_carrying_a_contained_failure(tmp_path: Path) -> None:
+    """§3.2 rule 4, stated as the invariant it protects: the next fast path
+    must never skip a file whose state this run left unknown.
+
+    Rewritten by ADR-60 (issue #28). It used to assert the *mechanism* — "a run
+    with failed files must not move the anchor" — which is one way to deliver
+    that invariant and no longer the way this code uses. A failure whose paths
+    can be named is now carried in `dirty_paths`, which `execute_run` unions
+    into the next candidate set, so the failed file is re-examined without
+    freezing `last_indexed_commit` for the whole project.
+
+    Both halves are asserted together on purpose. The anchor moving is worth
+    nothing on its own — it is only safe *because* the path came with it — so a
+    regression that advances without carrying fails here, which is the whole
+    reason the two assertions live in one test.
+    """
     repo = tmp_path / "repo"
     build_git_repo(repo)
     conn, store, embedder = make_env(tmp_path)
@@ -627,20 +640,67 @@ async def test_anchor_not_updated_on_failed_run(tmp_path: Path) -> None:
 
     (repo / "alpha.py").write_text("def alpha():\n    return 13\n")
     git(repo, "commit", "-q", "-a", "-m", "will fail to index")
-    assert git_head(repo) != anchor
+    head = git_head(repo)
+    assert head != anchor
 
     # Since ADR-41 (M8), a per-file embed failure is contained rather than
     # propagated; since the 2026-07-11 hunt, one contained failure on a
     # narrow fast-path candidate set over an otherwise-healthy tree
-    # (skipped > 0) reports "done" with files_failed — same as the hash
-    # path. The property under test is unchanged either way: a run with
-    # failed files must not move the anchor.
+    # (skipped > 0) reports "done" with files_failed — same as the hash path.
     result2 = await index_project(conn, store, ExplodingEmbedder(dim=8), str(repo))
     assert result2.files_failed == 1
 
     run_row = state.get_latest_run(conn, result1.project_id)
     assert run_row["status"] == "done"
-    assert anchor_of(conn, result1.project_id) == anchor
+    assert run_row["clean"] == 0, "the run is still reported as NOT clean"
+    assert anchor_of(conn, result1.project_id) == head
+    assert "alpha.py" in state.get_dirty_paths(conn, result1.project_id)
+
+    # The invariant end-to-end, not just its bookkeeping: the next run — a fast
+    # path whose git diff has nothing to say, since no commit landed since —
+    # still re-indexes the file, because the carry put it back in the candidate
+    # set. Without the carry this run would index nothing at all.
+    result3 = await index_project(conn, store, embedder, str(repo))
+    assert result3.fast_path_used is True
+    assert result3.files_indexed == 1
+    assert "alpha.py" not in state.get_dirty_paths(conn, result1.project_id)
+    conn.close()
+
+
+@requires_git
+async def test_anchor_holds_when_the_run_failed_outright(tmp_path: Path) -> None:
+    """§3.2 rule 4, the half ADR-60 does NOT relax: a run that finishes
+    `failed` never advances the anchor.
+
+    The complement of the test above, and the reason "contained failure" is
+    doing real work in its name. Here every file fails, `all_failed` is true,
+    the run is `failed`, and there is no honest position to record — the run is
+    not evidence of anything. `may_advance` is false and the anchor stays put.
+    """
+    repo = tmp_path / "repo"
+    build_git_repo(repo)
+    conn, store, embedder = make_env(tmp_path)
+    result1 = await index_project(conn, store, embedder, str(repo))
+    anchor = anchor_of(conn, result1.project_id)
+    project_id = result1.project_id
+
+    # EVERY file changes, so a full walk puts all of them in `to_index` and a
+    # dead embedder fails all of them, leaving no known-good remainder. That is
+    # `chunk_embed_all_failed` — the infrastructure-down shape. Changing one
+    # file would not do it: the rest of the tree stays provably healthy, which
+    # ADR-41 correctly reports as a contained per-file failure (the test above).
+    for name in FILES:
+        (repo / name).write_text(f"# rewritten\n{FILES[name]}")
+    git(repo, "commit", "-q", "-a", "-m", "advance")
+    assert git_head(repo) != anchor
+
+    result2 = await index_project(
+        conn, store, ExplodingEmbedder(dim=8), str(repo), git_fast_path=False
+    )
+    assert state.get_latest_run(conn, project_id)["status"] == "failed"
+    assert result2.files_failed > 0
+
+    assert anchor_of(conn, project_id) == anchor
     conn.close()
 
 

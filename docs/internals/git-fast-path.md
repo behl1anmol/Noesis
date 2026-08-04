@@ -33,11 +33,12 @@ Any uncertainty returns `None` → silent full hash-walk (logged for the operato
 
 - **Subprocess CLI, not pygit2 ([ADR-23](../project/decisions.md)).** Zero Python dependencies, license-clean (GPLv2 unlinked), and the ~10 ms spawn cost is noise next to embedding. pygit2 remains the documented upgrade if profiling ever demands it.
 - **`-z` and `--no-renames` parsing.** NUL-separated raw paths are immune to quoting/escaping; disabling rename detection makes a rename surface as delete-old + add-new, so both paths become candidates with a trivial parser regardless of the user's `diff.renames` config ([ADR-37](../project/decisions.md)).
-- **Dirty-path carryover (H1).** The working-tree-dirty subset is persisted alongside the anchor (`projects.dirty_paths`), so a file dirty at run N is re-admitted as a candidate at run N+1 even if it was reverted to HEAD in between — the diff against the new anchor would otherwise never mention it.
+- **Dirty-path carryover (H1).** The working-tree-dirty subset is persisted alongside the anchor (`projects.dirty_paths`), so a file dirty at run N is re-admitted as a candidate at run N+1 even if it was reverted to HEAD in between — the diff against the new anchor would otherwise never mention it. Since [ADR-60](../project/decisions.md) the same column carries a second population — paths the run could not verify — for exactly the same reason: once the anchor is past them, `git diff` will never mention them again either.
 
 ## Anchor lifecycle
 
-- `projects.last_indexed_commit` is written **only after a run completes cleanly** with a resolved HEAD; a failed run never advances it.
+- `projects.last_indexed_commit` is written after a run completes with a resolved HEAD and a failure set it can **name** ([ADR-60](../project/decisions.md)). A run that finished `failed` never advances it, and neither does one whose failure no path set describes — an unreadable walk root, a path outside the root, or a directory error under `follow_symlinks`, where prefix containment stops implying "unseen".
+- **Anything the run could not verify advances with it**, in the same `UPDATE`: `dirty_paths` carries files that failed to index or hash, stored paths under a subtree that could not be walked, and deletions a screening fault held back. That is what makes the advance safe rather than optimistic — the next run re-admits every one of them as a candidate, so no file whose state is unknown is ever skipped. Blocking the anchor instead was the old way of meeting the same guarantee, and it froze the whole project on one unreadable path.
 - `resolve_head` runs even on full-walk runs of a git worktree, so the *next* run has an anchor to fast-path from.
 - **Watcher-scoped runs never advance the anchor**: a scoped run only re-examines the files the watcher saw, so advancing the anchor would let the next full pass skip files the watcher missed.
 
