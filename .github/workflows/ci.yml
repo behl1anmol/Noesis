@@ -19,9 +19,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --all-groups
+      # --locked: fail if uv.lock is stale against pyproject.toml rather than
+      # silently re-locking. tests/test_qdrant_pin_compat.py takes the client
+      # version from the RESOLVED environment, so a CI run that quietly
+      # re-resolved would be checking a pair nobody committed (PR #41 review).
+      - run: uv sync --all-groups --locked
       # Default suite: FakeEmbedder + in-memory Qdrant. Since M3, upserts
       # exercise the real BM25 sparse path, so the first run fetches the
       # ~100 KB Qdrant/bm25 tokenizer assets (ADR-32) — no model weights.
       # The integration/golden real-model tests are deliberately not in CI.
       - run: uv run pytest -q
+
+  # Issue #37 / ADR-62. The default suite proves the two pins are a legal pair
+  # by reading them off disk; it cannot prove the pair actually WORKS, because
+  # every store-touching test uses the embedded client, which never performs
+  # the version handshake and never speaks the server's wire protocol. This job
+  # is the other half: the pinned client against the pinned server, over the
+  # network. Cheap by construction — FakeEmbedder, no model weights, only the
+  # ~100 KB fastembed BM25 tokenizer assets the `tests` job already fetches.
+  #
+  # The image tag below is pinned to docker-compose.yml's by
+  # tests/test_qdrant_pin_compat.py, so the two cannot drift.
+  server-compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.3
+        # Same image as compose, so the same two defaults have to be answered
+        # here. ADR-63: without this the image phones home to telemetry.qdrant.io
+        # on every CI run. Rule 2: a bare `6333:6333` publishes on all
+        # interfaces, which is an unauthenticated vector DB on the network of a
+        # self-hosted runner. Both are asserted by tests/test_qdrant_pin_compat.py.
+        env:
+          QDRANT__TELEMETRY_DISABLED: "true"
+        ports:
+          - 127.0.0.1:6333:6333
+          - 127.0.0.1:6334:6334
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-groups --locked
+      # The Qdrant image ships no curl/wget, so an in-container `--health-cmd`
+      # has nothing to run — wait from the runner instead.
+      - name: Wait for Qdrant to become ready
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:6333/readyz > /dev/null; then
+              curl -s http://127.0.0.1:6333/ | head -c 200; echo
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant did not become ready within 120s"
+          exit 1
+      - run: uv run pytest -m server -q

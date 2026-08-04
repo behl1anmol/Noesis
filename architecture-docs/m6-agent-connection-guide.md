@@ -64,10 +64,14 @@ Local CPU indexing works but is slow; a T4 run gives comparable numbers to
 the M4 benchmarks. In a fresh Colab notebook (GPU runtime):
 
 ```bash
-# 1. Qdrant server (no Docker in Colab — use the static binary)
-!wget -q https://github.com/qdrant/qdrant/releases/download/v1.15.5/qdrant-x86_64-unknown-linux-gnu.tar.gz
+# 1. Qdrant server (no Docker in Colab — use the static binary).
+#    This version must equal docker-compose.yml's image tag — ADR-62 pins the
+#    client and server to the same minor, and tests/test_qdrant_pin_compat.py
+#    asserts this URL against the compose tag, so the two cannot drift.
+#    QDRANT__TELEMETRY_DISABLED matches compose (ADR-63).
+!wget -q https://github.com/qdrant/qdrant/releases/download/v1.18.3/qdrant-x86_64-unknown-linux-gnu.tar.gz
 !tar xzf qdrant-x86_64-unknown-linux-gnu.tar.gz
-!nohup ./qdrant > qdrant.log 2>&1 &
+!QDRANT__TELEMETRY_DISABLED=true nohup ./qdrant > qdrant.log 2>&1 &
 
 # 2. Repo + deps
 !git clone https://github.com/behl1anmol/Noesis && cd Noesis

@@ -2,10 +2,34 @@
 # Server >=1.15.2 required for native BM25 in M3 (expanded doc §2 tech stack);
 # pinned minor, not `latest`, so an M3 feature can't silently depend on an
 # unreviewed server upgrade.
+#
+# THIS TAG AND THE `qdrant-client` PIN IN pyproject.toml MOVE TOGETHER (ADR-62).
+# The client refuses to vouch for a server more than one minor away — it warns
+# "Major versions should match and minor version difference must not exceed 1"
+# on every connection — and that warning is invisible to the test suite, which
+# uses the embedded client and skips the handshake. tests/test_qdrant_pin_compat.py
+# asserts, offline and in the default suite, that this tag and the client are on
+# the SAME minor — stricter than the client's own rule on purpose, because that
+# rule tolerates one minor of drift and #37 started at one. It also pins every
+# other copy of this version to this one: .github/workflows/ci.yml, the install
+# guide, and the Colab guide's download URL. `uv run pytest -m server` re-checks
+# the pair against a live container.
+#
+# Changing this tag on an existing `qdrant_storage` volume is a MIGRATION, not
+# a restart: Qdrant guarantees storage compatibility across one minor version
+# only. See docs/getting-started/installation.md, "Upgrading Qdrant".
 services:
   qdrant:
-    image: qdrant/qdrant:v1.15.5
+    image: qdrant/qdrant:v1.18.3
     container_name: noesis-qdrant
+    environment:
+      # ADR-63. The image ships `telemetry_disabled: false`, so out of the box
+      # the one container this project runs phones home to telemetry.qdrant.io
+      # with collection/configuration statistics. Binding to 127.0.0.1 stops
+      # traffic coming IN; it does nothing about traffic going OUT from inside
+      # the container. ADR-25's "nothing leaves the machine" has to cover the
+      # datastore too, or the guarantee is only true of the Python we wrote.
+      QDRANT__TELEMETRY_DISABLED: "true"
     ports:
       - "127.0.0.1:6333:6333" # REST — localhost only (CLAUDE.md rule 2)
       - "127.0.0.1:6334:6334" # gRPC — localhost only

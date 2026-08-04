@@ -14,7 +14,11 @@ dependencies = [
     "fastmcp>=3.4.2,<4",
     "jinja2>=3.1.6",
     "pathspec>=1.1.1",
-    "qdrant-client[fastembed]>=1.18.0",
+    # Upper bound is the coupling to docker-compose.yml's server tag, not a
+    # known defect in 1.19: the client vouches for a server at most one minor
+    # away, so an unreviewed client bump would re-open the skew ADR-62 closed.
+    # Both pins move in one commit, or the pin-compat test fails.
+    "qdrant-client[fastembed]>=1.18.0,<1.19",
     "sentence-transformers>=5.6.0",
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.12.2",
@@ -49,5 +53,6 @@ asyncio_mode = "auto"
 markers = [
     "integration: loads the real embedding model (slow, large download); run with -m integration",
     "golden: M3 eval harness — self-indexes this repo with the real model; run with -m golden",
+    "server: needs a live Qdrant server (docker compose up -d); run with -m server",
 ]
-addopts = "-m 'not integration and not golden'"
+addopts = "-m 'not integration and not golden and not server'"

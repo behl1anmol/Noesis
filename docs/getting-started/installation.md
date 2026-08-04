@@ -28,7 +28,29 @@ uv sync --all-groups
 docker compose up -d
 ```
 
-This starts a single `qdrant/qdrant:v1.15.5` container bound to localhost only — REST on `127.0.0.1:6333`, gRPC on `127.0.0.1:6334` — with a named volume (`qdrant_storage`) for persistence. Qdrant ≥ 1.15.2 is required for native BM25 sparse vectors (see [Retrieval](../concepts/retrieval.md)).
+This starts a single `qdrant/qdrant:v1.18.3` container bound to localhost only — REST on `127.0.0.1:6333`, gRPC on `127.0.0.1:6334` — with a named volume (`qdrant_storage`) for persistence. Qdrant ≥ 1.15.2 is required for native BM25 sparse vectors (see [Retrieval](../concepts/retrieval.md)), and the container runs with `QDRANT__TELEMETRY_DISABLED=true` so the datastore does not report usage statistics outbound ([ADR-63](../project/decisions.md)).
+
+The server tag and the `qdrant-client` pin in `pyproject.toml` are a **matched pair** and move together ([ADR-62](../project/decisions.md)). The client only vouches for a server within one minor version of itself and warns on every connection otherwise; `tests/test_qdrant_pin_compat.py` is stricter still and fails unless the two sit on the *same* minor. The version above is checked against `docker-compose.yml` by that same test, so this page cannot go stale.
+
+### Upgrading Qdrant
+
+Changing the image tag on an existing `qdrant_storage` volume is a **migration, not a restart**. Qdrant guarantees storage compatibility across [one minor version only](https://qdrant.tech/documentation/upgrades/), and a Noesis collection written by an older server can stop a newer one from starting *at all* — the failure is a startup panic on the whole process, not a single unreadable collection:
+
+```
+Failed to load local shard "./storage/collections/noesis_chunks/0":
+unknown variant `rocks_db`, expected `gridstore` or `mmap`
+```
+
+That specific one bites anyone moving across 1.17, which removed the RocksDB-backed payload index. Noesis creates payload indexes on `project_id` and `language` in `ensure_collection`, so every Noesis collection carries the affected structure.
+
+The supported paths are a stepwise upgrade (one minor at a time, latest patch of each) or a wipe. **Wiping is the recommended path here**, because the Qdrant collection is a *derived* artifact: SQLite plus your working tree is the source of truth, and Noesis detects a missing collection against a non-empty file ledger at startup, warns, and self-heals by re-embedding.
+
+```bash
+docker compose down -v     # -v drops the volume; without it the panic persists
+docker compose up -d
+```
+
+Then re-index your projects. Nothing but embeddings is lost, and they are reproducible from the files.
 
 ## 3. Prefetch assets
 
