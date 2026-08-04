@@ -38,12 +38,20 @@ jobs:
   # tests/test_qdrant_pin_compat.py, so the two cannot drift.
   server-compat:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       qdrant:
         image: qdrant/qdrant:v1.18.3
+        # Same image as compose, so the same two defaults have to be answered
+        # here. ADR-63: without this the image phones home to telemetry.qdrant.io
+        # on every CI run. Rule 2: a bare `6333:6333` publishes on all
+        # interfaces, which is an unauthenticated vector DB on the network of a
+        # self-hosted runner. Both are asserted by tests/test_qdrant_pin_compat.py.
+        env:
+          QDRANT__TELEMETRY_DISABLED: "true"
         ports:
-          - 6333:6333
-          - 6334:6334
+          - 127.0.0.1:6333:6333
+          - 127.0.0.1:6334:6334
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

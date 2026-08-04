@@ -65,9 +65,10 @@ the M4 benchmarks. In a fresh Colab notebook (GPU runtime):
 
 ```bash
 # 1. Qdrant server (no Docker in Colab — use the static binary).
-#    Keep this version equal to docker-compose.yml's image tag: it must stay
-#    within one minor of the qdrant-client pin or the client warns on every
-#    connection (ADR-62). QDRANT__TELEMETRY_DISABLED matches compose (ADR-63).
+#    This version must equal docker-compose.yml's image tag — ADR-62 pins the
+#    client and server to the same minor, and tests/test_qdrant_pin_compat.py
+#    asserts this URL against the compose tag, so the two cannot drift.
+#    QDRANT__TELEMETRY_DISABLED matches compose (ADR-63).
 !wget -q https://github.com/qdrant/qdrant/releases/download/v1.18.3/qdrant-x86_64-unknown-linux-gnu.tar.gz
 !tar xzf qdrant-x86_64-unknown-linux-gnu.tar.gz
 !QDRANT__TELEMETRY_DISABLED=true nohup ./qdrant > qdrant.log 2>&1 &

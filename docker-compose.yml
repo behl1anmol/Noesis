@@ -8,8 +8,12 @@
 # "Major versions should match and minor version difference must not exceed 1"
 # on every connection — and that warning is invisible to the test suite, which
 # uses the embedded client and skips the handshake. tests/test_qdrant_pin_compat.py
-# asserts the two pins satisfy that rule, offline, in the default suite;
-# `uv run pytest -m server` re-checks it against a live container.
+# asserts, offline and in the default suite, that this tag and the client are on
+# the SAME minor — stricter than the client's own rule on purpose, because that
+# rule tolerates one minor of drift and #37 started at one. It also pins every
+# other copy of this version to this one: .github/workflows/ci.yml, the install
+# guide, and the Colab guide's download URL. `uv run pytest -m server` re-checks
+# the pair against a live container.
 #
 # Changing this tag on an existing `qdrant_storage` volume is a MIGRATION, not
 # a restart: Qdrant guarantees storage compatibility across one minor version
