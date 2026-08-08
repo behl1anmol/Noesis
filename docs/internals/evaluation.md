@@ -68,7 +68,16 @@ NOESIS_EVAL_REBASELINE=1 uv run pytest tests/eval/ -m golden
 # Measure against a real Qdrant server instead of the embedded client (ADR-66)
 docker compose up -d
 NOESIS_EVAL_QDRANT_URL=http://127.0.0.1:6333 uv run pytest tests/eval/ -m golden
+
+# Place the models — needed on a GPU with less headroom than the 16 GB T4 the
+# M4 numbers were measured on. Unset means today's behaviour (auto-detect,
+# default batch sizes). Placement is recorded in the run's provenance.
+NOESIS_EVAL_RERANKER_DEVICE=cpu NOESIS_EVAL_EMBED_BATCH_SIZE=8 \
+  uv run pytest tests/eval/ -m golden
 ```
+
+!!! warning "The harness needs real GPU headroom"
+    Both models are resident at once — a 137M embedder and a 568M cross-encoder — and the harness constructs them directly rather than through `config.toml`, so until the variables above existed there was no way to place them. On an 8 GB laptop GPU, indexing this corpus drove device memory to **7600 MiB of 8151** and WSL2's paravirtualization layer failed an allocation with `dxgkio_make_resident: Ioctl failed: -12` (ENOMEM). CUDA reported that as `cudaErrorIllegalInstruction`, not as an out-of-memory error, and sustained pressure took the host GPU driver down with it. If you see an illegal-instruction fault from a model forward pass, check `nvidia-smi` before suspecting the code: pin the reranker to `cpu` and lower the embed batch.
 
 The default suite runs against `FakeEmbedder` and an in-memory Qdrant — no model download, no Docker. The `integration` and `golden` marks are excluded by default.
 

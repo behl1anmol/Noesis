@@ -89,6 +89,47 @@ REBASELINE_ENV = "NOESIS_EVAL_REBASELINE"
 # ADR-66. Unset -> embedded Qdrant, exactly as before.
 QDRANT_URL_ENV = "NOESIS_EVAL_QDRANT_URL"
 
+# Model placement. Unset -> today's behaviour exactly: `resolve_device`
+# auto-detects and the runners use their own default batch sizes.
+#
+# These exist because the harness had no way to place its models at all. It
+# constructs LocalSTEmbedder() and LocalCrossEncoderReranker() directly and
+# never reads config.toml, so the `[embedder]`/`[reranker] device` knobs that
+# production honours could not reach it. On a 16 GB T4 (where the M4
+# benchmarks were measured) that is invisible; on an 8 GB laptop GPU, indexing
+# this corpus with both a 137M embedder and a 568M cross-encoder resident
+# drove device memory to 7600 MiB of 8151 and WSL2's paravirtualization layer
+# failed an allocation with `dxgkio_make_resident: Ioctl failed: -12`
+# (ENOMEM) — which CUDA then surfaced as `cudaErrorIllegalInstruction`, not as
+# an out-of-memory error. Placement is recorded in provenance, so a reference
+# always says how it was measured.
+EMBEDDER_DEVICE_ENV = "NOESIS_EVAL_EMBEDDER_DEVICE"
+RERANKER_DEVICE_ENV = "NOESIS_EVAL_RERANKER_DEVICE"
+EMBED_BATCH_ENV = "NOESIS_EVAL_EMBED_BATCH_SIZE"
+RERANK_BATCH_ENV = "NOESIS_EVAL_RERANK_BATCH_SIZE"
+
+
+def _env_device(name: str) -> str | None:
+    """A device string for `resolve_device`, which takes a non-empty value
+    verbatim — the operator's explicit choice is never second-guessed."""
+    return os.environ.get(name) or None
+
+
+def _env_batch_size(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        # ValueError, not pytest.fail: same fail-loudly rule load_golden uses,
+        # and it keeps the helper testable without reaching into pytest's
+        # BaseException-derived outcomes.
+        raise ValueError(f"{name}={raw!r} is not an integer") from exc
+    if value < 1:
+        raise ValueError(f"{name}={value} must be >= 1")
+    return value
+
 
 # --- metric math (default suite, no model) ---------------------------------
 
@@ -377,6 +418,35 @@ def test_relational_gate_catches_symbol_subset_and_rerank_losses():
     assert any("ADR-35" in f for f in relational_failures(rerank_loss))
 
 
+def test_model_placement_env_defaults_to_current_behaviour(monkeypatch):
+    for name in (EMBEDDER_DEVICE_ENV, RERANKER_DEVICE_ENV, EMBED_BATCH_ENV):
+        monkeypatch.delenv(name, raising=False)
+    assert _env_device(EMBEDDER_DEVICE_ENV) is None  # -> resolve_device auto
+    assert _env_batch_size(EMBED_BATCH_ENV, 32) == 32
+
+    monkeypatch.setenv(RERANKER_DEVICE_ENV, "cpu")
+    monkeypatch.setenv(EMBED_BATCH_ENV, "8")
+    assert _env_device(RERANKER_DEVICE_ENV) == "cpu"
+    assert _env_batch_size(EMBED_BATCH_ENV, 32) == 8
+
+    # An empty value is "unset", not an empty device string — resolve_device
+    # takes any non-empty value verbatim and would try to load onto "".
+    monkeypatch.setenv(RERANKER_DEVICE_ENV, "")
+    assert _env_device(RERANKER_DEVICE_ENV) is None
+
+
+def test_model_placement_env_rejects_nonsense(monkeypatch):
+    """Fail loudly rather than silently falling back to a default the operator
+    did not ask for — a run placed differently than requested is a benchmark
+    whose provenance lies."""
+    monkeypatch.setenv(EMBED_BATCH_ENV, "lots")
+    with pytest.raises(ValueError, match="not an integer"):
+        _env_batch_size(EMBED_BATCH_ENV, 32)
+    monkeypatch.setenv(EMBED_BATCH_ENV, "0")
+    with pytest.raises(ValueError, match="must be >= 1"):
+        _env_batch_size(EMBED_BATCH_ENV, 32)
+
+
 def test_diagnostic_channel_is_recorded_but_never_gated():
     """The python-only channel explains regressions; it does not detect them.
 
@@ -557,7 +627,10 @@ def corpus(tmp_path_factory):
 
     conn = state.connect(eval_tmp / "state.sqlite")
     state.init_db(conn)
-    embedder = LocalSTEmbedder()
+    embedder = LocalSTEmbedder(
+        device=_env_device(EMBEDDER_DEVICE_ENV),
+        batch_size=_env_batch_size(EMBED_BATCH_ENV, 32),
+    )
     try:
         store.ensure_collection(embedder)
         indexed = asyncio.run(index_project(conn, store, embedder, str(corpus_root)))
@@ -617,7 +690,10 @@ async def test_golden_set_gate_numbers(corpus):
     # Anchors resolve against the copy that was actually chunked, not the
     # working tree, so the line numbers describe the thing being measured.
     golden = load_golden(GOLDEN_PATH, corpus.corpus_root)
-    reranker = LocalCrossEncoderReranker()
+    reranker = LocalCrossEncoderReranker(
+        device=_env_device(RERANKER_DEVICE_ENV),
+        batch_size=_env_batch_size(RERANK_BATCH_ENV, 16),
+    )
 
     def channel_fn(channel: str, rerank: bool = False, language: str | None = None):
         async def fn(query: str) -> list[dict]:
@@ -650,6 +726,11 @@ async def test_golden_set_gate_numbers(corpus):
         "cuda_available": torch.cuda.is_available(),
         "embedder": embedder.resolved_device,
         "reranker": reranker.resolved_device,
+        # Batch sizes belong beside the devices: they change the latency
+        # column and the peak memory a run needs, so a benchmark that records
+        # the device but not the batch is still not reproducible.
+        "embedder_batch_size": _env_batch_size(EMBED_BATCH_ENV, 32),
+        "reranker_batch_size": _env_batch_size(RERANK_BATCH_ENV, 16),
     }
     print(f"\n== compute device ==\n{device}")
 
