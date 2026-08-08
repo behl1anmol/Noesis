@@ -33,6 +33,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -773,24 +774,37 @@ async def test_golden_set_gate_numbers(corpus):
         "embedder_batch_size": _env_batch_size(EMBED_BATCH_ENV, 32),
         "reranker_batch_size": _env_batch_size(RERANK_BATCH_ENV, 16),
     }
-    print(f"\n== compute device ==\n{device}")
+    print(f"\n== compute device ==\n{device}", flush=True)
 
+    channels = {
+        "dense": channel_fn("dense"),
+        # Diagnostic channel, reported and never gated. Every label in the
+        # golden set is a .py file, so filtering to python can only remove
+        # distractors and never a true positive: the dense -> dense
+        # (python-only) gap separates "the haystack grew" from "retrieval got
+        # worse", which is the question Finding B could not answer without it.
+        # One extra pass over the already-built index.
+        "dense (python-only)": channel_fn("dense", language="python"),
+        "sparse": channel_fn("sparse"),
+        "hybrid": channel_fn("hybrid"),
+        "hybrid+rerank": channel_fn("hybrid", rerank=True),
+    }
     try:
-        reports = {
-            "dense": await evaluate(channel_fn("dense"), golden),
-            # Diagnostic channel, reported and never gated. Every label in the
-            # golden set is a .py file, so filtering to python can only remove
-            # distractors and never a true positive: the dense -> dense
-            # (python-only) gap separates "the haystack grew" from "retrieval
-            # got worse", which is the question Finding B could not answer
-            # without it. One extra pass over the already-built index.
-            "dense (python-only)": await evaluate(
-                channel_fn("dense", language="python"), golden
-            ),
-            "sparse": await evaluate(channel_fn("sparse"), golden),
-            "hybrid": await evaluate(channel_fn("hybrid"), golden),
-            "hybrid+rerank": await evaluate(channel_fn("hybrid", rerank=True), golden),
-        }
+        reports: dict[str, dict] = {}
+        # Emitted per channel, flushed, because this tier runs for minutes to
+        # hours and used to print nothing at all until it finished: stdout is
+        # block-buffered to a file, so even the device line sat unflushed. A
+        # run with no progress signal is indistinguishable from a hung one,
+        # which cost several false diagnoses while building this.
+        for name, fn in channels.items():
+            started = time.perf_counter()
+            reports[name] = await evaluate(fn, golden)
+            print(
+                f"  channel {name:<20} recall@10="
+                f"{reports[name]['overall']['recall@10']:.3f}"
+                f"  ({time.perf_counter() - started:.0f}s)",
+                flush=True,
+            )
 
         # Assert the filter's contract rather than a ranking relation. The
         # monotonicity you would expect (python-only recall >= unfiltered) is
@@ -846,10 +860,10 @@ async def test_golden_set_gate_numbers(corpus):
         render_report(reports, provenance, relational, mismatches, regression)
     )
 
-    print("\n\n== Channel comparison (quality + latency) ==")
+    print("\n\n== Channel comparison (quality + latency) ==", flush=True)
     print(format_table(reports))
     if reference is not None:
-        print("\n== hybrid vs stored reference ==")
+        print("\n== hybrid vs stored reference ==", flush=True)
         print(
             format_delta(
                 reports["hybrid"],
@@ -857,7 +871,7 @@ async def test_golden_set_gate_numbers(corpus):
                 baseline_label="reference (stored)",
             )
         )
-    print("\n== M4: hybrid+rerank vs same-run hybrid (Finding 2) ==")
+    print("\n== M4: hybrid+rerank vs same-run hybrid (Finding 2) ==", flush=True)
     print(
         format_delta(
             reports["hybrid+rerank"],
@@ -866,7 +880,7 @@ async def test_golden_set_gate_numbers(corpus):
             baseline_label="hybrid (same run)",
         )
     )
-    print(f"\n== verdicts ==\n{REPORT_MD_PATH}")
+    print(f"\n== verdicts ==\n{REPORT_MD_PATH}", flush=True)
 
     # Harness mechanics first: a malformed report would make every verdict
     # below meaningless.
@@ -893,7 +907,7 @@ async def test_golden_set_gate_numbers(corpus):
             f"\nREBASELINED: wrote {REFERENCE_PATH}. Layer 2 was skipped for this "
             f"run. Record it: python .claude/scripts/devlog.py decision add "
             f'--title "golden reference {provenance["date"]}"'
-        )
+        , flush=True)
         return
 
     assert reference is not None and not mismatches, (
