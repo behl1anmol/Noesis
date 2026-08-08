@@ -24,8 +24,12 @@ Scoring rules (deliberate, stated so the numbers are reproducible):
 
 - A result matches a relevant item iff the ``file_path`` is equal and the
   result span ``[start_line, end_line]`` overlaps the item's resolved range.
-- Results are deduplicated by ``file_path`` before scoring, keeping the best
-  (lowest) rank — several chunks of one file count as one retrieval.
+- Results are grouped by ``file_path`` before scoring, in first-appearance
+  order — several chunks of one file count as one retrieval and occupy one
+  rank slot, but every retrieved chunk of that file stays available for
+  matching (ADR-67). Collapsing to the best-ranked chunk alone discarded
+  correct answers whenever a non-matching chunk of the right file outranked
+  the matching one.
 - Recall@k = fraction of a query's relevant items matched by at least one
   result in the top k (after dedup), averaged over queries.
 - NDCG@10 uses binary gains with greedy credit: walking the deduped ranking,
@@ -222,7 +226,12 @@ def matches(result: dict[str, Any], item: RelevantItem) -> bool:
 
 
 def dedupe_by_path(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep the best-ranked result per file (input is rank-ordered)."""
+    """Keep the best-ranked result per file (input is rank-ordered).
+
+    Retained for reporting a one-row-per-file view. Scoring uses
+    :func:`group_by_path` instead — see ADR-67 for why keeping only the
+    best-ranked chunk silently discarded correct answers.
+    """
     seen: set[str] = set()
     deduped: list[dict[str, Any]] = []
     for result in results:
@@ -234,24 +243,50 @@ def dedupe_by_path(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+def group_by_path(results: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group rank-ordered results by file, in first-appearance order.
+
+    ADR-67. One file still occupies one rank slot — that was always the point
+    of collapsing by path, and it stops a single file's chunks flooding recall
+    — but every retrieved chunk of that file stays available for matching.
+
+    Keeping only the best-ranked chunk was measurably discarding correct
+    answers: on the 2026-08-08 run, the query ``chunk_point_id`` retrieved the
+    chunk holding its definition at rank 2 and scored 0, because a *usage*
+    chunk of the same file ranked 1 and displaced it. Three of forty queries
+    were pinned at zero across all five channels by that alone, so they could
+    never register a regression or an improvement.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        groups.setdefault(result.get("file_path"), []).append(result)
+    return list(groups.values())
+
+
 def score_query(
     results: list[dict[str, Any]],
     relevant: tuple[RelevantItem, ...],
     ks: tuple[int, ...] = (5, 10),
 ) -> dict[str, float]:
     """Recall@k for each k plus NDCG@10 for one query (rules in module doc)."""
-    deduped = dedupe_by_path(results)
+    groups = group_by_path(results)
     matched_rank: dict[int, int] = {}  # relevant index -> rank credited
     gains: list[int] = []
-    for rank, result in enumerate(deduped):
+    for rank, group in enumerate(groups):
         gain = 0
-        for i, item in enumerate(relevant):
-            if i in matched_rank:
-                continue
-            if matches(result, item):
-                matched_rank[i] = rank
-                gain = 1
-                break
+        # Each chunk may credit at most one not-yet-credited item, so a file
+        # holding two distinct relevant items can satisfy both — which the
+        # golden set does have (structural-08 labels two endpoints in
+        # routes.py). The NDCG gain stays 1 for the slot regardless: the file
+        # occupies one rank position however many items it answers.
+        for chunk in group:
+            for i, item in enumerate(relevant):
+                if i in matched_rank:
+                    continue
+                if matches(chunk, item):
+                    matched_rank[i] = rank
+                    gain = 1
+                    break
         gains.append(gain)
 
     scores: dict[str, float] = {}

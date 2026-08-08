@@ -27,7 +27,7 @@ Width follows the question: a `symbol` query is an identifier lookup, so its lab
 Scoring rules are stated in `tests/eval/harness.py` so numbers are reproducible:
 
 - A result matches a relevant item iff `file_path` is equal and, when the item carries a `lines` range, the result span overlaps it.
-- Results are deduplicated by `file_path` keeping the best rank — several chunks of one file count as one retrieval.
+- Results are **grouped** by `file_path` in first-appearance order — several chunks of one file count as one retrieval and take one rank slot, but every retrieved chunk of that file stays available for matching ([ADR-67](../project/decisions.md)). Keeping only the file's best-ranked chunk discarded correct answers: the query `chunk_point_id` retrieved the chunk holding its definition at rank 2 and scored zero, because a *usage* chunk of the same file ranked first. Three of forty queries were pinned at zero by that alone, unable to register either a regression or an improvement.
 - **Recall@5 / Recall@10**: fraction of a query's relevant items matched in the top k, averaged over queries.
 - **NDCG@10**: binary gains with greedy credit — walking the deduped ranking, a result gains 1 only the first time it matches a not-yet-credited relevant item; IDCG assumes all relevant items ranked first (log2 discount).
 - **Latency p50/p95 (ms)**: wall time of the full search call per query, nearest-rank percentiles. Latency is *reported next to* quality but never mixed into the quality gate — they are separate stakeholder decisions.

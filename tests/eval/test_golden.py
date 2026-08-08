@@ -179,6 +179,47 @@ def test_dedupe_keeps_best_rank_and_counts_file_once():
     assert scores["recall@10"] == 0.5
 
 
+def test_matching_chunk_survives_a_higher_ranked_sibling():
+    """ADR-67: the right chunk must not be discarded by a wrong one.
+
+    Taken from the measured failure — query `chunk_point_id` retrieved a usage
+    chunk of vectorstore.py at rank 1 and the chunk holding the definition at
+    rank 2, and the old scoring kept only the first, reporting 0.
+    """
+    relevant = (RelevantItem("vectorstore.py", lines=(75, 75)),)
+    results = [
+        result("vectorstore.py", 171, 296),  # usage chunk, outranks the answer
+        result("vectorstore.py", 1, 83),  # holds the definition at line 75
+    ]
+    scores = score_query(results, relevant)
+    assert scores["recall@10"] == 1.0
+    # One rank slot for the file, so NDCG credits rank 0, not rank 1.
+    assert scores["ndcg@10"] == 1.0
+
+
+def test_one_file_can_answer_two_relevant_items_via_different_chunks():
+    """structural-08 labels two endpoints in the same file; both must count."""
+    relevant = (
+        RelevantItem("routes.py", lines=(69, 70)),
+        RelevantItem("routes.py", lines=(102, 106)),
+    )
+    results = [result("routes.py", 60, 90), result("routes.py", 99, 207)]
+    assert score_query(results, relevant)["recall@10"] == 1.0
+
+
+def test_grouping_still_counts_one_file_as_one_rank_slot():
+    """The property the old dedupe existed to protect, kept intact: a file's
+    many chunks must not flood the ranking and push a second relevant file
+    out of the top k."""
+    relevant = (RelevantItem("a.py"), RelevantItem("b.py"))
+    results = [result("a.py", i * 10, i * 10 + 9) for i in range(8)] + [
+        result("b.py", 1, 10)
+    ]
+    scores = score_query(results, relevant, ks=(5,))
+    # b.py sits at raw index 8 but group index 1 — inside @5.
+    assert scores["recall@5"] == 1.0
+
+
 def test_two_relevant_greedy_credit():
     relevant = (
         RelevantItem("a.py", lines=(1, 10)),

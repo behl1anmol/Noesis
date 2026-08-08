@@ -325,9 +325,16 @@ queries:
     category: structural
     query: "endpoint that returns 202 accepted with a run id"
     relevant:
+      # Relabelled 2026-08-08 (issue #38): the original label was wrong at
+      # labelling time, not rotted. Its span began after the 202 decorator and
+      # ran on into list_projects, so it pointed at a GET. Both POSTs now
+      # return 202 with a run id, so both are labelled.
       - path: src/noesis/api/routes.py
-        anchor: "@router.get(\"/projects\")"
-        anchor_end: "    return [dict(row) for row in state.list_projects(ctx.conn)]"
+        anchor: "@router.post(\"/projects\", status_code=202)"
+        anchor_end: "async def register_and_index("
+      - path: src/noesis/api/routes.py
+        anchor: "\"/projects/{project_id}/reindex\","
+        anchor_end: "async def reindex("
 
   - id: structural-09
     category: structural
