@@ -64,6 +64,24 @@ First measurement under content-anchored labels ([ADR-64](../project/decisions.m
 
 These numbers are **not** comparable to `m2_dense.json`: the labels changed identity and the scorer changed semantics. That is why the M2 file is frozen rather than refreshed.
 
+### Embedded Qdrant does not rank like a real server
+
+Measured the same day against `qdrant/qdrant:v1.18.3`, same corpus, labels and models — the question [ADR-62](../project/decisions.md) left open and assigned to this work:
+
+| channel | embedded | real server | delta |
+|---|---|---|---|
+| dense | 0.637 | 0.637 | 0.000 |
+| dense (python-only) | 0.713 | 0.713 | 0.000 |
+| sparse | 0.662 | 0.650 | −0.012 |
+| **hybrid** | **0.775** | **0.713** | **−0.062** |
+| hybrid+rerank | 0.825 | 0.825 | 0.000 |
+
+Dense is bit-identical — it is a plain vector query, so the two implementations agree. Sparse and hybrid are not, through exactly the mechanism ADR-62 predicted: BM25 IDF is computed **server-side** (`Modifier.IDF`) and RRF fusion uses a constant the server fixes and `FusionQuery` does not expose. **The embedded harness over-reports hybrid Recall@10 by 0.062** — about 2.5 queries of 40 — relative to what production actually serves. `hybrid+rerank` converges again at 0.825, because the cross-encoder reorders the union and absorbs the fusion difference.
+
+This is why `store` is a hard comparability term: an embedded-measured reference must never gate a server-measured run. Observed doing so — L1 passed, L2 refused with `store kind: reference 'embedded' != run 'server'`, and the run failed with the tables marked NOT A GATE.
+
+**Open, deliberately:** the committed reference is embedded-measured, because that is what the harness does without Docker. Whether the canonical reference should instead be server-measured — matching production at the cost of requiring a container — is a decision worth taking on its own evidence now that the gap is quantified.
+
 ### Baselines
 
 - `tests/eval/baselines/reference.json` — the single **living** reference. All channels plus a provenance block: corpus (files, chunks, commit, path-manifest hash), models, store kind and server version, a digest of the golden questions, and device.
