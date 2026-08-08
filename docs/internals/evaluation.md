@@ -46,6 +46,24 @@ Layer 1 is corpus-independent by construction — every channel sees the same co
 
 The absolute floor beside the relative band is deliberate arithmetic. The gate measures a relative drop, but one query moving changes the mean by `1/n` absolutely — which at a low score is a huge *relative* figure and at a high score a small one. Requiring both means "one query is noise" stays true at every score level.
 
+### The current reference (2026-08-08)
+
+First measurement under content-anchored labels ([ADR-64](../project/decisions.md)) and grouped scoring ([ADR-67](../project/decisions.md)) — 184 files, 558 chunks, embedded Qdrant, CodeRankEmbed and bge-reranker-v2-m3 both on CUDA:
+
+| channel | Recall@5 | Recall@10 | NDCG@10 | p50 latency |
+|---|---|---|---|---|
+| dense | 0.575 | 0.637 | 0.462 | 15 ms |
+| dense (python-only) | 0.700 | 0.713 | 0.570 | 17 ms |
+| sparse | 0.613 | 0.662 | 0.460 | 13 ms |
+| **hybrid** | 0.662 | **0.775** | 0.502 | 33 ms |
+| **hybrid+rerank** | 0.775 | **0.825** | 0.583 | 6 581 ms |
+
+**M3's exit criterion, asserted rather than assumed for the first time:** hybrid beats dense on Recall@10 overall (0.775 vs 0.637) and on the symbol subset (0.857 vs 0.786). With rerank, symbol Recall@10 reaches **1.000**.
+
+**What the python-only diagnostic says about corpus growth.** Filtering to Python removes 99 of 184 files — every non-`.py` distractor — and lifts Recall@10 by **+0.076** overall. The effect is concentrated where you would expect: `structural` **+0.167**, `nl` +0.071, `symbol` **0.000**. Identifier lookups do not compete with prose; structure-phrased questions very much do. That is the measured form of the issue's Finding B, and it is only visible because the channel exists.
+
+These numbers are **not** comparable to `m2_dense.json`: the labels changed identity and the scorer changed semantics. That is why the M2 file is frozen rather than refreshed.
+
 ### Baselines
 
 - `tests/eval/baselines/reference.json` — the single **living** reference. All channels plus a provenance block: corpus (files, chunks, commit, path-manifest hash), models, store kind and server version, a digest of the golden questions, and device.
