@@ -18,8 +18,8 @@ flowchart LR
 |---|---|---|---|---|
 | M1 | Spine | Registration, discovery + filtering (gitignore/binary/secret), SHA-256 diff, SQLite WAL, `Embedder` Protocol with a fake impl for tests | Incremental detection works on a real repo; the interface compiles the whole downstream design | Done |
 | M2 | Dense | cAST chunker → `LocalSTEmbedder` (CodeRankEmbed) → Qdrant dense-only, REST `POST /search` | NL→code returns sane spans; zero direct `SentenceTransformer` calls outside the embedder module (CI grep) | Done |
-| M3 | Hybrid + **gate** | Native BM25 sparse + RRF; 40-query golden set; harness with Recall@10 primary | Hybrid beats dense-only on Recall@10, especially the symbol subset | Done |
-| M4 | Reranker | bge-reranker-v2-m3 on a dedicated worker, `rerank` flag, lazy load, harness extended with NDCG@10 + latency | Measured NDCG@10 delta recorded; default-on/off decided from data → shipped **default-off** ([ADR-35](decisions.md)) | Done |
+| M3 | Hybrid + **gate** | Native BM25 sparse + RRF; 40-query golden set; harness with Recall@10 primary | Hybrid beats dense-only on Recall@10, especially the symbol subset — **asserted by the harness since [ADR-65](decisions.md)**, not read off a printed table | Done |
+| M4 | Reranker | bge-reranker-v2-m3 on a dedicated worker, `rerank` flag, lazy load, harness extended with NDCG@10 + latency | Measured NDCG@10 delta recorded; default-on/off decided from data → shipped **default-off** ([ADR-35](decisions.md)). The NDCG win itself is now asserted every run ([ADR-65](decisions.md)) | Done |
 | M5 | Structural search | `structural_search` core fn + REST endpoint, `LANGUAGE_MAP`, discovery-filter reuse | Known patterns return exact expected match sets; skip-listed files never appear | Done |
 | M6 | MCP | FastMCP mounted (shared lifespan), stdio + streamable-HTTP, all six tools; a real agent connected | Agent completes a task using `search_code` → read file, and `structural_search`, end to end | Done |
 | M7 | Git fast-path | Candidate-set diffing, `last_indexed_commit` anchor, telemetry | Re-index of a large repo with a 3-file change hashes ~3 files; every fallback condition tested | Done |

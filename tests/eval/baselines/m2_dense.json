@@ -24,7 +24,11 @@
     "corpus": "git-tracked tree minus tests/eval/ (see test_golden.py corpus fixture)",
     "date": "2026-07-04",
     "embedding_model": "nomic-ai/CodeRankEmbed",
-    "milestone": "M2"
+    "frozen": true,
+    "known_defect": "Measured with two labels that could never match: nl-10 and symbol-12 pointed at config.py lines 63-107 and 72-107 when that file had 58 lines, so both queries contributed a guaranteed 0. These numbers are therefore a floor, not a like-for-like reference (issue #38, Finding C).",
+    "milestone": "M2",
+    "note": "Frozen historical record of what M2 measured on the 2026-07-04 corpus (~94 files) and the pre-ADR-64 positional label set. Read by nothing; kept because docs quote this milestone. The living gate reference is tests/eval/baselines/reference.json.",
+    "superseded_by": "tests/eval/baselines/reference.json"
   },
   "overall": {
     "n_queries": 40,

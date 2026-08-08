@@ -38,104 +38,121 @@ queries:
     query: "how are files discovered and gitignore filtering applied"
     relevant:
       - path: src/noesis/core/discovery.py
-        lines: [143, 193]
+        anchor: "    cfg = config or DiscoveryConfig()"
+        anchor_end: "    return sorted(results)"
 
   - id: nl-02
     category: nl
     query: "where is the sqlite schema for projects files and index runs defined"
     relevant:
       - path: src/noesis/core/state.py
-        lines: [16, 48]
+        anchor: "_SCHEMA = \"\"\""
+        anchor_end: "CREATE TABLE IF NOT EXISTS index_runs ("
 
   - id: nl-03
     category: nl
     query: "how does indexing avoid re-embedding files that did not change"
     relevant:
       - path: src/noesis/core/hashdiff.py
-        lines: [39, 79]
+        anchor: "def partition("
+        anchor_end: "        hashes=hashes,"
       - path: src/noesis/core/indexer.py
-        lines: [86, 99]
+        anchor: "        stored = state.get_file_states(conn, project_id)"
+        anchor_end: "            file_hash = diff.hashes[rel]"
 
   - id: nl-04
     category: nl
     query: "how is a source file split into chunks within a token budget"
     relevant:
       - path: src/noesis/core/chunker.py
-        lines: [66, 95]
+        anchor: "def chunk_file("
+        anchor_end: "    return chunks"
 
   - id: nl-05
     category: nl
     query: "where does the query instruction prefix get added before embedding a search"
     relevant:
       - path: src/noesis/core/embedder.py
-        lines: [201, 207]
+        anchor: "        prefixed = self._QUERY_PREFIX + text"
+        anchor_end: "        return await asyncio.wrap_future(self._submit(_HIGH, job))"
 
   - id: nl-06
     category: nl
     query: "how are interactive search queries prioritized over indexing batches"
     relevant:
       - path: src/noesis/core/embedder.py
-        lines: [85, 135]
+        anchor: "_HIGH = 0  # embed_query \u2014 interactive path"
+        anchor_end: "        self._closed = False"
 
   - id: nl-07
     category: nl
     query: "where is the vector collection created with the embedding dimension"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        lines: [96, 148]
+        anchor: "        \"\"\"Create the collection if missing, sized from ``embedder.dim``"
+        anchor_end: "                field_schema=models.PayloadSchemaType.KEYWORD,"
 
   - id: nl-08
     category: nl
     query: "how are stale chunks removed after a file's content changes"
     relevant:
       - path: src/noesis/core/indexer.py
-        lines: [107, 124]
+        anchor: "            state.upsert_file("
+        anchor_end: "            chunks_written += len(chunks)"
       - path: src/noesis/core/vectorstore.py
-        lines: [199, 240]
+        anchor: "    def delete_file_chunks("
+        anchor_end: "            points_selector=models.FilterSelector(filter=query_filter),"
 
   - id: nl-09
     category: nl
     query: "what happens to the run record when indexing fails midway"
     relevant:
       - path: src/noesis/core/indexer.py
-        lines: [146, 150]
+        anchor: "    except BaseException as exc:"
+        anchor_end: "        state.finish_run(conn, run_id, \"failed\", error=str(exc) or type(exc).__name__)"
       - path: src/noesis/core/state.py
-        lines: [159, 178]
+        anchor: "def finish_run("
+        anchor_end: "        WHERE id = ?"
 
   - id: nl-10
     category: nl
     query: "where are runtime settings loaded from the toml config file"
     relevant:
       - path: src/noesis/core/config.py
-        lines: [63, 107]
+        anchor: "def load_settings("
+        anchor_end: "collection=qdr.get(\"collection\", QdrantSettings.collection),"
 
   - id: nl-11
     category: nl
     query: "how do I check the status of a running index job"
     relevant:
       - path: src/noesis/api/routes.py
-        lines: [81, 96]
+        anchor: "        raise HTTPException(status_code=404, detail=\"unknown run_id\")"
+        anchor_end: "        language=req.language,"
 
   - id: nl-12
     category: nl
     query: "where are secret files kept out of the index"
     relevant:
       - path: src/noesis/core/discovery.py
-        lines: [41, 101]
+        anchor: "SECRET_SKIP_PATTERNS: tuple[str, ...] = ("
+        anchor_end: "    return bool(_SECRET_SPEC.match_file(rel_posix))"
 
   - id: nl-13
     category: nl
     query: "how is the web application started and its core resources wired together"
     relevant:
       - path: src/noesis/app.py
-        lines: [37, 85]
+        anchor: "    \"\"\"Build the app. Tests pass a pre-built *ctx* (fake embedder,"
+        anchor_end: "app = create_app()"
 
   - id: nl-14
     category: nl
     query: "where are model weights and parser grammars downloaded ahead of time"
     relevant:
       - path: src/noesis/prefetch.py
-        lines: [28, 56]
+        anchor: "def prefetch_grammars() -> list[str]:"
+        anchor_end: "    print(f\"model ok: {model_id} (dim {len(vector)})\")"
 
   # ------------------------------------------------------------ symbol (14)
   - id: symbol-01
@@ -143,98 +160,100 @@ queries:
     query: "chunk_point_id"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        lines: [73, 79]
+        anchor: "def chunk_point_id("
 
   - id: symbol-02
     category: symbol
     query: "CHUNK_NAMESPACE"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        lines: [44, 46]
+        anchor: "CHUNK_NAMESPACE = uuid.UUID(\"6a3d61a6-97a1-4a3a-9f6b-2e5a8f0c4d17\")"
 
   - id: symbol-03
     category: symbol
     query: "LocalSTEmbedder"
     relevant:
       - path: src/noesis/core/embedder.py
-        lines: [92, 220]
+        anchor: "class LocalSTEmbedder:"
 
   - id: symbol-04
     category: symbol
     query: "FakeEmbedder"
     relevant:
       - path: src/noesis/core/embedder.py
-        lines: [42, 82]
+        anchor: "class FakeEmbedder:"
 
   - id: symbol-05
     category: symbol
     query: "execute_run"
     relevant:
       - path: src/noesis/core/indexer.py
-        lines: [69, 150]
+        anchor: "async def execute_run("
 
   - id: symbol-06
     category: symbol
     query: "register_project"
     relevant:
       - path: src/noesis/core/state.py
-        lines: [72, 95]
+        anchor: "def register_project("
 
   - id: symbol-07
     category: symbol
     query: "discover_files"
     relevant:
       - path: src/noesis/core/discovery.py
-        lines: [143, 193]
+        anchor: "def discover_files("
 
   - id: symbol-08
     category: symbol
     query: "SECRET_SKIP_PATTERNS"
     relevant:
       - path: src/noesis/core/discovery.py
-        lines: [41, 64]
+        anchor: "SECRET_SKIP_PATTERNS: tuple[str, ...] = ("
 
   - id: symbol-09
     category: symbol
     query: "hash_file"
     relevant:
       - path: src/noesis/core/hashdiff.py
-        lines: [18, 24]
+        anchor: "def hash_file(path: str | Path) -> str:"
 
   - id: symbol-10
     category: symbol
     query: "chunk_file"
     relevant:
       - path: src/noesis/core/chunker.py
-        lines: [66, 95]
+        anchor: "def chunk_file("
 
   - id: symbol-11
     category: symbol
     query: "EXT_TO_LANGUAGE"
     relevant:
       - path: src/noesis/core/languages.py
-        lines: [16, 53]
+        anchor: "EXT_TO_LANGUAGE: dict[str, str] = {"
 
   - id: symbol-12
     category: symbol
     query: "load_settings"
     relevant:
       - path: src/noesis/core/config.py
-        lines: [72, 107]
+        anchor: "def load_settings("
+        anchor_end: "collection=qdr.get(\"collection\", QdrantSettings.collection),"
 
   - id: symbol-13
     category: symbol
     query: "AppContext"
     relevant:
-      - path: src/noesis/app.py
-        lines: [27, 34]
+      - path: src/noesis/runtime.py
+        anchor: "class AppContext:"
+        anchor_end: "config_reranker_device_pin: str | None = None"
 
   - id: symbol-14
     category: symbol
     query: "delete_file_chunks"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        lines: [199, 240]
+        anchor: "    def delete_file_chunks("
 
   # -------------------------------------------------------- structural (12)
   - id: structural-01
@@ -242,90 +261,112 @@ queries:
     query: "functions that call query_points"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        lines: [241, 337]
+        anchor: "        dense_vector: list[float] | None = None,"
+        anchor_end: "        return results"
 
   - id: structural-02
     category: structural
     query: "code that opens a sqlite connection with WAL mode"
     relevant:
       - path: src/noesis/core/state.py
-        lines: [55, 64]
+        anchor: "def connect(db_path: str | Path) -> sqlite3.Connection:"
+        anchor_end: "    conn.execute(\"PRAGMA foreign_keys=ON\")"
 
   - id: structural-03
     category: structural
     query: "async functions that embed a batch of documents"
     relevant:
       - path: src/noesis/core/embedder.py
-        lines: [76, 78]
+        anchor: "        self.document_calls.append(list(texts))"
+        anchor_end: "        return [self._vector(t) for t in texts]"
       - path: src/noesis/core/embedder.py
-        lines: [186, 199]
+        anchor: "        if not texts:"
+        anchor_end: "        return await asyncio.wrap_future(self._submit(_LOW, job))"
 
   - id: structural-04
     category: structural
     query: "frozen dataclasses that hold result partitions"
     relevant:
       - path: src/noesis/core/hashdiff.py
-        lines: [27, 36]
+        anchor: "@dataclass(frozen=True)"
+        anchor_end: "    \"\"\"Current content hash for every discovered file (new/changed/unchanged).\"\"\""
       - path: src/noesis/core/indexer.py
-        lines: [23, 30]
+        anchor: "@dataclass(frozen=True)"
+        anchor_end: "    chunks_written: int"
 
   - id: structural-05
     category: structural
     query: "code that walks the directory tree with os.walk"
     relevant:
       - path: src/noesis/core/discovery.py
-        lines: [150, 171]
+        anchor: "    for dirpath, dirnames, filenames in os.walk("
+        anchor_end: "        dirnames[:] = kept_dirs"
 
   - id: structural-06
     category: structural
     query: "code that starts a daemon worker thread"
     relevant:
       - path: src/noesis/core/embedder.py
-        lines: [171, 184]
+        anchor: "    def _submit("
+        anchor_end: "        return future"
 
   - id: structural-07
     category: structural
     query: "functions that compute a sha256 digest"
     relevant:
       - path: src/noesis/core/hashdiff.py
-        lines: [18, 24]
+        anchor: "def hash_file(path: str | Path) -> str:"
+        anchor_end: "    return digest.hexdigest()"
       - path: src/noesis/core/embedder.py
-        lines: [66, 74]
+        anchor: "    def _vector(self, text: str) -> list[float]:"
+        anchor_end: "        return [b / 255.0 * 2.0 - 1.0 for b in raw[: self._dim]]"
 
   - id: structural-08
     category: structural
     query: "endpoint that returns 202 accepted with a run id"
     relevant:
+      # Relabelled 2026-08-08 (issue #38): the original label was wrong at
+      # labelling time, not rotted. Its span began after the 202 decorator and
+      # ran on into list_projects, so it pointed at a GET. Both POSTs now
+      # return 202 with a run id, so both are labelled.
       - path: src/noesis/api/routes.py
-        lines: [52, 72]
+        anchor: "@router.post(\"/projects\", status_code=202)"
+        anchor_end: "async def register_and_index("
+      - path: src/noesis/api/routes.py
+        anchor: "\"/projects/{project_id}/reindex\","
+        anchor_end: "async def reindex("
 
   - id: structural-09
     category: structural
     query: "code that creates keyword payload indexes on a collection"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        lines: [141, 148]
+        anchor: "        for field in (\"project_id\", \"language\"):"
+        anchor_end: "                field_schema=models.PayloadSchemaType.KEYWORD,"
 
   - id: structural-10
     category: structural
     query: "functions that parse source text with a tree sitter parser"
     relevant:
       - path: src/noesis/core/chunker.py
-        lines: [119, 153]
+        anchor: "_local = threading.local()"
+        anchor_end: "    return pieces or None"
 
   - id: structural-11
     category: structural
     query: "filters that combine must and must_not conditions"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        lines: [199, 240]
+        anchor: "    def delete_file_chunks("
+        anchor_end: "            points_selector=models.FilterSelector(filter=query_filter),"
 
   - id: structural-12
     category: structural
     query: "async context manager that manages the application lifespan"
     relevant:
       - path: src/noesis/app.py
-        lines: [43, 77]
+        anchor: "    async def lifespan(app: FastAPI) -> AsyncIterator[None]:"
+        anchor_end: "            if ctx is None:"
 
 # ------------------------------------------------------- structural (M5)
 # Evaluated by tests/eval/test_structural_golden.py: exact per-file match
