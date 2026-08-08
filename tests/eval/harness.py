@@ -381,6 +381,13 @@ CATEGORY_REGRESSION_TOLERANCE = 0.20
 # mechanically, independent of retrieval quality (issue #38, Finding B).
 CORPUS_DRIFT_TOLERANCE = 0.20
 
+# Recorded in the reference and reported, never gated. A diagnostic channel's
+# job is to EXPLAIN a regression the gated channels already detect — the
+# dense -> dense(python-only) gap separates "the haystack grew" from
+# "retrieval got worse". Gating it would double-count evidence `dense`
+# already carries and add a threshold with no exit criterion behind it.
+DIAGNOSTIC_CHANNELS = frozenset({"dense (python-only)"})
+
 
 def manifest_sha256(rel_paths: Iterable[str]) -> str:
     """Stable fingerprint of a corpus: sha256 over its sorted relative paths.
@@ -525,6 +532,8 @@ def regression_failures(
     """Relative-drop breaches against the stored reference (ADR-65 layer 2)."""
     failures: list[str] = []
     for channel, ref in sorted(reference_channels.items()):
+        if channel in DIAGNOSTIC_CHANNELS:
+            continue
         run = reports.get(channel)
         if run is None:
             failures.append(f"{channel}: reference has this channel, run does not")

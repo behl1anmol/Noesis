@@ -377,6 +377,24 @@ def test_relational_gate_catches_symbol_subset_and_rerank_losses():
     assert any("ADR-35" in f for f in relational_failures(rerank_loss))
 
 
+def test_diagnostic_channel_is_recorded_but_never_gated():
+    """The python-only channel explains regressions; it does not detect them.
+
+    It is stored in the reference like every other channel, so the trend is
+    readable, but a drop in it must not fail a run — `dense` already carries
+    that evidence, and gating both would double-count it.
+    """
+    reference = {
+        "dense": _report(0.65, 0.7375, 0.6149),
+        "dense (python-only)": _report(0.80, 0.90, 0.85),
+    }
+    collapsed = {
+        "dense": _report(0.65, 0.7375, 0.6149),
+        "dense (python-only)": _report(0.10, 0.10, 0.10),
+    }
+    assert regression_failures(collapsed, reference) == []
+
+
 def test_regression_gate_passes_an_identical_run_and_tolerates_one_query():
     same = {"dense": _report(0.65, 0.7375, 0.6149)}
     assert regression_failures(same, same) == []
