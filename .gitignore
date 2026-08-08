@@ -226,5 +226,8 @@ dev/devlog.sqlite-shm
 # noesis runtime state (service-created, machine-local)
 data/
 
-# eval harness scratch output (baselines/ IS committed; the latest run is not)
-tests/eval/report_latest.json
+# eval harness scratch output (baselines/ IS committed; the latest run is not).
+# .md as well as .json since ADR-65: the rendered verdict/provenance report is
+# a per-run artifact with device-specific latency, so committing it would just
+# invite stale numbers into review. The durable record is baselines/reference.json.
+tests/eval/report_latest.*
