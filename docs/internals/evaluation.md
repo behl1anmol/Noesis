@@ -47,27 +47,32 @@ Layer 1 is corpus-independent by construction — every channel sees the same co
 
 The absolute floor beside the relative band is deliberate arithmetic. The gate measures a relative drop, but one query moving changes the mean by `1/n` absolutely — which at a low score is a huge *relative* figure and at a high score a small one. Requiring both means "one query is noise" stays true at every score level.
 
-### The current reference (2026-08-08)
+### The current reference (2026-08-09)
 
-First measurement under content-anchored labels ([ADR-64](../project/decisions.md)) and grouped scoring ([ADR-67](../project/decisions.md)) — 184 files, 558 chunks, embedded Qdrant, CodeRankEmbed and bge-reranker-v2-m3 both on CUDA:
+Measured under content-anchored labels ([ADR-64](../project/decisions.md)) and grouped scoring ([ADR-67](../project/decisions.md)) — 184 files, 559 chunks, embedded Qdrant, CodeRankEmbed and bge-reranker-v2-m3 both on CUDA at their default batch sizes:
 
 | channel | Recall@5 | Recall@10 | NDCG@10 | p50 latency |
 |---|---|---|---|---|
-| dense | 0.575 | 0.637 | 0.462 | 15 ms |
-| dense (python-only) | 0.700 | 0.713 | 0.570 | 17 ms |
-| sparse | 0.613 | 0.662 | 0.460 | 13 ms |
-| **hybrid** | 0.662 | **0.775** | 0.502 | 33 ms |
-| **hybrid+rerank** | 0.775 | **0.825** | 0.583 | 6 581 ms |
+| dense | 0.575 | 0.637 | 0.458 | 45 ms |
+| dense (python-only) | 0.700 | 0.713 | 0.570 | 49 ms |
+| sparse | 0.613 | 0.662 | 0.461 | 29 ms |
+| **hybrid** | 0.662 | **0.775** | 0.502 | 80 ms |
+| **hybrid+rerank** | 0.775 | **0.825** | 0.583 | 8 551 ms |
+
+!!! note "What re-anchoring three labels did to the numbers: nothing measurable"
+    This reference replaces the 2026-08-08 one because the PR #42 review moved `nl-07`, `nl-13` and `structural-04` off docstring prose onto signature lines, which changes `golden_sha256` and so makes the older reference incomparable by construction. **Every Recall figure is identical across all five channels and all three categories**, and hybrid and hybrid+rerank are identical on NDCG too. Only dense and sparse NDCG@10 moved, by at most 0.009 — rank-order noise, not a change in what matched. That is the expected result: widening a label inside a file it already labelled cannot change that file's group rank, and group rank is what NDCG credits.
+
+    Latency roughly doubled to tripled against the previous table on **every** channel — including `sparse`, which runs no model at all (13 ms → 29 ms). That rules retrieval out as the cause and points at machine state: the two runs used different batch sizes (8/4 then, the defaults 32/16 now) on an 8 GB GPU where the warning box below applies, but nothing here isolates which factor dominates, and this report cannot. Latency is reported and never gated, precisely so a difference nobody has explained cannot fail a run.
 
 **M3's exit criterion, asserted rather than assumed for the first time:** hybrid beats dense on Recall@10 overall (0.775 vs 0.637) and on the symbol subset (0.857 vs 0.786). With rerank, symbol Recall@10 reaches **1.000**.
 
-**What the python-only diagnostic says about corpus growth.** Filtering to Python removes 99 of 184 files — every non-`.py` distractor — and lifts Recall@10 by **+0.076** overall. The effect is concentrated where you would expect: `structural` **+0.167**, `nl` +0.071, `symbol` **0.000**. Identifier lookups do not compete with prose; structure-phrased questions very much do. That is the measured form of the issue's Finding B, and it is only visible because the channel exists.
+**What the python-only diagnostic says about corpus growth.** Filtering to Python removes 99 of 184 files — every non-`.py` distractor — and lifts Recall@10 by **+0.075** overall (`0.7125 − 0.6375`; the previous text read +0.076, which was the displayed three-decimal figures subtracted rather than the stored ones). The effect is concentrated where you would expect: `structural` **+0.167**, `nl` +0.071, `symbol` **0.000**. Identifier lookups do not compete with prose; structure-phrased questions very much do. That is the measured form of the issue's Finding B, and it is only visible because the channel exists.
 
 These numbers are **not** comparable to `m2_dense.json`: the labels changed identity and the scorer changed semantics. That is why the M2 file is frozen rather than refreshed.
 
 ### Embedded Qdrant does not rank like a real server
 
-Measured the same day against `qdrant/qdrant:v1.18.3`, same corpus, labels and models — the question [ADR-62](../project/decisions.md) left open and assigned to this work:
+Measured 2026-08-08 at commit `13fcd9d` against `qdrant/qdrant:v1.18.3` — the question [ADR-62](../project/decisions.md) left open and assigned to this work. Both sides of the comparison were measured on the same corpus, labels and models **as they stood that day**, i.e. under the pre-re-anchoring label set; the pairing is therefore still sound and the delta still holds, but the absolute figures are the 2026-08-08 ones, not the table above. It has not been re-measured, because doing so needs a second container run and the delta, not the absolutes, is what the section is about:
 
 | channel | embedded | real server | delta |
 |---|---|---|---|
@@ -90,32 +95,34 @@ This is why `store` is a hard comparability term: an embedded-measured reference
 
 No run writes a baseline implicitly. Both provenance-blind writers are gone: the write-if-missing that made whichever run got there first the standard (the mechanism lesson 8 was recorded for), and two unconditional writes that dirtied the tree on every run.
 
+**Pass `-s`.** The tier prints its compute device and each channel's Recall@10 as it completes, and every print flushes — but pytest captures stdout by default and releases it only on failure, so without `-s` a thirteen-minute run shows a bare `tests/eval/test_golden.py` and nothing else. A run with no progress signal is indistinguishable from a hung one; that has already cost wrong diagnoses. This is the same shape as the `-q` problem ADR-65 was written for: the fix that made the run legible was defeated by the invocation the docs recommended.
+
 Every run also writes `tests/eval/report_latest.md` — verdicts first, then provenance, then the tables — plus `report_latest.json`. Both are gitignored. The report lists any query scoring zero on *every* channel, because four channels failing the same query is far likelier to be a broken label than a retrieval failure; printing that is what would have surfaced the label rot at the first run rather than two milestones later.
 
 ## Running
 
 ```bash
-uv run pytest tests/eval/ -m golden      # golden harness (loads the real model, self-indexes this repo)
+uv run pytest tests/eval/ -m golden -s   # golden harness (loads the real model, self-indexes this repo)
 uv run pytest                            # default suite: label integrity + gate logic, fully offline
 uv run pytest -m integration             # opt-in: real embedding model
 
 # Record a new reference — deliberate, needs a clean tree and a decision row
-NOESIS_EVAL_REBASELINE=1 uv run pytest tests/eval/ -m golden
+NOESIS_EVAL_REBASELINE=1 uv run pytest tests/eval/ -m golden -s
 
 # Measure against a real Qdrant server instead of the embedded client (ADR-66)
 docker compose up -d
-NOESIS_EVAL_QDRANT_URL=http://127.0.0.1:6333 uv run pytest tests/eval/ -m golden
+NOESIS_EVAL_QDRANT_URL=http://127.0.0.1:6333 uv run pytest tests/eval/ -m golden -s
 
 # Place the models — needed on a GPU with less headroom than the 16 GB T4 the
 # M4 numbers were measured on. Unset means today's behaviour (auto-detect,
 # default batch sizes). Placement is recorded in the run's provenance.
 NOESIS_EVAL_RERANKER_DEVICE=cpu NOESIS_EVAL_EMBED_BATCH_SIZE=8 \
-  uv run pytest tests/eval/ -m golden
+  uv run pytest tests/eval/ -m golden -s
 
 # The embedder has its own pair of knobs — the reranker is the bigger model, so
 # it is the usual one to move, but the OOM below is embedder-side.
 NOESIS_EVAL_EMBEDDER_DEVICE=cpu NOESIS_EVAL_RERANK_BATCH_SIZE=2 \
-  uv run pytest tests/eval/ -m golden
+  uv run pytest tests/eval/ -m golden -s
 ```
 
 ### Model placement variables

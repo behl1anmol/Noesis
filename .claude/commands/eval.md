@@ -2,7 +2,7 @@
 description: Run the golden evaluation harness and report its gate verdicts
 allowed-tools: Bash(uv run pytest *:*), Bash(python .claude/scripts/devlog.py *:*), Read
 ---
-1. Run `uv run pytest tests/eval/ -m golden` (the golden-set harness). It takes
+1. Run `uv run pytest tests/eval/ -m golden -s` (the golden-set harness). It takes
    roughly two hours and loads the real embedder and reranker.
 2. Read `tests/eval/report_latest.md` — verdicts first, then provenance, then
    the tables. Do NOT report from the terminal output alone; the documented
@@ -22,7 +22,7 @@ allowed-tools: Bash(uv run pytest *:*), Bash(python .claude/scripts/devlog.py *:
    measurement.
 
 **This command cannot re-baseline, by design.** Recording a new reference is
-`NOESIS_EVAL_REBASELINE=1 uv run pytest tests/eval/ -m golden`, which this
+`NOESIS_EVAL_REBASELINE=1 uv run pytest tests/eval/ -m golden -s`, which this
 command's `allowed-tools` cannot express. If the numbers should become the new
 reference, say so and let the human run it — then it needs a decision row:
 `python .claude/scripts/devlog.py decision add --title "golden reference <date>"

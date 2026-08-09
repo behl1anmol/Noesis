@@ -420,7 +420,7 @@ the dashboard control is locked and shows the pin.
 ```bash
 uv run pytest                          # full suite (offline: fakes, in-memory Qdrant)
 uv run pytest -m integration           # opt-in: loads the real embedding model
-uv run pytest tests/eval/ -m golden    # M3 evaluation harness (self-indexes this repo)
+uv run pytest tests/eval/ -m golden -s    # M3 evaluation harness (self-indexes this repo)
 bash .claude/scripts/ci_greps.sh       # guardrail greps (local-only invariants)
 ```
 

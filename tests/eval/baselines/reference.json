@@ -3,35 +3,35 @@
     "dense": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 17.236260000572656,
-          "latency_p95_ms": 37.722684999607736,
+          "latency_p50_ms": 48.96281999981511,
+          "latency_p95_ms": 120.59463300010975,
           "n_queries": 14,
-          "ndcg@10": 0.43494364748715064,
+          "ndcg@10": 0.4292094181405926,
           "recall@10": 0.5357142857142857,
           "recall@5": 0.5
         },
         "structural": {
-          "latency_p50_ms": 14.671455999632599,
-          "latency_p95_ms": 19.172709999111248,
+          "latency_p50_ms": 41.16500400004952,
+          "latency_p95_ms": 77.45621599997321,
           "n_queries": 12,
-          "ndcg@10": 0.37693583666042785,
+          "ndcg@10": 0.3805878158969988,
           "recall@10": 0.5833333333333334,
           "recall@5": 0.5
         },
         "symbol": {
-          "latency_p50_ms": 13.836654001352144,
-          "latency_p95_ms": 15.689758998632897,
+          "latency_p50_ms": 40.47237299982953,
+          "latency_p95_ms": 83.40600700012146,
           "n_queries": 14,
-          "ndcg@10": 0.5628518715281323,
+          "ndcg@10": 0.5534997462730282,
           "recall@10": 0.7857142857142857,
           "recall@5": 0.7142857142857143
         }
       },
       "overall": {
-        "latency_p50_ms": 15.10390299881692,
-        "latency_p95_ms": 37.42226299982576,
+        "latency_p50_ms": 44.7469670002647,
+        "latency_p95_ms": 77.9925470001217,
         "n_queries": 40,
-        "ndcg@10": 0.46230918265347737,
+        "ndcg@10": 0.45812455231386695,
         "recall@10": 0.6375,
         "recall@5": 0.575
       }
@@ -39,24 +39,24 @@
     "dense (python-only)": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 18.34209600019676,
-          "latency_p95_ms": 24.286668998684036,
+          "latency_p50_ms": 56.53826799971284,
+          "latency_p95_ms": 80.87584699978834,
           "n_queries": 14,
           "ndcg@10": 0.5639284197245749,
           "recall@10": 0.6071428571428571,
           "recall@5": 0.6071428571428571
         },
         "structural": {
-          "latency_p50_ms": 17.17665800060786,
-          "latency_p95_ms": 18.296211001143092,
+          "latency_p50_ms": 38.18066399981035,
+          "latency_p95_ms": 68.77648400040925,
           "n_queries": 12,
           "ndcg@10": 0.5301084082921642,
           "recall@10": 0.75,
           "recall@5": 0.7083333333333334
         },
         "symbol": {
-          "latency_p50_ms": 16.698219998943387,
-          "latency_p95_ms": 23.787987000105204,
+          "latency_p50_ms": 51.29980100036846,
+          "latency_p95_ms": 79.29588800016063,
           "n_queries": 14,
           "ndcg@10": 0.610107255363702,
           "recall@10": 0.7857142857142857,
@@ -64,8 +64,8 @@
         }
       },
       "overall": {
-        "latency_p50_ms": 17.396829000063008,
-        "latency_p95_ms": 21.315424999556853,
+        "latency_p50_ms": 49.1768429997137,
+        "latency_p95_ms": 76.12287999972978,
         "n_queries": 40,
         "ndcg@10": 0.5699450087685463,
         "recall@10": 0.7125,
@@ -75,24 +75,24 @@
     "hybrid": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 34.125799998946604,
-          "latency_p95_ms": 38.038525000956724,
+          "latency_p50_ms": 79.3864939996638,
+          "latency_p95_ms": 113.80545900010475,
           "n_queries": 14,
           "ndcg@10": 0.4778908269067216,
           "recall@10": 0.6428571428571429,
           "recall@5": 0.5714285714285714
         },
         "structural": {
-          "latency_p50_ms": 33.13595999861718,
-          "latency_p95_ms": 38.820345000203815,
+          "latency_p50_ms": 91.20353200023601,
+          "latency_p95_ms": 110.84058300002653,
           "n_queries": 12,
           "ndcg@10": 0.5159599448556639,
           "recall@10": 0.8333333333333334,
           "recall@5": 0.625
         },
         "symbol": {
-          "latency_p50_ms": 30.241211001339252,
-          "latency_p95_ms": 38.411110999732045,
+          "latency_p50_ms": 67.65486999984205,
+          "latency_p95_ms": 105.0599590003003,
           "n_queries": 14,
           "ndcg@10": 0.5128337861354134,
           "recall@10": 0.8571428571428571,
@@ -100,8 +100,8 @@
         }
       },
       "overall": {
-        "latency_p50_ms": 33.004263999828254,
-        "latency_p95_ms": 38.038525000956724,
+        "latency_p50_ms": 79.9865009998939,
+        "latency_p95_ms": 110.84058300002653,
         "n_queries": 40,
         "ndcg@10": 0.5015415980214464,
         "recall@10": 0.775,
@@ -111,24 +111,24 @@
     "hybrid+rerank": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 6433.083979000003,
-          "latency_p95_ms": 7718.272395000895,
+          "latency_p50_ms": 9023.029855999994,
+          "latency_p95_ms": 10792.633322000256,
           "n_queries": 14,
           "ndcg@10": 0.43970288794947227,
           "recall@10": 0.6428571428571429,
           "recall@5": 0.5714285714285714
         },
         "structural": {
-          "latency_p50_ms": 6678.663514001528,
-          "latency_p95_ms": 7248.754573998667,
+          "latency_p50_ms": 7820.25906600029,
+          "latency_p95_ms": 8435.042234999855,
           "n_queries": 12,
           "ndcg@10": 0.5874800170265568,
           "recall@10": 0.8333333333333334,
           "recall@5": 0.8333333333333334
         },
         "symbol": {
-          "latency_p50_ms": 6581.289007001033,
-          "latency_p95_ms": 7412.595296000291,
+          "latency_p50_ms": 9158.62131699987,
+          "latency_p95_ms": 9893.295425999895,
           "n_queries": 14,
           "ndcg@10": 0.7230139765210964,
           "recall@10": 1.0,
@@ -136,8 +136,8 @@
         }
       },
       "overall": {
-        "latency_p50_ms": 6581.289007001033,
-        "latency_p95_ms": 7267.424509998818,
+        "latency_p50_ms": 8551.050591000148,
+        "latency_p95_ms": 9850.588357000106,
         "n_queries": 40,
         "ndcg@10": 0.583194907672666,
         "recall@10": 0.825,
@@ -147,35 +147,35 @@
     "sparse": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 14.26559600076871,
-          "latency_p95_ms": 16.65670700094779,
+          "latency_p50_ms": 34.59761400017669,
+          "latency_p95_ms": 48.2664350001869,
           "n_queries": 14,
           "ndcg@10": 0.3740135712588688,
           "recall@10": 0.5357142857142857,
           "recall@5": 0.5
         },
         "structural": {
-          "latency_p50_ms": 12.881639999250183,
-          "latency_p95_ms": 14.523588000884047,
+          "latency_p50_ms": 26.96384799992302,
+          "latency_p95_ms": 33.07694699969943,
           "n_queries": 12,
           "ndcg@10": 0.6329653444892821,
           "recall@10": 0.8333333333333334,
           "recall@5": 0.7916666666666666
         },
         "symbol": {
-          "latency_p50_ms": 10.66305299900705,
-          "latency_p95_ms": 14.950536000469583,
+          "latency_p50_ms": 27.703404000021692,
+          "latency_p95_ms": 42.02631399994061,
           "n_queries": 14,
-          "ndcg@10": 0.3984551371754641,
+          "ndcg@10": 0.4015854050925249,
           "recall@10": 0.6428571428571429,
           "recall@5": 0.5714285714285714
         }
       },
       "overall": {
-        "latency_p50_ms": 13.3682490013598,
-        "latency_p95_ms": 15.246740000293357,
+        "latency_p50_ms": 29.396120000001247,
+        "latency_p95_ms": 44.7884069999418,
         "n_queries": 40,
-        "ndcg@10": 0.4602536512988012,
+        "ndcg@10": 0.46134924506977243,
         "recall@10": 0.6625,
         "recall@5": 0.6125
       }
@@ -183,24 +183,24 @@
   },
   "provenance": {
     "corpus": {
-      "chunks": 558,
-      "commit": "13fcd9d4658f9ce5257c0aeb6e9b58767790c9c8",
+      "chunks": 559,
+      "commit": "d5ab06ebc4149b89d15c44a6765e2d1602c12463",
       "dirty": false,
       "files_indexed": 184,
       "files_total": 184,
       "manifest_sha256": "2bf3cead1e01cab9559d5ccf5757420702edf851fccabc8255bc9ba61114c559"
     },
-    "date": "2026-08-08",
+    "date": "2026-08-09",
     "device": {
       "cuda_available": true,
       "embedder": "cuda",
-      "embedder_batch_size": 8,
+      "embedder_batch_size": 32,
       "reranker": "cuda",
-      "reranker_batch_size": 4,
+      "reranker_batch_size": 16,
       "torch": "2.12.1+cu130"
     },
     "labels": {
-      "golden_sha256": "83166791817d20d61f865c8e06a274768aa90b7a051c973cbef95890dd7d6bb6",
+      "golden_sha256": "14240c1f7d6775db2fcd1780b84b9cf835b9e4d54e5398f9ecb098e843fcdd36",
       "n_queries": 40
     },
     "models": {

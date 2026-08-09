@@ -495,7 +495,7 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
 
 ## Commands
 - `uv run uvicorn code_index.app:app --host 127.0.0.1 --port 8000`
-- `uv run pytest` | `uv run pytest tests/eval/ -m golden` (harness)
+- `uv run pytest` | `uv run pytest tests/eval/ -m golden -s` (harness)
 - `docker compose up -d` (Qdrant)
 - `python .claude/scripts/devlog.py latest` (session state)
 
