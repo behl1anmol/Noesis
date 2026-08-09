@@ -28,6 +28,7 @@ Scoring rules are stated in `tests/eval/harness.py` so numbers are reproducible:
 
 - A result matches a relevant item iff `file_path` is equal and, when the item carries a `lines` range, the result span overlaps it.
 - Results are **grouped** by `file_path` in first-appearance order — several chunks of one file count as one retrieval and take one rank slot, but every retrieved chunk of that file stays available for matching ([ADR-67](../project/decisions.md)). Keeping only the file's best-ranked chunk discarded correct answers: the query `chunk_point_id` retrieved the chunk holding its definition at rank 2 and scored zero, because a *usage* chunk of the same file ranked first. Three of forty queries were pinned at zero by that alone, unable to register either a regression or an improvement.
+- Inside a group, **one chunk credits at most one relevant item**. That is what lets a single file answer two labels through two different chunks, and it is also the limit: two labels of the same file that land inside the *same* chunk credit only one, capping that query at `1/len(relevant)`. `structural-08` (two endpoints in `routes.py`) is the label exposed to it. The cap is deliberate — without it one wide chunk would sweep every label in its file and score 1.0 for retrieving a single thing — and it depends on chunk boundaries rather than on retrieval quality, so read a `0.5` on a two-label query as "check the chunking", not "retrieval halved".
 - **Recall@5 / Recall@10**: fraction of a query's relevant items matched in the top k, averaged over queries.
 - **NDCG@10**: binary gains with greedy credit — walking the deduped ranking, a result gains 1 only the first time it matches a not-yet-credited relevant item; IDCG assumes all relevant items ranked first (log2 discount).
 - **Latency p50/p95 (ms)**: wall time of the full search call per query, nearest-rank percentiles. Latency is *reported next to* quality but never mixed into the quality gate — they are separate stakeholder decisions.
@@ -110,10 +111,26 @@ NOESIS_EVAL_QDRANT_URL=http://127.0.0.1:6333 uv run pytest tests/eval/ -m golden
 # default batch sizes). Placement is recorded in the run's provenance.
 NOESIS_EVAL_RERANKER_DEVICE=cpu NOESIS_EVAL_EMBED_BATCH_SIZE=8 \
   uv run pytest tests/eval/ -m golden
+
+# The embedder has its own pair of knobs — the reranker is the bigger model, so
+# it is the usual one to move, but the OOM below is embedder-side.
+NOESIS_EVAL_EMBEDDER_DEVICE=cpu NOESIS_EVAL_RERANK_BATCH_SIZE=2 \
+  uv run pytest tests/eval/ -m golden
 ```
 
+### Model placement variables
+
+All four are read only by the golden harness (`tests/eval/test_golden.py`), never by the service. An empty value counts as unset; a batch size that is not an integer ≥ 1 is rejected rather than ignored.
+
+| variable | default when unset | what it moves |
+|---|---|---|
+| `NOESIS_EVAL_EMBEDDER_DEVICE` | auto-detect (`cuda` when available) | where the embedder runs — `cpu`, `cuda`, `cuda:1` |
+| `NOESIS_EVAL_RERANKER_DEVICE` | auto-detect | where the cross-encoder runs |
+| `NOESIS_EVAL_EMBED_BATCH_SIZE` | 32 | embedder batch — the lever for indexing-time device memory |
+| `NOESIS_EVAL_RERANK_BATCH_SIZE` | 16 | cross-encoder batch — the lever for query-time device memory |
+
 !!! warning "The harness needs real GPU headroom"
-    Both models are resident at once — a 137M embedder and a 568M cross-encoder — and the harness constructs them directly rather than through `config.toml`, so until the variables above existed there was no way to place them. On an 8 GB laptop GPU, indexing this corpus drove device memory to **7600 MiB of 8151** and WSL2's paravirtualization layer failed an allocation with `dxgkio_make_resident: Ioctl failed: -12` (ENOMEM). CUDA reported that as `cudaErrorIllegalInstruction`, not as an out-of-memory error, and sustained pressure took the host GPU driver down with it. If you see an illegal-instruction fault from a model forward pass, check `nvidia-smi` before suspecting the code: pin the reranker to `cpu` and lower the embed batch.
+    Both models are resident at once — a 137M embedder and a 568M cross-encoder — and the harness constructs them directly rather than through `config.toml`, so until the four variables above existed there was no way to place them. On an 8 GB laptop GPU, indexing this corpus drove device memory to **7600 MiB of 8151** and WSL2's paravirtualization layer failed an allocation with `dxgkio_make_resident: Ioctl failed: -12` (ENOMEM). CUDA reported that as `cudaErrorIllegalInstruction`, not as an out-of-memory error, and sustained pressure took the host GPU driver down with it. If you see an illegal-instruction fault from a model forward pass, check `nvidia-smi` before suspecting the code. The pressure is highest during indexing, so reach for `NOESIS_EVAL_EMBED_BATCH_SIZE` first; if it persists, move the reranker off the device with `NOESIS_EVAL_RERANKER_DEVICE=cpu`, and as a last resort the embedder too with `NOESIS_EVAL_EMBEDDER_DEVICE=cpu` (which makes the run very slow, but finishes).
 
 The default suite runs against `FakeEmbedder` and an in-memory Qdrant — no model download, no Docker. The `integration` and `golden` marks are excluded by default.
 
