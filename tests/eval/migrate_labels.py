@@ -1,37 +1,63 @@
 """One-shot migration: positional golden labels -> content anchors (ADR-64).
 
 Committed rather than run-and-discarded so the rewrite is reproducible and
-reviewable: every anchor below was chosen by this script, not by hand, and
-anyone can re-derive the same 43 anchors from the same two commits.
+reviewable: every anchor was chosen by this script, not by hand, and anyone
+can re-derive the same 46 labels — 43 mechanically, 3 from OVERRIDES.
 
-What it does. For each ``relevant`` item in ``golden.yaml``'s ``queries``
-section it reads the labeled span **as it stood at the labeling commit**
-(``1d2bf06``, the commit that introduced golden.yaml), then picks the first
-line of that span which (a) still exists verbatim in today's file and (b)
-occurs exactly once there as a substring — the same predicate
-``harness.resolve_anchor`` applies at load time, so a chosen anchor is one
-the loader is guaranteed to resolve.
+**Both ends are pinned to a commit, so the reproduction is deterministic
+forever rather than only on the day it ran.**
 
-Why the labeled span and not today's code: the anchor has to preserve what
-the original labeler meant by that label. Re-deriving it from today's tree
+- ``LABEL_COMMIT`` (``1d2bf06``) is where the labeled *spans* come from: the
+  commit that introduced golden.yaml, whose line numbers describe that tree.
+- ``MIGRATION_BASE`` (``216450e``) is the tree the anchors were resolved
+  *against*, and the source of the pre-migration ``golden.yaml`` — the last
+  version that still carried ``lines:``. Reading the live tree instead would
+  make the output drift with every commit, so "anyone can re-derive the same
+  anchors" would be true only on the day of the migration. It is also why an
+  earlier version of this script could not run at all: it re-parsed the
+  ``golden.yaml`` it had itself rewritten, and died on ``item["lines"]``,
+  a key that no longer exists (PR #42 review).
+
+What it does. For each ``relevant`` item in the pre-migration ``golden.yaml``
+it reads the labeled span as it stood at ``LABEL_COMMIT``, then picks the
+first line of that span which (a) still exists verbatim in the file at
+``MIGRATION_BASE`` and (b) occurs exactly once there as a substring — the same
+predicate ``harness.resolve_anchor`` applies at load time, so a chosen anchor
+is one the loader is guaranteed to resolve.
+
+Why the labeled span and not the later code: the anchor has to preserve what
+the original labeler meant by that label. Re-deriving it from a newer tree
 would be re-labeling, which is a content judgement and not a migration.
 
-Definition-shaped lines (``def``/``class``/decorator/assignment) are preferred
-over docstring prose, because prose is reworded more often than signatures and
-every reword costs someone a loud failure.
+Anchors are chosen in **span order**, not by preferring definition-shaped
+lines — see ``pick_anchor``, which records why definition-preference was tried
+and rejected. Three labels cannot be migrated mechanically and carry explicit
+overrides — see OVERRIDES. The rewrite is line-based rather than a YAML
+round-trip so the file's header and inline rationale comments survive
+untouched.
 
-Three labels cannot be migrated mechanically and carry explicit overrides —
-see OVERRIDES. The rewrite is line-based rather than a YAML round-trip so the
-file's header and inline rationale comments survive untouched.
+This reproduces commit ``3307997``'s golden.yaml (46 labels). It is NOT
+today's golden.yaml: ``structural-08`` gained a second endpoint label in
+``13fcd9d`` (47 labels), and three prose anchors — ``nl-07`` and ``nl-13``'s
+``anchor``, ``structural-04``'s ``anchor_end`` — were hardened onto signature
+and field lines in the PR #42 review. Those are signed-off edits made after the
+migration, not part of it — which is why this script can no longer write
+``golden.yaml`` and only writes where you point it.
 
-Usage:  python tests/eval/migrate_labels.py [--write]
+Usage:  python tests/eval/migrate_labels.py [--out PATH]
+
+Reproduce and check::
+
+    python tests/eval/migrate_labels.py --out /tmp/golden.migrated.yaml
+    git show 3307997:tests/eval/golden.yaml | diff - /tmp/golden.migrated.yaml
+
+``tests/eval/test_migrate_labels.py`` runs exactly that comparison.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -40,10 +66,19 @@ import yaml
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parents[1]
-GOLDEN_PATH = EVAL_DIR / "golden.yaml"
+GOLDEN_REL = "tests/eval/golden.yaml"
 
-# The commit that added golden.yaml; the labels describe this tree.
+# The commit that added golden.yaml; the labeled `lines` describe this tree.
 LABEL_COMMIT = "1d2bf06"
+
+# The tree the anchors were resolved against: the parent of the migration
+# commit 3307997, i.e. the last revision whose golden.yaml still carried
+# `lines:`. Pinned rather than "the working tree" so the output is a fixed
+# artifact — see the module docstring.
+MIGRATION_BASE = "216450e"
+
+# What this script reproduces. Its golden.yaml is the migration's own output.
+MIGRATION_COMMIT = "3307997"
 
 # Labels whose target cannot be recovered from the labeled span. Each was
 # verified individually and is called out in the PR body for sign-off, per
@@ -78,11 +113,12 @@ OVERRIDES: dict[tuple[str, str], tuple[str, str, str | None]] = {
     ),
 }
 
-_DEFINITION = re.compile(r"^\s*(async\s+def\s|def\s|class\s|@)")
-_ASSIGNMENT = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_.\[\]\"']*\s*(:[^=]+)?=\s*\S")
+def blob_at(commit: str, rel_path: str) -> str | None:
+    """File contents at *commit*, or None when the object is not reachable.
 
-
-def file_at(commit: str, rel_path: str) -> list[str] | None:
+    None covers both "the path did not exist there" and "this is a shallow
+    clone" — callers turn the second into a loud, named failure.
+    """
     proc = subprocess.run(
         ["git", "show", f"{commit}:{rel_path}"],
         cwd=REPO_ROOT,
@@ -90,7 +126,12 @@ def file_at(commit: str, rel_path: str) -> list[str] | None:
     )
     if proc.returncode != 0:
         return None
-    return proc.stdout.decode("utf-8", "replace").splitlines()
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def file_at(commit: str, rel_path: str) -> list[str] | None:
+    blob = blob_at(commit, rel_path)
+    return None if blob is None else blob.splitlines()
 
 
 def unique_substring(candidate: str, body: list[str]) -> bool:
@@ -191,9 +232,29 @@ def pick_anchor_end(span: list[str], current: list[str], start: str) -> str | No
     return None
 
 
-def compute_anchors() -> tuple[list[dict], list[dict]]:
-    """Return (resolved, unresolved) label records in document order."""
-    raw = yaml.safe_load(GOLDEN_PATH.read_bytes())
+def pre_migration_golden() -> str:
+    """The last golden.yaml that still carried ``lines:``, verbatim.
+
+    Read from git rather than from disk: this script rewrote the file on disk,
+    so the on-disk copy is this function's *output*, not its input.
+    """
+    blob = blob_at(MIGRATION_BASE, GOLDEN_REL)
+    if blob is None:
+        raise SystemExit(
+            f"cannot read {GOLDEN_REL} at {MIGRATION_BASE} — this needs the "
+            f"repository history (a shallow clone will not have it)"
+        )
+    return blob
+
+
+def compute_anchors(source: str | None = None) -> tuple[list[dict], list[dict]]:
+    """Return (resolved, unresolved) label records in document order.
+
+    *source* is the pre-migration golden.yaml text; it defaults to the copy at
+    MIGRATION_BASE. Every file consulted is read at MIGRATION_BASE too, so the
+    result is a function of two commits and nothing else.
+    """
+    raw = yaml.safe_load(source if source is not None else pre_migration_golden())
     resolved: list[dict] = []
     unresolved: list[dict] = []
     for query in raw["queries"]:
@@ -203,7 +264,11 @@ def compute_anchors() -> tuple[list[dict], list[dict]]:
             override = OVERRIDES.get((query["id"], rel_path))
             if override is not None:
                 new_path, anchor, anchor_end = override
-                body = (REPO_ROOT / new_path).read_text(errors="replace").splitlines()
+                body = file_at(MIGRATION_BASE, new_path)
+                if body is None:
+                    record["reason"] = f"override target {new_path} absent at {MIGRATION_BASE}"
+                    unresolved.append(record)
+                    continue
                 bad = [
                     text
                     for text in (anchor, anchor_end)
@@ -231,12 +296,11 @@ def compute_anchors() -> tuple[list[dict], list[dict]]:
                 )
                 unresolved.append(record)
                 continue
-            target = REPO_ROOT / rel_path
-            if not target.is_file():
-                record["reason"] = "labeled file no longer exists"
+            body = file_at(MIGRATION_BASE, rel_path)
+            if body is None:
+                record["reason"] = f"labeled file absent at {MIGRATION_BASE}"
                 unresolved.append(record)
                 continue
-            body = target.read_text(errors="replace").splitlines()
             span = old[start - 1 : end]
             if query["category"] == "symbol":
                 anchor = pick_symbol_anchor(span, body, query["query"].strip())
@@ -279,16 +343,17 @@ def compute_anchors() -> tuple[list[dict], list[dict]]:
     return resolved, unresolved
 
 
-def rewrite(records: list[dict]) -> str:
+def rewrite(records: list[dict], source: str | None = None) -> str:
     """Replace each `lines:` line with an `anchor:` line, in document order.
 
     Only the ``queries`` section carries ``lines:``; ``structural_patterns``
-    pins match counts and is left alone.
+    pins match counts and is left alone. *source* is the pre-migration text —
+    the on-disk golden.yaml has no ``lines:`` left to replace.
     """
     by_order = list(records)
     out: list[str] = []
     index = 0
-    for line in GOLDEN_PATH.read_text().splitlines():
+    for line in (source if source is not None else pre_migration_golden()).splitlines():
         stripped = line.strip()
         if stripped.startswith("- path:") and index < len(by_order):
             record = by_order[index]
@@ -314,10 +379,19 @@ def rewrite(records: list[dict]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--write", action="store_true", help="rewrite golden.yaml")
+    # Deliberately NOT `--write`: golden.yaml has carried signed-off edits since
+    # the migration (structural-08's second endpoint, three hardened anchors),
+    # and a script whose only remaining job is reproduction must not be able to
+    # revert them. It writes where you point it, and nowhere else.
+    parser.add_argument(
+        "--out",
+        metavar="PATH",
+        help=f"write the reproduced golden.yaml here (compare with {MIGRATION_COMMIT})",
+    )
     args = parser.parse_args()
 
-    resolved, unresolved = compute_anchors()
+    source = pre_migration_golden()
+    resolved, unresolved = compute_anchors(source)
     print(f"resolved {len(resolved)} labels, unresolved {len(unresolved)}")
     for record in resolved:
         moved = "" if record["new_path"] == record["path"] else f"  (path -> {record['new_path']})"
@@ -329,11 +403,13 @@ def main() -> int:
     if unresolved:
         print("\nrefusing to write: every label must resolve", file=sys.stderr)
         return 1
-    if args.write:
-        GOLDEN_PATH.write_text(rewrite(resolved))
-        print(f"\nwrote {GOLDEN_PATH}")
+    if args.out:
+        out_path = Path(args.out)
+        out_path.write_text(rewrite(resolved, source), encoding="utf-8")
+        print(f"\nwrote {out_path}")
+        print(f"compare: git show {MIGRATION_COMMIT}:{GOLDEN_REL} | diff - {out_path}")
     else:
-        print("\ndry run — pass --write to apply")
+        print("\ndry run — pass --out PATH to write the reproduced file")
     return 0
 
 
