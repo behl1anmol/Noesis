@@ -53,6 +53,7 @@ from noesis.core.vectorstore import VectorStore
 
 from .harness import (
     CATEGORIES,
+    CATEGORY_REGRESSION_TOLERANCE,
     LATENCY_KEYS,
     GoldenQuery,
     RelevantItem,
@@ -517,19 +518,45 @@ def test_regression_gate_passes_an_identical_run_and_tolerates_one_query():
     one_query_worse = {"dense": _report(0.65, 0.7375 - 0.025, 0.6149)}
     assert regression_failures(one_query_worse, same) == []
 
-    three_queries_worse = {"dense": _report(0.65, 0.7375 - 0.075, 0.6149)}
-    assert regression_failures(three_queries_worse, same)
+    # The binding limit here is the RELATIVE band: 10% of 0.7375 = 0.07375,
+    # above one query's 1/40 = 0.025. Probed from both sides with a margin
+    # (see the floor test below for why a bare literal is not enough).
+    limit = 0.10 * 0.7375
+    just_under = {"dense": _report(0.65, 0.7375 - limit * 0.999, 0.6149)}
+    assert regression_failures(just_under, same) == []
+
+    just_over = {"dense": _report(0.65, 0.7375 - limit * 1.001, 0.6149)}
+    failures = regression_failures(just_over, same)
+    assert any("dense/overall/recall@10" in f for f in failures)
 
 
 def test_regression_gate_absolute_floor_holds_at_low_scores():
     """The bug a purely relative band would have: at a low baseline, one
-    query's movement exceeds any sane relative percentage."""
+    query's movement exceeds any sane relative percentage.
+
+    Probed with an explicit margin on both sides. Written as the bare literal
+    ``0.25 - (1 / 12)`` this passed on 1.4e-17 of float slack — reassociating
+    the arithmetic flipped it red — and it never asserted that the gate FIRES
+    just above the floor, so half of the boundary was untested (PR #42 review).
+    """
     low = {"dense": _report(0.20, 0.25, 0.20)}
-    # 1/12 = 0.083 on the smallest category — a 33% relative drop, but still
-    # one query.
-    one_query = {"dense": _report(0.20, 0.25, 0.20)}
-    one_query["dense"]["categories"]["structural"]["recall@10"] = 0.25 - (1 / 12)
-    assert regression_failures(one_query, low) == []
+    # structural is the smallest category (n=12), so one query is 1/12 ≈ 0.083:
+    # a 33% relative drop, way past the 20% category band, but still one query.
+    # The floor is what has to win here, and only here.
+    one_query = 1 / 12
+    assert one_query > CATEGORY_REGRESSION_TOLERANCE * 0.25, (
+        "this test only means something while the floor, not the relative "
+        "band, is the binding limit at this score level"
+    )
+
+    inside = {"dense": _report(0.20, 0.25, 0.20)}
+    inside["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query * 0.999
+    assert regression_failures(inside, low) == []
+
+    outside = {"dense": _report(0.20, 0.25, 0.20)}
+    outside["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query * 1.001
+    failures = regression_failures(outside, low)
+    assert any("dense/structural/recall@10" in f for f in failures)
 
 
 def test_reference_mismatches_names_every_incomparability():
@@ -550,6 +577,14 @@ def test_reference_mismatches_names_every_incomparability():
     grown = _provenance(corpus={"chunks": 10000, "files_indexed": 380})
     reasons = reference_mismatches(grown, run)
     assert any("corpus drift" in r and "files indexed" in r for r in reasons)
+
+    # Either side failing to record its corpus size is an incomparability, not
+    # a reason to skip the check — the two must be symmetric (PR #42 review).
+    countless = _provenance(corpus={"files_indexed": 184})
+    assert any("reference records no chunk count" in r
+               for r in reference_mismatches(countless, run))
+    assert any("run records no chunk count" in r
+               for r in reference_mismatches(run, countless))
 
 
 def test_reference_mismatches_tolerates_ordinary_corpus_growth():
@@ -713,12 +748,19 @@ async def test_golden_set_gate_numbers(corpus):
     # untracked files are not in the measurement and cannot affect whether it
     # reproduces — counting them would block a re-baseline over a stray .idea/
     # directory while proving nothing.
+    #
+    # check=True, like the corpus fixture's `git ls-files`: without it a failing
+    # git yields empty stdout, which reads as "clean" and silently permits the
+    # one thing layer 3 exists to refuse (PR #42 review). git is already a hard
+    # requirement of this tier, so raising is strictly better than inventing a
+    # verdict.
     dirty = bool(
         subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
+            check=True,
         ).stdout.strip()
     )
     # Checked before the two-hour measurement, not after it: a reference that
@@ -819,8 +861,15 @@ async def test_golden_set_gate_numbers(corpus):
     finally:
         reranker.close()
 
+    # check=True for the same reason as the dirty check: a failed rev-parse
+    # would record `commit: ""` in provenance, i.e. a reference that names no
+    # corpus state at all — silently unusable rather than loudly absent.
     head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     indexed = corpus.indexed
     provenance = {

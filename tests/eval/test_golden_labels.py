@@ -49,14 +49,31 @@ def test_golden_set_shape():
     ("query", "item"), LABELS, ids=[f"{q.id}:{i.path}" for q, i in LABELS]
 )
 def test_label_resolves_inside_its_file(query, item):
-    """The anchor resolved, and to a real span of a real file."""
-    target = REPO_ROOT / item.path
-    assert target.is_file()
-    total = len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+    """The anchor is still on the line it resolved to — on a FRESH read.
+
+    This used to assert ``1 <= start <= end <= total``, which cannot fail:
+    ``resolve_anchor`` returns ``i + 1`` over that same file's ``splitlines()``
+    and ``load_golden`` already rejects ``end < start``, so 47 parametrized
+    cases carried no coverage (PR #42 review).
+
+    Re-reading the file and locating the anchor is falsifiable. It covers a
+    resolution bug, and it covers the one real gap the bounds form had:
+    ``load_golden`` caches each file's body at COLLECTION time, so a tree that
+    changes between collection and execution would otherwise go unnoticed.
+    """
+    body = (
+        (REPO_ROOT / item.path).read_text(encoding="utf-8", errors="replace").splitlines()
+    )
     start, end = item.lines
-    assert 1 <= start <= end <= total, (
+    # Bounds first, so a file that shrank names the label instead of raising a
+    # bare IndexError from the line below.
+    assert 1 <= start <= end <= len(body), (
         f"{query.id}: anchor {item.anchor!r} resolved to [{start},{end}] but "
-        f"{item.path} has {total} lines"
+        f"{item.path} now has {len(body)} lines"
+    )
+    assert item.anchor in body[start - 1], (
+        f"{query.id}: anchor {item.anchor!r} resolved to {item.path}:{start}, "
+        f"but that line now reads {body[start - 1]!r}"
     )
 
 

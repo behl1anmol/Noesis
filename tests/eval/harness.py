@@ -275,10 +275,17 @@ def score_query(
     for rank, group in enumerate(groups):
         gain = 0
         # Each chunk may credit at most one not-yet-credited item, so a file
-        # holding two distinct relevant items can satisfy both — which the
-        # golden set does have (structural-08 labels two endpoints in
-        # routes.py). The NDCG gain stays 1 for the slot regardless: the file
-        # occupies one rank position however many items it answers.
+        # holding two distinct relevant items can satisfy both — via two
+        # different chunks — which the golden set does have (structural-08
+        # labels two endpoints in routes.py). The NDCG gain stays 1 for the
+        # slot regardless: the file occupies one rank position however many
+        # items it answers.
+        #
+        # The cap is per CHUNK, so two same-file labels inside one chunk still
+        # credit only one and cap that query at 1/len(relevant) (ADR-67,
+        # pinned by test_two_relevant_greedy_credit). Deliberate: without it a
+        # single wide chunk would sweep every label in its file and score 1.0
+        # for retrieving one thing.
         for chunk in group:
             for i, item in enumerate(relevant):
                 if i in matched_rank:
@@ -493,7 +500,13 @@ def reference_mismatches(reference: dict[str, Any], run: dict[str, Any]) -> list
     ref_chunks, run_chunks = ref_corpus.get("chunks"), run_corpus.get("chunks")
     if not ref_chunks:
         reasons.append("reference records no chunk count")
-    elif run_chunks:
+    elif not run_chunks:
+        # Symmetric with the line above (PR #42 review): a run that cannot say
+        # how big its corpus was is exactly as uncomparable as a reference that
+        # cannot, and skipping the check instead would gate against an unknown
+        # corpus — Finding B with the numbers hidden one level deeper.
+        reasons.append("run records no chunk count")
+    else:
         drift = abs(run_chunks - ref_chunks) / ref_chunks
         if drift > CORPUS_DRIFT_TOLERANCE:
             # Report the file counts beside the chunk counts: chunks are what
