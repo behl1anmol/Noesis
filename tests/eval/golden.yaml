@@ -89,7 +89,11 @@ queries:
     query: "where is the vector collection created with the embedding dimension"
     relevant:
       - path: src/noesis/core/vectorstore.py
-        anchor: "        \"\"\"Create the collection if missing, sized from ``embedder.dim``"
+        # Re-anchored 2026-08-09 (PR #42 review) off the docstring's first line
+        # onto the signature above it: prose is reworded far more often than a
+        # def, and this check runs in the DEFAULT suite, so a reword would fail
+        # collection for everyone AND cost a re-baseline to repair.
+        anchor: "def ensure_collection("
         anchor_end: "                field_schema=models.PayloadSchemaType.KEYWORD,"
 
   - id: nl-08
@@ -143,7 +147,9 @@ queries:
     query: "how is the web application started and its core resources wired together"
     relevant:
       - path: src/noesis/app.py
-        anchor: "    \"\"\"Build the app. Tests pass a pre-built *ctx* (fake embedder,"
+        # Re-anchored 2026-08-09 (PR #42 review), same reason as nl-07: the
+        # docstring line became the signature that owns it.
+        anchor: "def create_app("
         anchor_end: "app = create_app()"
 
   - id: nl-14
@@ -289,7 +295,10 @@ queries:
     relevant:
       - path: src/noesis/core/hashdiff.py
         anchor: "@dataclass(frozen=True)"
-        anchor_end: "    \"\"\"Current content hash for every discovered file (new/changed/unchanged).\"\"\""
+        # anchor_end re-anchored 2026-08-09 (PR #42 review) off an attribute
+        # docstring onto the field it documents. The span still covers
+        # DiffResult's partition fields, which is what the query asks for.
+        anchor_end: "    hashes: Mapping[str, str] = field(default_factory=dict)"
       - path: src/noesis/core/indexer.py
         anchor: "@dataclass(frozen=True)"
         anchor_end: "    chunks_written: int"
