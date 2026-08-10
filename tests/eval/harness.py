@@ -61,7 +61,13 @@ SearchFn = Callable[[str], Awaitable[list[dict[str, Any]]]]
 class RelevantItem:
     path: str
     lines: tuple[int, int] | None = None
-    anchor: str | None = None  # the label as written; kept for error messages
+    # Both anchors as written. Kept after resolution — not only for error
+    # messages, but because the default-suite tripwire re-checks them against a
+    # fresh read of the file, and the END is the half that drifts: it is usually
+    # the last line of a body that grows (PR #42 review). Dropping anchor_end
+    # left 35 of 47 labels with only their start re-checked.
+    anchor: str | None = None
+    anchor_end: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +169,12 @@ def load_golden(path: str | Path, root: str | Path) -> list[GoldenQuery]:
                         f"anchor's line {start}"
                     )
             relevant.append(
-                RelevantItem(path=rel_path, lines=(start, end), anchor=anchor)
+                RelevantItem(
+                    path=rel_path,
+                    lines=(start, end),
+                    anchor=anchor,
+                    anchor_end=anchor_end,
+                )
             )
         queries.append(
             GoldenQuery(id=qid, category=category, query=text, relevant=tuple(relevant))
@@ -276,10 +287,11 @@ def score_query(
         gain = 0
         # Each chunk may credit at most one not-yet-credited item, so a file
         # holding two distinct relevant items can satisfy both — via two
-        # different chunks — which the golden set does have (structural-08
-        # labels two endpoints in routes.py). The NDCG gain stays 1 for the
-        # slot regardless: the file occupies one rank position however many
-        # items it answers.
+        # different chunks — which the golden set has twice: structural-03
+        # labels two async methods in embedder.py and structural-08 two
+        # endpoints in routes.py. The NDCG gain stays 1 for the slot
+        # regardless: the file occupies one rank position however many items
+        # it answers.
         #
         # The cap is per CHUNK, so two same-file labels inside one chunk still
         # credit only one and cap that query at 1/len(relevant) (ADR-67,
@@ -630,18 +642,60 @@ def zero_recall_queries(reports: dict[str, dict[str, Any]]) -> list[str]:
     return sorted(set.intersection(*per_channel))
 
 
+def rerank_query_deltas(
+    reports: dict[str, dict[str, Any]], metric: str = "recall@10"
+) -> tuple[list[tuple[str, float, float]], list[tuple[str, float, float]]]:
+    """Per-query ``(gained, lost)`` for hybrid+rerank against same-run hybrid.
+
+    The gate already asserts the reranker's *aggregate* win (ADR-35, layer 1),
+    and the aggregate is what the docs quote. What no artifact recorded was the
+    per-query cost underneath it: on the 2026-08-09 reference the reranker is
+    better on 5 queries and worse on 3, netting +0.05 on Recall@10 — a real win
+    paid for by demoting three answers it had already retrieved (PR #42 round-2
+    review, which found this by hand after a per-query claim went out wrong).
+
+    Reported, never gated. A cross-encoder re-ordering some queries downward
+    while winning overall is expected behaviour, not a regression; the reason to
+    surface it is that "which queries does rerank hurt" was previously
+    answerable only by re-reading raw JSON.
+    """
+    gained: list[tuple[str, float, float]] = []
+    lost: list[tuple[str, float, float]] = []
+    hybrid, rerank = reports.get("hybrid"), reports.get("hybrid+rerank")
+    if not hybrid or not rerank or "queries" not in hybrid or "queries" not in rerank:
+        return gained, lost
+    before = {row["id"]: row for row in hybrid["queries"]}
+    for row in rerank["queries"]:
+        prior = before.get(row["id"])
+        if prior is None or metric not in prior or metric not in row:
+            continue
+        if row[metric] > prior[metric]:
+            gained.append((row["id"], prior[metric], row[metric]))
+        elif row[metric] < prior[metric]:
+            lost.append((row["id"], prior[metric], row[metric]))
+    return gained, lost
+
+
 def render_report(
     reports: dict[str, dict[str, Any]],
     provenance: dict[str, Any],
     relational: list[str],
     mismatches: list[str],
     regression: list[str] | None,
+    rebaseline: bool = False,
 ) -> str:
     """The run, as markdown — verdicts first, so `-q` can no longer bury them.
 
     *regression* is None when the reference was missing or incomparable; that
     case renders the tables under an explicit NOT A GATE banner rather than
     letting a reader mistake an ungated table for a passing one.
+
+    *rebaseline* is True when this run wrote the reference. It has to reach the
+    file: re-baselining is the most consequential thing a run can do, the
+    persisted report is the artifact of record (`.claude/commands/eval.md` sends
+    the reader here rather than to the terminal), and before this it was
+    announced only by a stdout `print` that pytest's capture eats (PR #42
+    round-2 review).
     """
     lines = ["# Golden run", "", "## Verdicts", ""]
     lines.append(
@@ -651,11 +705,12 @@ def render_report(
     for failure in relational:
         lines.append(f"    - {failure}")
     if regression is None:
-        lines.append("- L2 regression vs reference: **NOT RUN** — no comparable reference")
+        lines.append(
+            "- L2 regression vs reference: **NOT RUN** — "
+            + ("this run re-baselined" if rebaseline else "no comparable reference")
+        )
         for reason in mismatches:
             lines.append(f"    - {reason}")
-        lines.append("")
-        lines.append("> **THE TABLES BELOW ARE NOT A GATE.**")
     else:
         lines.append(
             "- L2 regression vs reference: "
@@ -663,6 +718,16 @@ def render_report(
         )
         for failure in regression:
             lines.append(f"    - {failure}")
+    if rebaseline:
+        lines.append(
+            "- L3 re-baseline: **THIS RUN WROTE THE REFERENCE** "
+            "(`NOESIS_EVAL_REBASELINE=1`)"
+        )
+        lines.append(
+            "    - `tests/eval/baselines/reference.json` now holds these numbers. "
+            "Nothing measured them against a standard — they *are* the new "
+            "standard, and L1 above is the only assertion they passed."
+        )
     zero = zero_recall_queries(reports)
     lines.append(
         "- Zero-recall on every channel: "
@@ -673,6 +738,17 @@ def render_report(
             "    - A query no channel can answer is a label to inspect before it "
             "is a retrieval regression (issue #38, Finding C)."
         )
+    gained, lost = rerank_query_deltas(reports)
+    if gained or lost:
+        lines.append(
+            f"- Reranker vs same-run hybrid (recall@10, reported not gated): "
+            f"**+{len(gained)} / −{len(lost)}** queries"
+        )
+        for qid, before_v, after_v in lost:
+            lines.append(f"    - lost: {qid} {before_v:.2f} -> {after_v:.2f}")
+    if regression is None:
+        lines.append("")
+        lines.append("> **THE TABLES BELOW ARE NOT A GATE.**")
     lines += ["", "## Provenance", "", format_provenance(provenance)]
     lines += ["", "## Channels (quality + latency)", "", format_table(reports)]
     return "\n".join(lines) + "\n"

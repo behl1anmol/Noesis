@@ -70,6 +70,7 @@ from .harness import (
     regression_failures,
     relational_failures,
     render_report,
+    rerank_query_deltas,
     save_reference,
     score_query,
     zero_recall_queries,
@@ -618,7 +619,78 @@ def test_render_report_marks_an_ungated_run():
     assert "L2 regression vs reference: PASS" in gated
 
 
-# --- golden-set run (opt-in: uv run pytest tests/eval/ -m golden) -----------
+def test_render_report_stamps_a_run_that_rewrote_the_reference():
+    """The persisted report must say the run re-baselined.
+
+    Before this, the only signal was a stdout ``print`` — which pytest's capture
+    eats without ``-s`` — while ``report_latest.md`` said nothing more than
+    "no comparable reference". ``.claude/commands/eval.md`` sends the reader to
+    that file rather than to the terminal, so the artifact of record was silent
+    about the most consequential act a run can perform (PR #42 round-2 review).
+    """
+    reports = {"dense": _report(0.6, 0.7, 0.6)}
+    stamped = render_report(reports, _provenance(), [], [], None, True)
+    assert "THIS RUN WROTE THE REFERENCE" in stamped
+    assert "**NOT RUN** — this run re-baselined" in stamped
+    # Still not a gate: nothing measured these numbers against a standard.
+    assert "NOT A GATE" in stamped
+
+    # And an ordinary ungated run must NOT claim to have written anything.
+    ordinary = render_report(reports, _provenance(), [], ["no reference"], None)
+    assert "THIS RUN WROTE THE REFERENCE" not in ordinary
+    assert "**NOT RUN** — no comparable reference" in ordinary
+
+
+def _report_with_queries(base: dict, pairs) -> dict:
+    report = dict(base)
+    report["queries"] = [{"id": qid, "recall@10": value} for qid, value in pairs]
+    return report
+
+
+def test_rerank_query_deltas_names_the_queries_the_reranker_costs():
+    """Aggregate win, per-query cost — both, because only the first was visible.
+
+    On the 2026-08-09 reference the reranker gains 5 queries and loses 3 for a
+    net +0.05 on Recall@10. The three losses were discoverable only by reading
+    raw JSON, which is how a per-query claim about ``structural-08`` went out
+    wrong (PR #42 round-2 review).
+    """
+    reports = {
+        "hybrid": _report_with_queries(
+            _report(0.6, 0.7, 0.6), [("a", 1.0), ("b", 0.0), ("c", 0.5)]
+        ),
+        "hybrid+rerank": _report_with_queries(
+            _report(0.6, 0.7, 0.6), [("a", 0.0), ("b", 1.0), ("c", 0.5)]
+        ),
+    }
+    gained, lost = rerank_query_deltas(reports)
+    assert gained == [("b", 0.0, 1.0)]
+    assert lost == [("a", 1.0, 0.0)]
+
+    rendered = render_report(reports, _provenance(), [], [], [])
+    assert "**+1 / −1** queries" in rendered
+    assert "lost: a 1.00 -> 0.00" in rendered
+    # The query rerank left alone is noise, not a finding.
+    assert "c 0.50" not in rendered
+
+
+def test_rerank_query_deltas_is_silent_without_per_query_rows():
+    """Stored references carry only aggregates, so the section must vanish
+    rather than raise when the per-query rows are absent."""
+    reports = {"hybrid": _report(0.6, 0.7, 0.6), "hybrid+rerank": _report(0.7, 0.8, 0.7)}
+    assert rerank_query_deltas(reports) == ([], [])
+    assert "Reranker vs same-run hybrid" not in render_report(
+        reports, _provenance(), [], [], []
+    )
+
+
+# --- golden-set run (opt-in: uv run pytest tests/eval/ -m golden -s) --------
+#
+# `-s` is part of the invocation, not a nicety: pytest captures stdout and
+# releases it only on failure, so without it a thirteen-minute run prints a bare
+# filename and is indistinguishable from a hung one. Every documented command
+# carries it (PR #42 review); this comment is one of the two that had been
+# missed.
 
 
 @dataclass(frozen=True)
@@ -906,7 +978,9 @@ async def test_golden_set_gate_numbers(corpus):
 
     REPORT_PATH.write_text(json.dumps(reports, indent=2, sort_keys=True) + "\n")
     REPORT_MD_PATH.write_text(
-        render_report(reports, provenance, relational, mismatches, regression)
+        render_report(
+            reports, provenance, relational, mismatches, regression, rebaseline
+        )
     )
 
     print("\n\n== Channel comparison (quality + latency) ==", flush=True)
@@ -964,7 +1038,10 @@ async def test_golden_set_gate_numbers(corpus):
         + "\n  ".join(mismatches)
         + f"\nNothing was gated. The tables in {REPORT_MD_PATH} are NOT A GATE.\n"
         f"Review them, then re-baseline deliberately:\n"
-        f"  {REBASELINE_ENV}=1 uv run pytest tests/eval/ -m golden"
+        # -s deliberately: this string is handed to an operator at the exact
+        # moment they are about to start another long run, which is the one
+        # invocation most likely to be copied verbatim (PR #42 round-2 review).
+        f"  {REBASELINE_ENV}=1 uv run pytest tests/eval/ -m golden -s"
     )
     assert not regression, "quality regressed against the stored reference:\n  " + (
         "\n  ".join(regression)

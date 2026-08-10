@@ -60,6 +60,12 @@ def test_label_resolves_inside_its_file(query, item):
     resolution bug, and it covers the one real gap the bounds form had:
     ``load_golden`` caches each file's body at COLLECTION time, so a tree that
     changes between collection and execution would otherwise go unnoticed.
+
+    **Both** ends are checked. The first version of this assertion looked only
+    at ``anchor``, because ``RelevantItem`` dropped ``anchor_end`` once it had
+    been resolved — leaving 35 of 47 labels with only their start re-read, and
+    the end is the half that drifts, since it is usually the last line of a body
+    that grows (PR #42 round-2 review).
     """
     body = (
         (REPO_ROOT / item.path).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -75,6 +81,48 @@ def test_label_resolves_inside_its_file(query, item):
         f"{query.id}: anchor {item.anchor!r} resolved to {item.path}:{start}, "
         f"but that line now reads {body[start - 1]!r}"
     )
+    if item.anchor_end is not None:
+        assert item.anchor_end in body[end - 1], (
+            f"{query.id}: anchor_end {item.anchor_end!r} resolved to "
+            f"{item.path}:{end}, but that line now reads {body[end - 1]!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("query", "item"), LABELS, ids=[f"{q.id}:{i.path}" for q, i in LABELS]
+)
+def test_anchors_do_not_rely_on_indentation_to_be_unique(query, item):
+    """An anchor must still match exactly one line with its whitespace stripped.
+
+    ``resolve_anchor`` matches substrings including leading spaces, so an anchor
+    can be unique *only* because of its indent. ``nl-09``'s ``anchor_end`` was:
+    ``"        WHERE id = ?"`` matched one line of ``state.py``, while the bare
+    ``WHERE id = ?`` matched **13**. Adding one more SQL statement at that indent
+    would have made it ambiguous, and ``resolve_anchor`` raises on >1 match
+    exactly as loudly as on 0 — the same collection failure, and the same
+    re-baseline cost, as the prose anchors this PR removed (PR #42 round-2
+    review found it; it was missed the first time because it is a string literal
+    rather than prose).
+
+    This is a tripwire rather than a rule inside ``load_golden`` on purpose. An
+    indent-unique anchor is *fragile*, not *wrong* — it resolves correctly today
+    — so failing the loader would refuse a golden.yaml the harness can read, and
+    would fail the two-hour golden run for a style judgement. The judgement
+    belongs in the tier that runs on every pull request.
+    """
+    body = (
+        (REPO_ROOT / item.path).read_text(encoding="utf-8", errors="replace").splitlines()
+    )
+    for kind, text in (("anchor", item.anchor), ("anchor_end", item.anchor_end)):
+        if text is None:
+            continue
+        bare = text.strip()
+        hits = sum(1 for line in body if bare in line)
+        assert hits == 1, (
+            f"{query.id}: {kind} {text!r} is unique only with its indentation — "
+            f"stripped to {bare!r} it matches {hits} lines of {item.path}. "
+            f"Lengthen it onto content that is unique on its own."
+        )
 
 
 @pytest.mark.parametrize(

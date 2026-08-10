@@ -116,7 +116,12 @@ queries:
         anchor_end: "        state.finish_run(conn, run_id, \"failed\", error=str(exc) or type(exc).__name__)"
       - path: src/noesis/core/state.py
         anchor: "def finish_run("
-        anchor_end: "        WHERE id = ?"
+        # anchor_end re-anchored 2026-08-10 (PR #42 round-2 review). It was
+        # "        WHERE id = ?", unique only by its 8-space indent — the bare
+        # fragment is on 13 lines of state.py. Now the SET clause's last line,
+        # which is unique on its own content. Span still ends inside the same
+        # UPDATE, one line earlier.
+        anchor_end: "          finished_at = ?, error = ?"
 
   - id: nl-10
     category: nl
