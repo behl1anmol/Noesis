@@ -3,60 +3,342 @@
     "dense": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 46.1155449997932,
-          "latency_p95_ms": 83.03874000012001,
+          "latency_p50_ms": 46.71220499949413,
+          "latency_p95_ms": 117.28945200047747,
           "n_queries": 14,
           "ndcg@10": 0.4261733128684399,
           "recall@10": 0.5357142857142857,
           "recall@5": 0.5
         },
         "structural": {
-          "latency_p50_ms": 40.70941000009043,
-          "latency_p95_ms": 77.92788899996594,
+          "latency_p50_ms": 41.08433100009279,
+          "latency_p95_ms": 67.24873699931777,
           "n_queries": 12,
           "ndcg@10": 0.3805878158969988,
           "recall@10": 0.5833333333333334,
           "recall@5": 0.5
         },
         "symbol": {
-          "latency_p50_ms": 32.24854200016125,
-          "latency_p95_ms": 60.37250100007441,
+          "latency_p50_ms": 36.86377700068988,
+          "latency_p95_ms": 53.836385000977316,
           "n_queries": 14,
-          "ndcg@10": 0.5534997462730282,
+          "ndcg@10": 0.5518658995748361,
           "recall@10": 0.7857142857142857,
           "recall@5": 0.7142857142857143
         }
       },
       "overall": {
-        "latency_p50_ms": 36.12339500023154,
-        "latency_p95_ms": 77.92788899996594,
+        "latency_p50_ms": 42.54621299878636,
+        "latency_p95_ms": 66.36333499955072,
         "n_queries": 40,
-        "ndcg@10": 0.45706191546861347,
+        "ndcg@10": 0.4564900691242462,
         "recall@10": 0.6375,
         "recall@5": 0.575
-      }
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.18457569677956817,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.3333333333333333,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.19342640361727081,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.6131471927654584,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.20438239758848611,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
     },
     "dense (python-only)": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 36.520375999771204,
-          "latency_p95_ms": 52.88440799995442,
+          "latency_p50_ms": 40.20883200064418,
+          "latency_p95_ms": 63.06483200023649,
           "n_queries": 14,
           "ndcg@10": 0.5639284197245749,
           "recall@10": 0.6071428571428571,
           "recall@5": 0.6071428571428571
         },
         "structural": {
-          "latency_p50_ms": 39.68891599970448,
-          "latency_p95_ms": 48.816659999829426,
+          "latency_p50_ms": 41.200091000064276,
+          "latency_p95_ms": 72.56022000001394,
           "n_queries": 12,
           "ndcg@10": 0.5301084082921642,
           "recall@10": 0.75,
           "recall@5": 0.7083333333333334
         },
         "symbol": {
-          "latency_p50_ms": 37.69387599959373,
-          "latency_p95_ms": 60.50748300003761,
+          "latency_p50_ms": 44.86193400043703,
+          "latency_p95_ms": 68.87114700111852,
           "n_queries": 14,
           "ndcg@10": 0.610107255363702,
           "recall@10": 0.7857142857142857,
@@ -64,35 +346,317 @@
         }
       },
       "overall": {
-        "latency_p50_ms": 39.33347900010631,
-        "latency_p95_ms": 53.47627499986629,
+        "latency_p50_ms": 42.25969800063467,
+        "latency_p95_ms": 68.73482199989667,
         "n_queries": 40,
         "ndcg@10": 0.5699450087685463,
         "recall@10": 0.7125,
         "recall@5": 0.7
-      }
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.6131471927654584,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.3065735963827292,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.20438239758848611,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.6131471927654584,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.23719771276929622,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
     },
     "hybrid": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 75.25799299992286,
-          "latency_p95_ms": 127.60915099988779,
+          "latency_p50_ms": 71.0994090004533,
+          "latency_p95_ms": 95.56053000051179,
           "n_queries": 14,
           "ndcg@10": 0.4748547216345688,
           "recall@10": 0.6428571428571429,
           "recall@5": 0.5714285714285714
         },
         "structural": {
-          "latency_p50_ms": 71.47746499958885,
-          "latency_p95_ms": 93.81216100018719,
+          "latency_p50_ms": 79.43996799986053,
+          "latency_p95_ms": 111.32932500004245,
           "n_queries": 12,
           "ndcg@10": 0.5159599448556639,
           "recall@10": 0.8333333333333334,
           "recall@5": 0.625
         },
         "symbol": {
-          "latency_p50_ms": 66.72926900000675,
-          "latency_p95_ms": 75.34248599995408,
+          "latency_p50_ms": 75.71723200089764,
+          "latency_p95_ms": 111.81641099938133,
           "n_queries": 14,
           "ndcg@10": 0.5221859113905175,
           "recall@10": 0.8571428571428571,
@@ -100,35 +664,317 @@
         }
       },
       "overall": {
-        "latency_p50_ms": 72.45075099990572,
-        "latency_p95_ms": 98.32764199973099,
+        "latency_p50_ms": 75.71723200089764,
+        "latency_p95_ms": 111.27848199976142,
         "n_queries": 40,
         "ndcg@10": 0.5037522050154795,
         "recall@10": 0.775,
         "recall@5": 0.6625
-      }
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.31546487678572877,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.3065735963827292,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.20438239758848611,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.9197207891481876,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.19342640361727081,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
     },
     "hybrid+rerank": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 8677.297883999927,
-          "latency_p95_ms": 10781.225759000336,
+          "latency_p50_ms": 9100.401998000962,
+          "latency_p95_ms": 10774.699158999283,
           "n_queries": 14,
           "ndcg@10": 0.43970288794947227,
           "recall@10": 0.6428571428571429,
           "recall@5": 0.5714285714285714
         },
         "structural": {
-          "latency_p50_ms": 9087.899884999388,
-          "latency_p95_ms": 9492.261168000368,
+          "latency_p50_ms": 9493.298232000598,
+          "latency_p95_ms": 9871.474749001209,
           "n_queries": 12,
           "ndcg@10": 0.5874800170265568,
           "recall@10": 0.8333333333333334,
           "recall@5": 0.8333333333333334
         },
         "symbol": {
-          "latency_p50_ms": 8718.5267509999,
-          "latency_p95_ms": 9628.640640999947,
+          "latency_p50_ms": 9171.725530000913,
+          "latency_p95_ms": 9989.730770001188,
           "n_queries": 14,
           "ndcg@10": 0.7230139765210964,
           "recall@10": 1.0,
@@ -136,55 +982,619 @@
         }
       },
       "overall": {
-        "latency_p50_ms": 8900.72477800004,
-        "latency_p95_ms": 9506.62738200026,
+        "latency_p50_ms": 9258.480315998895,
+        "latency_p95_ms": 9871.474749001209,
         "n_queries": 40,
         "ndcg@10": 0.583194907672666,
         "recall@10": 0.825,
         "recall@5": 0.775
-      }
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.6131471927654584,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.9197207891481876,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.6934264036172708,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
     },
     "sparse": {
       "categories": {
         "nl": {
-          "latency_p50_ms": 35.366297000109626,
-          "latency_p95_ms": 44.79314299987891,
+          "latency_p50_ms": 28.539566999825183,
+          "latency_p95_ms": 53.084327999386005,
           "n_queries": 14,
-          "ndcg@10": 0.3476514107996872,
+          "ndcg@10": 0.3740135712588688,
           "recall@10": 0.5357142857142857,
           "recall@5": 0.5
         },
         "structural": {
-          "latency_p50_ms": 27.922116999889113,
-          "latency_p95_ms": 33.17272599997523,
+          "latency_p50_ms": 27.752857999075786,
+          "latency_p95_ms": 32.863655000255676,
           "n_queries": 12,
           "ndcg@10": 0.6329653444892821,
           "recall@10": 0.8333333333333334,
           "recall@5": 0.7916666666666666
         },
         "symbol": {
-          "latency_p50_ms": 20.04438200037839,
-          "latency_p95_ms": 29.310055999758333,
+          "latency_p50_ms": 21.619181999994908,
+          "latency_p95_ms": 34.28266299852112,
           "n_queries": 14,
-          "ndcg@10": 0.4015854050925249,
+          "ndcg@10": 0.406537079515854,
           "recall@10": 0.6428571428571429,
           "recall@5": 0.5714285714285714
         }
       },
       "overall": {
-        "latency_p50_ms": 27.557185999739886,
-        "latency_p95_ms": 42.65908800016405,
+        "latency_p50_ms": 27.45747799963283,
+        "latency_p95_ms": 34.28266299852112,
         "n_queries": 40,
-        "ndcg@10": 0.4521224889090589,
+        "ndcg@10": 0.4630823311179376,
         "recall@10": 0.6625,
         "recall@5": 0.6125
-      }
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.21840743681816419,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.23719771276929622,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.8503449055347546,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.18457569677956817,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
     }
   },
   "provenance": {
     "corpus": {
-      "chunks": 563,
-      "commit": "cd054a20d6132fcbc49ad024d885d9a2fbad9e3e",
+      "chunks": 566,
+      "commit": "30cd22934919ca32c67fd719b960bcd01b0552af",
       "dirty": false,
       "files_indexed": 184,
       "files_total": 184,
@@ -200,8 +1610,8 @@
       "torch": "2.12.1+cu130"
     },
     "duration": {
-      "measure_s": 360.2,
-      "total_s": 691.0
+      "measure_s": 374.8,
+      "total_s": 924.7
     },
     "labels": {
       "golden_sha256": "6bcd4b113d2e1fba07074b13a57430b224ec2284ac675330b55198012d2d1231",
