@@ -90,7 +90,7 @@ This is why `store` is a hard comparability term: an embedded-measured reference
 
 ### Baselines
 
-- `tests/eval/baselines/reference.json` — the single **living** reference. All channels plus a provenance block: corpus (files, chunks, commit, path-manifest hash), models, store kind and server version, a digest of the golden questions, and device.
+- `tests/eval/baselines/reference.json` — the single **living** reference. All channels plus a provenance block: corpus (files, chunks, commit, path-manifest hash), models, store kind and server version, a digest of the golden questions, device, and the run's **duration** (`measure_s`, the five channels' evaluation loop; `total_s`, adding collection, the corpus build and both model loads). Duration is recorded as evidence and is never a comparability term — a reference must not stop gating because the machine was busier that day. It exists so a claim about how long the tier takes can be checked against a committed artifact instead of quoted from memory.
 - `tests/eval/baselines/m2_dense.json` — a **frozen** historical record, read by nothing.
 
 No run writes a baseline implicitly. Both provenance-blind writers are gone: the write-if-missing that made whichever run got there first the standard (the mechanism lesson 8 was recorded for), and two unconditional writes that dirtied the tree on every run.

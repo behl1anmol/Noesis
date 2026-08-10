@@ -89,6 +89,19 @@ REPORT_MD_PATH = EVAL_DIR / "report_latest.md"
 # structurally incapable of re-baselining, and recording a new measurement
 # standard stays a deliberate human act with a decision row behind it.
 REBASELINE_ENV = "NOESIS_EVAL_REBASELINE"
+
+# Wall clock from this module's import to the moment provenance is assembled.
+#
+# Recorded because runtime claims about this tier were being quoted from memory:
+# "a thirteen-minute run", "12m58s" — neither appeared in reference.json, in
+# report_latest.*, or in any decision row, because the harness stored no
+# duration at all (PR #42 round-2 review). A number nobody can re-derive from a
+# committed artifact is exactly what hard rule 9 forbids quoting.
+#
+# Import happens at collection, so this covers the corpus build and both model
+# loads as well as the measurement — which is what an operator actually waits
+# for. `measure_s` beside it isolates the part that is retrieval.
+_IMPORTED_AT = time.perf_counter()
 # ADR-66. Unset -> embedded Qdrant, exactly as before.
 QDRANT_URL_ENV = "NOESIS_EVAL_QDRANT_URL"
 
@@ -593,6 +606,21 @@ def test_reference_mismatches_tolerates_ordinary_corpus_growth():
     assert reference_mismatches(_provenance(), run) == []
 
 
+def test_run_duration_is_recorded_but_never_a_comparability_term():
+    """`duration` is evidence, like `manifest_sha256` — not a predicate.
+
+    The run's wall time is recorded so a claim like "a thirteen-minute run" can
+    be checked against a committed artifact instead of quoted from memory (PR
+    #42 round-2 review: the harness stored no duration at all). It must never
+    gate: latency already has its own measured columns, and a reference that
+    stopped being comparable because the machine was busier that day would be a
+    gate that fires on nothing anyone can act on.
+    """
+    slower = _provenance(duration={"measure_s": 4000.0, "total_s": 5000.0})
+    faster = _provenance(duration={"measure_s": 40.0, "total_s": 50.0})
+    assert reference_mismatches(slower, faster) == []
+
+
 def test_zero_recall_queries_flags_only_universal_misses():
     def with_queries(*pairs):
         report = _report(0.5, 0.5, 0.5)
@@ -905,6 +933,7 @@ async def test_golden_set_gate_numbers(corpus):
     }
     try:
         reports: dict[str, dict] = {}
+        measure_started = time.perf_counter()
         # Emitted per channel, flushed, because this tier runs for minutes to
         # hours and used to print nothing at all until it finished: stdout is
         # block-buffered to a file, so even the device line sat unflushed. A
@@ -919,6 +948,7 @@ async def test_golden_set_gate_numbers(corpus):
                 f"  ({time.perf_counter() - started:.0f}s)",
                 flush=True,
             )
+        measure_s = time.perf_counter() - measure_started
 
         # Assert the filter's contract rather than a ranking relation. The
         # monotonicity you would expect (python-only recall >= unfiltered) is
@@ -964,6 +994,13 @@ async def test_golden_set_gate_numbers(corpus):
         },
         "device": device,
         "date": date.today().isoformat(),
+        # Seconds, one decimal. `measure_s` is the five channels' evaluation
+        # loop; `total_s` adds collection, the corpus build and both model
+        # loads — the number an operator experiences.
+        "duration": {
+            "measure_s": round(measure_s, 1),
+            "total_s": round(time.perf_counter() - _IMPORTED_AT, 1),
+        },
     }
 
     reference = load_reference(REFERENCE_PATH)
