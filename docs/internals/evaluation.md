@@ -54,22 +54,26 @@ Layer 1 is corpus-independent by construction — every channel sees the same co
 
 The absolute floor beside the relative band is deliberate arithmetic. The gate measures a relative drop, but one query moving changes the mean by `1/n` absolutely — which at a low score is a huge *relative* figure and at a high score a small one. Requiring both means "one query is noise" stays true at every score level.
 
-### The current reference (2026-08-09)
+### The current reference (2026-08-10)
 
-Measured under content-anchored labels ([ADR-64](../project/decisions.md)) and grouped scoring ([ADR-67](../project/decisions.md)) — 184 files, 559 chunks, embedded Qdrant, CodeRankEmbed and bge-reranker-v2-m3 both on CUDA at their default batch sizes:
+Measured under content-anchored labels ([ADR-64](../project/decisions.md)) and grouped scoring ([ADR-67](../project/decisions.md)) — 184 files, 563 chunks, embedded Qdrant, CodeRankEmbed and bge-reranker-v2-m3 both on CUDA at their default batch sizes (32 / 16), at commit `cd054a2`. The run took **11 m 31 s** from collection to the report being written — corpus build and both model loads included — of which **6 m 00 s** was the five channels' evaluation loop. Both figures come from the reference's own `provenance.duration`, not from a terminal.
 
 | channel | Recall@5 | Recall@10 | NDCG@10 | p50 latency |
 |---|---|---|---|---|
-| dense | 0.575 | 0.637 | 0.458 | 45 ms |
-| dense (python-only) | 0.700 | 0.713 | 0.570 | 49 ms |
-| sparse | 0.613 | 0.662 | 0.461 | 29 ms |
-| **hybrid** | 0.662 | **0.775** | 0.502 | 80 ms |
-| **hybrid+rerank** | 0.775 | **0.825** | 0.583 | 8 551 ms |
+| dense | 0.575 | 0.637 | 0.457 | 36 ms |
+| dense (python-only) | 0.700 | 0.713 | 0.570 | 39 ms |
+| sparse | 0.613 | 0.662 | 0.452 | 28 ms |
+| **hybrid** | 0.662 | **0.775** | 0.504 | 72 ms |
+| **hybrid+rerank** | 0.775 | **0.825** | 0.583 | 8 901 ms |
 
-!!! note "What re-anchoring three labels did to the numbers: nothing measurable"
-    This reference replaces the 2026-08-08 one because the PR #42 review moved `nl-07`, `nl-13` and `structural-04` off docstring prose onto signature lines, which changes `golden_sha256` and so makes the older reference incomparable by construction. **Every Recall figure is identical across all five channels and all three categories**, and hybrid and hybrid+rerank are identical on NDCG too. Only dense and sparse NDCG@10 moved, by at most **0.010** — the largest single move is dense/`symbol` at −0.0094, which reads as 0.009 only at this page's three decimals — rank-order noise, not a change in what matched. That is the expected result: widening a label inside a file it already labelled cannot change that file's group rank, and group rank is what NDCG credits.
+!!! note "Why this replaced the 2026-08-09 reference, and what moved"
+    `nl-09`'s `anchor_end` was re-anchored (PR #42 round-2 review — it was unique only by its indentation), which changes `golden_sha256` and makes the older reference incomparable by construction.
 
-    Latency rose on every channel, but **not** by a common factor, and the exception is the informative one: dense ×2.96, `dense (python-only)` ×2.83, hybrid ×2.42, sparse ×2.20 — and `hybrid+rerank` only **×1.30** (6581 → 8551 ms). The channel dominated by model forward time barely moved, while `sparse`, which runs no model at all, more than doubled (13 ms → 29 ms). That rules retrieval out as the cause and points at machine state: the two runs used different batch sizes (8/4 then, the defaults 32/16 now) on an 8 GB GPU where the warning box below applies, but nothing here isolates which factor dominates, and this report cannot. Latency is reported and never gated, precisely so a difference nobody has explained cannot fail a run.
+    **Every Recall figure is identical**: all five channels, all three categories, both k. Only NDCG@10 moved, and only by rank order — the largest single move is `sparse`/`nl` at **−0.0264**, with `hybrid`/`symbol` at **+0.0094** in the other direction.
+
+    Those NDCG moves are **not** the re-anchoring. This PR edits the documentation, and the corpus *is* this repository: 559 chunks became 563. BM25 scores depend on corpus-wide term statistics, so four more markdown chunks shift IDF, which is exactly why `sparse` moved most and moved most on `nl` — prose queries against a haystack that gained prose. Re-anchoring `nl-09` cannot move a rank at all: it narrows a span by one line inside a file it already labelled, and group rank is what NDCG credits.
+
+    **Latency, at last isolated.** The 2026-08-09 note reported every channel 2.2–3.0× slower than 2026-08-08 and could not separate "different batch sizes (8/4 then, 32/16 now)" from "machine state". This run holds the batch sizes fixed at 32/16 and the spread is dense ×0.81, python-only ×0.80, sparse ×0.94, hybrid ×0.91, hybrid+rerank ×1.04 — i.e. two runs of the same configuration on the same GPU differ by roughly ±20 % on the model-free channels. Run-to-run variance of that order accounts for most of what the earlier note attributed to an unknown; a 2.2–3.0× jump is still larger than this and remains unexplained. Latency is reported and never gated, precisely so a difference nobody has explained cannot fail a run.
 
 **M3's exit criterion, asserted rather than assumed for the first time:** hybrid beats dense on Recall@10 overall (0.775 vs 0.637) and on the symbol subset (0.857 vs 0.786). With rerank, symbol Recall@10 reaches **1.000**.
 
@@ -102,7 +106,7 @@ This is why `store` is a hard comparability term: an embedded-measured reference
 
 No run writes a baseline implicitly. Both provenance-blind writers are gone: the write-if-missing that made whichever run got there first the standard (the mechanism lesson 8 was recorded for), and two unconditional writes that dirtied the tree on every run.
 
-**Pass `-s`.** The tier prints its compute device and each channel's Recall@10 as it completes, and every print flushes — but pytest captures stdout by default and releases it only on failure, so without `-s` a thirteen-minute run shows a bare `tests/eval/test_golden.py` and nothing else. A run with no progress signal is indistinguishable from a hung one; that has already cost wrong diagnoses. `-q` is *not* the culprit and never was: measured on a scratch test, bare `pytest` hides the print exactly as `-q` does, while both `-s` and `-s -q` show it. The suppressor is the capture, which is why the landed fix adds `-s` everywhere rather than dropping `-q`. This is the same shape as the swallowed-table bug ADR-65 was written for: the fix that made the run legible was defeated by the invocation the docs recommended.
+**Pass `-s`.** The tier prints its compute device and each channel's Recall@10 as it completes, and every print flushes — but pytest captures stdout by default and releases it only on failure, so without `-s` an eleven-minute run shows a bare `tests/eval/test_golden.py` and nothing else. A run with no progress signal is indistinguishable from a hung one; that has already cost wrong diagnoses. `-q` is *not* the culprit and never was: measured on a scratch test, bare `pytest` hides the print exactly as `-q` does, while both `-s` and `-s -q` show it. The suppressor is the capture, which is why the landed fix adds `-s` everywhere rather than dropping `-q`. This is the same shape as the swallowed-table bug ADR-65 was written for: the fix that made the run legible was defeated by the invocation the docs recommended.
 
 Every run also writes `tests/eval/report_latest.md` — verdicts first, then provenance, then the tables — plus `report_latest.json`. Both are gitignored. The report lists any query scoring zero on *every* channel, because four channels failing the same query is far likelier to be a broken label than a retrieval failure; printing that is what would have surfaced the label rot at the first run rather than two milestones later.
 
@@ -148,7 +152,7 @@ All four are read only by the golden harness (`tests/eval/test_golden.py`), neve
 
 The default suite runs against `FakeEmbedder` and an in-memory Qdrant — no model download, no Docker. The `integration` and `golden` marks are excluded by default.
 
-**No layer of the golden gate runs in CI**, and that is deliberate: the tier takes roughly two hours and multi-GB model weights, and a CPU run would produce latency numbers comparable to no recorded device. The part that *is* cheap — label integrity — is unmarked and therefore runs in the `tests` job on every pull request. Anything that depends on measured retrieval quality is run by a human, on purpose, and recorded.
+**No layer of the golden gate runs in CI**, and that is deliberate: the tier downloads multi-GB model weights, needs a GPU to finish in a sane time (11 m 31 s on the machine that recorded the current reference; a CPU run is far longer and produces latency numbers comparable to no recorded device), and every run is meant to be recorded. The part that *is* cheap — label integrity — is unmarked and therefore runs in the `tests` job on every pull request. Anything that depends on measured retrieval quality is run by a human, on purpose, and recorded.
 
 ## The M4 reranker gate — measured decision
 

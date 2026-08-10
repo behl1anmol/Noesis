@@ -2,8 +2,10 @@
 description: Run the golden evaluation harness and report its gate verdicts
 allowed-tools: Bash(uv run pytest *:*), Bash(python .claude/scripts/devlog.py *:*), Read
 ---
-1. Run `uv run pytest tests/eval/ -m golden -s` (the golden-set harness). It takes
-   roughly two hours and loads the real embedder and reranker.
+1. Run `uv run pytest tests/eval/ -m golden -s` (the golden-set harness). It loads
+   the real embedder and reranker; the last recorded run took 11 m 31 s on a
+   CUDA GPU (`provenance.duration` in `tests/eval/baselines/reference.json`),
+   and far longer on CPU.
 2. Read `tests/eval/report_latest.md` — verdicts first, then provenance, then
    the tables. Do NOT report from the terminal output alone: pytest captures
    stdout, so the printed tables reach a terminal only when `-s` is passed, and

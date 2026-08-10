@@ -107,7 +107,7 @@ def test_anchors_do_not_rely_on_indentation_to_be_unique(query, item):
     This is a tripwire rather than a rule inside ``load_golden`` on purpose. An
     indent-unique anchor is *fragile*, not *wrong* — it resolves correctly today
     — so failing the loader would refuse a golden.yaml the harness can read, and
-    would fail the two-hour golden run for a style judgement. The judgement
+    would fail the whole golden run for a style judgement. The judgement
     belongs in the tier that runs on every pull request.
     """
     body = (

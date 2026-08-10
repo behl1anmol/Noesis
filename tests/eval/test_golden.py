@@ -749,7 +749,7 @@ def test_rerank_query_deltas_is_silent_without_per_query_rows():
 # --- golden-set run (opt-in: uv run pytest tests/eval/ -m golden -s) --------
 #
 # `-s` is part of the invocation, not a nicety: pytest captures stdout and
-# releases it only on failure, so without it a thirteen-minute run prints a bare
+# releases it only on failure, so without it a run of this length prints a bare
 # filename and is indistinguishable from a hung one. Every documented command
 # carries it (PR #42 review); this comment is one of the two that had been
 # missed.
@@ -1015,7 +1015,7 @@ async def test_golden_set_gate_numbers(corpus):
         # Assert the filter's contract rather than a ranking relation. The
         # monotonicity you would expect (python-only recall >= unfiltered) is
         # true in principle but can flip on a tie-break, and a flaky assertion
-        # on a two-hour run is worse than none. This cannot flake, and it is
+        # on a run this long is worse than none. This cannot flake, and it is
         # what catches the filter being dropped from one prefetch.
         filtered = await search_code(
             store, embedder, golden[0].query, project_id, top_k=10, language="python"
