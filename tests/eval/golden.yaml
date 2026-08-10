@@ -8,8 +8,14 @@
 # Labeling rules used by the drafting pass:
 #   - Every `path` was verified to exist; every symbol query term was
 #     verified present in its labeled file via grep, definition site first.
-#   - `lines` is optional and generous (whole function/class); a result hit
-#     counts on file match, plus span overlap when `lines` is present.
+#   - A label addresses CONTENT, never a line number (ADR-64). `anchor` is a
+#     substring occurring exactly once in the labeled file; `anchor_end` is an
+#     optional second one that widens the span to a range. Both are resolved
+#     against the tree being measured, and a result hit counts on file match
+#     plus overlap with that resolved span. A `lines` key is refused by
+#     `load_golden`: stored ranges rotted to 22 of 46 broken in one month
+#     (issue #38, Finding C), and the header you are reading described them as
+#     the rule while the section below had already drifted off them.
 #   - 1-3 relevant items per query; code files only, never docs.
 #   - Categories: nl (natural-language intent, no identifiers), symbol
 #     (verbatim identifier lookups — the BM25 channel's reason to exist),

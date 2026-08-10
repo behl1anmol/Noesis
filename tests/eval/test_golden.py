@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import time
@@ -223,6 +224,31 @@ def test_one_file_can_answer_two_relevant_items_via_different_chunks():
     assert score_query(results, relevant)["recall@10"] == 1.0
 
 
+def test_credit_is_assigned_optimally_not_first_fit():
+    """A chunk must not spend itself on an item another chunk could have taken.
+
+    ADR-67 removed the case where a matching chunk was discarded because a
+    sibling outranked it. This is the same defect one level lower, inside the
+    assignment: chunk A overlaps both labels, chunk B overlaps only L0. First
+    fit hands A to L0 (it is simply first in the list), which leaves B with
+    nothing to credit and L0's partner unmatched — 0.5, with *both* labels
+    sitting inside retrieved chunks. Reproduced against the pre-fix scorer:
+    ``recall@10 == 0.5``.
+
+    Only the assignment is at stake, so both orderings are asserted: whichever
+    label the wide chunk meets first, the pair is coverable and must score 1.0.
+    """
+    l0, l1 = RelevantItem("f.py", lines=(10, 12)), RelevantItem("f.py", lines=(40, 42))
+    wide, narrow = result("f.py", 1, 50), result("f.py", 9, 13)
+    assert score_query([wide, narrow], (l0, l1))["recall@10"] == 1.0
+    assert score_query([wide, narrow], (l1, l0))["recall@10"] == 1.0
+    # The file still occupies one rank slot, so NDCG is unchanged by the extra
+    # credit — one slot of gain against an ideal of two items.
+    assert score_query([wide, narrow], (l0, l1))["ndcg@10"] == pytest.approx(
+        1 / (1 + 1 / math.log2(3)), abs=1e-9
+    )
+
+
 def test_grouping_still_counts_one_file_as_one_rank_slot():
     """The property the old dedupe existed to protect, kept intact: a file's
     many chunks must not flood the ranking and push a second relevant file
@@ -322,6 +348,32 @@ def test_load_golden_resolves_anchors(tmp_path):
         )
     )
     assert load_golden(good, tmp_path)[0].relevant[0].lines == (4, 5)
+
+
+def test_load_golden_rejects_unknown_and_legacy_item_keys(tmp_path):
+    """A mistyped key must raise, not be dropped.
+
+    Reproduced against the pre-fix loader: an item carrying ``lines: [1, 3]``
+    plus a junk key loaded clean, ``lines`` was ignored, and the span came from
+    the anchor alone. The harmful case is a typo of ``anchor_end`` — it silently
+    shrinks the span to one line, and ``matches`` is a span-overlap test, so the
+    label quietly credits less than it was written to credit.
+    """
+    (tmp_path / "a.py").write_text("import os\n\n\ndef target():\n    return 1\n")
+    bad = tmp_path / "golden.yaml"
+    base = '    relevant:\n      - path: a.py\n        anchor: "def target():"\n'
+
+    bad.write_text(_golden_yaml(base + "        lines: [1, 3]\n"))
+    with pytest.raises(ValueError, match="ADR-64"):
+        load_golden(bad, tmp_path)
+
+    bad.write_text(_golden_yaml(base + '        anchor-end: "return 1"\n'))
+    with pytest.raises(ValueError, match="unknown key"):
+        load_golden(bad, tmp_path)
+
+    # The margin: the correctly spelled key still loads, and still widens.
+    bad.write_text(_golden_yaml(base + '        anchor_end: "return 1"\n'))
+    assert load_golden(bad, tmp_path)[0].relevant[0].lines == (4, 5)
 
 
 def test_load_golden_rejects_unresolvable_anchors(tmp_path):

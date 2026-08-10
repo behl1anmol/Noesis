@@ -30,11 +30,15 @@ Scoring rules (deliberate, stated so the numbers are reproducible):
   matching (ADR-67). Collapsing to the best-ranked chunk alone discarded
   correct answers whenever a non-matching chunk of the right file outranked
   the matching one.
-- Recall@k = fraction of a query's relevant items matched by at least one
-  result in the top k (after dedup), averaged over queries.
-- NDCG@10 uses binary gains with greedy credit: walking the deduped ranking,
-  a result gains 1 only the first time it matches a not-yet-credited
-  relevant item; IDCG assumes all relevant items ranked first.
+- Recall@k = fraction of a query's relevant items matched, using only the
+  chunks in the top k rank slots, averaged over queries. Chunks are assigned
+  to items by maximum bipartite matching (ADR-68), each chunk crediting at
+  most one item: first-fit assignment could spend a chunk on an item another
+  chunk was the only one able to cover, losing credit for chunks that had in
+  fact been retrieved.
+- NDCG@10 uses binary gains: a rank slot gains 1 when it grows the matching,
+  whatever number of items it adds, so a file scores one slot however many of
+  its labels it answers; IDCG assumes all relevant items ranked first.
 """
 
 from __future__ import annotations
@@ -139,6 +143,30 @@ def load_golden(path: str | Path, root: str | Path) -> list[GoldenQuery]:
             rel_path = item.get("path")
             if not rel_path:
                 raise ValueError(f"{path}: query {qid!r} has a relevant item with no path")
+            # Unknown keys are refused rather than ignored. A label is data the
+            # gate's numbers are computed from, and the silent failure here is
+            # not hypothetical: a mistyped `anchor_end` (`anchor-end`,
+            # `anchorend`) was accepted and dropped, collapsing the span to the
+            # single anchor line. `matches` is a span-overlap test, so that
+            # narrows what the label credits and can turn a hit into a miss —
+            # with nothing raised and no line of the file changed. `lines` gets
+            # its own message because it is the one key a reader of the old
+            # format would reach for, and ADR-64 is the reason it is gone.
+            unknown = set(item) - {"path", "anchor", "anchor_end"}
+            if "lines" in unknown:
+                raise ValueError(
+                    f"{path}: query {qid!r} item {rel_path!r} carries 'lines' — "
+                    f"ADR-64 replaced stored line numbers with anchors, and a "
+                    f"'lines' key is silently ignored rather than honoured. "
+                    f"Delete it; the span comes from anchor/anchor_end."
+                )
+            if unknown:
+                raise ValueError(
+                    f"{path}: query {qid!r} item {rel_path!r} has unknown "
+                    f"key(s) {sorted(unknown)} — allowed: path, anchor, "
+                    f"anchor_end. A typo here is silently dropped, and a "
+                    f"dropped 'anchor_end' shrinks the span the label credits."
+                )
             anchor = item.get("anchor")
             if not anchor or not isinstance(anchor, str):
                 raise ValueError(
@@ -279,40 +307,74 @@ def score_query(
     relevant: tuple[RelevantItem, ...],
     ks: tuple[int, ...] = (5, 10),
 ) -> dict[str, float]:
-    """Recall@k for each k plus NDCG@10 for one query (rules in module doc)."""
+    """Recall@k for each k plus NDCG@10 for one query (rules in module doc).
+
+    Chunk-to-item assignment is a maximum bipartite matching, not a first-fit
+    walk. Each chunk may still credit at most one item — that cap is what stops
+    one wide chunk sweeping every label in its file — but *which* item it
+    credits is chosen so the query scores as well as its retrieved chunks
+    allow. First-fit could not do that, and lost credit for chunks it had
+    already retrieved:
+
+        labels  L0 = f.py[10,12]        L1 = f.py[40,42]
+        chunks  A  = f.py[1,50]  (overlaps L0 and L1)
+                B  = f.py[9,13]  (overlaps L0 only)
+
+    First-fit gave A to L0 because L0 comes first, leaving B with nothing to
+    credit and L1 unmatched: recall 0.5, with both labels sitting in retrieved
+    chunks. Matching gives A to L1 and B to L0: recall 1.0. That is ADR-67's
+    own defect — a retrieved, matching chunk earning no credit — one level
+    below where ADR-67 fixed it, and it is reachable on exactly the labels
+    ADR-67 was written for: structural-03 (two async methods in embedder.py)
+    and structural-08 (two endpoints in routes.py) are the two golden queries
+    with two labels in one file.
+
+    The matching is built incrementally in rank order, so the size after slot
+    *r* is the maximum matching over slots 0..r — which is what recall@k needs,
+    and it stays monotone in k. NDCG gain is still 1 per slot that adds any
+    match: the file occupies one rank position however many items it answers.
+    """
     groups = group_by_path(results)
-    matched_rank: dict[int, int] = {}  # relevant index -> rank credited
-    gains: list[int] = []
-    for rank, group in enumerate(groups):
-        gain = 0
-        # Each chunk may credit at most one not-yet-credited item, so a file
-        # holding two distinct relevant items can satisfy both — via two
-        # different chunks — which the golden set has twice: structural-03
-        # labels two async methods in embedder.py and structural-08 two
-        # endpoints in routes.py. The NDCG gain stays 1 for the slot
-        # regardless: the file occupies one rank position however many items
-        # it answers.
-        #
-        # The cap is per CHUNK, so two same-file labels inside one chunk still
-        # credit only one and cap that query at 1/len(relevant) (ADR-67,
-        # pinned by test_two_relevant_greedy_credit). Deliberate: without it a
-        # single wide chunk would sweep every label in its file and score 1.0
-        # for retrieving one thing.
+    # Flat chunk list with, for each chunk, the items it could credit.
+    chunk_items: list[list[int]] = []
+    for group in groups:
         for chunk in group:
-            for i, item in enumerate(relevant):
-                if i in matched_rank:
-                    continue
-                if matches(chunk, item):
-                    matched_rank[i] = rank
-                    gain = 1
-                    break
-        gains.append(gain)
+            chunk_items.append(
+                [i for i, item in enumerate(relevant) if matches(chunk, item)]
+            )
+
+    item_chunk: dict[int, int] = {}  # relevant index -> flat chunk index
+
+    def augment(chunk_idx: int, seen: set[int]) -> bool:
+        """Kuhn's augmenting path: try to give *chunk_idx* an item, displacing
+        an earlier chunk onto a different item of its own where that frees one
+        up. Chunk capacity stays 1; the sets are tiny (<=10 slots, <=3 items)."""
+        for i in chunk_items[chunk_idx]:
+            if i in seen:
+                continue
+            seen.add(i)
+            if i not in item_chunk or augment(item_chunk[i], seen):
+                item_chunk[i] = chunk_idx
+                return True
+        return False
+
+    matched_after: list[int] = []  # matching size after each rank slot
+    flat = 0
+    for group in groups:
+        for _ in group:
+            augment(flat, set())
+            flat += 1
+        matched_after.append(len(item_chunk))
 
     scores: dict[str, float] = {}
     for k in ks:
-        found = sum(1 for rank in matched_rank.values() if rank < k)
+        found = matched_after[min(k, len(matched_after)) - 1] if matched_after else 0
         scores[f"recall@{k}"] = found / len(relevant)
 
+    gains = [
+        1 if size > (matched_after[r - 1] if r else 0) else 0
+        for r, size in enumerate(matched_after)
+    ]
     dcg = sum(g / math.log2(rank + 2) for rank, g in enumerate(gains[:NDCG_K]))
     ideal = min(len(relevant), NDCG_K)
     idcg = sum(1 / math.log2(i + 2) for i in range(ideal))
@@ -386,6 +448,20 @@ def save_reference(
     no unconditional write — both existed before and both recorded whichever
     run got there first as the standard every later run was judged against
     (lesson 8). The only caller is the explicit re-baseline path.
+
+    Per-query rows are stored beside the aggregates (ADR-69, lesson 19). The
+    aggregates alone could confirm every aggregate claim and refute no
+    per-query one: when a per-channel table for `structural-08` went out with
+    two wrong rows in the PR #42 round-1 reply, the only artifact that could
+    have falsified it was `report_latest.json`, which is gitignored. A claim
+    about one query had nowhere to live. Lesson 19's own remedy is this — put
+    the per-item view into the artifact of record — and it is what makes the
+    gate's own numbers re-derivable by a reader holding only the repository.
+
+    Latency is deliberately NOT stored per query: it is device- and
+    load-specific, so it would churn all 200 rows on every re-baseline even
+    when quality is bit-identical, and drown the rows that actually moved. The
+    p50/p95 summary in each row above keeps the cost visible.
     """
     payload = {
         "provenance": provenance,
@@ -393,6 +469,14 @@ def save_reference(
             channel: {
                 "overall": report["overall"],
                 "categories": report["categories"],
+                "queries": [
+                    {
+                        "id": row["id"],
+                        "category": row["category"],
+                        **{m: row[m] for m in _METRICS if m in row},
+                    }
+                    for row in report.get("queries", [])
+                ],
             }
             for channel, report in reports.items()
         },
