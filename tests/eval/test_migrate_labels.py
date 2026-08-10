@@ -10,10 +10,19 @@ So the claim is executed here. Both inputs are pinned to commits, which makes
 the output a fixed artifact rather than something that drifts with the tree.
 
 This runs in the DEFAULT suite: no model, no Qdrant, two ``git show`` calls.
-It skips when the objects are unreachable, because ``actions/checkout@v4``
-clones at depth 1 — the alternative is a test that reddens CI for a reason
-that has nothing to do with the code under review. The trade-off is stated
-rather than hidden: on a shallow clone this pins nothing.
+CI checks out with ``fetch-depth: 0`` so it actually runs there (PR #42 round-2
+review: with the default depth-1 checkout it skipped on every pull request, so
+the pin was inert everywhere except the author's machine — Finding C's own root
+cause, maintenance following enforcement rather than intent).
+
+**The skip condition is shallowness itself, not object reachability.** It used
+to be "``git cat-file -e`` failed", which cannot tell a shallow clone from a
+commit that a rebase orphaned or a hand typo mangled: flipping one hex digit of
+``MIGRATION_BASE`` turned both tests into ``2 skipped`` reading *"a shallow
+clone does not have them"* inside a full clone, and under ``-q`` a skip is an
+anonymous ``s``. ``git rev-parse --is-shallow-repository`` answers the question
+actually being asked, so a missing object in a full clone now fails loudly —
+which is what hard rule 9 says a check has to be able to do.
 """
 
 from __future__ import annotations
@@ -37,25 +46,35 @@ from .migrate_labels import (
 EXPECTED_LABELS = 46
 
 
-def _reachable(commit: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        ).returncode
-        == 0
+def _no_history_reason() -> str | None:
+    """Why this environment cannot pin the migration, or None when it can.
+
+    Only two environments legitimately lack the objects: a shallow clone, and a
+    tree that is not a git checkout at all (an sdist, an extracted archive).
+    Both are stated in the skip reason in their own words. Anything else — an
+    orphaned or mistyped commit — is a defect, and falls through to a real
+    failure rather than being absorbed here.
+    """
+    proc = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
+    if proc.returncode != 0:
+        return f"{REPO_ROOT} is not a git checkout, so the history is unavailable"
+    if proc.stdout.strip() == "true":
+        return (
+            f"shallow clone: commits {MIGRATION_BASE} and {MIGRATION_COMMIT} are "
+            f"not present. CI uses fetch-depth: 0 so this runs there."
+        )
+    return None
 
 
-HAS_HISTORY = _reachable(MIGRATION_BASE) and _reachable(MIGRATION_COMMIT)
+NO_HISTORY_REASON = _no_history_reason()
 
 pytestmark = pytest.mark.skipif(
-    not HAS_HISTORY,
-    reason=(
-        f"needs commits {MIGRATION_BASE} and {MIGRATION_COMMIT}; "
-        f"a shallow clone does not have them"
-    ),
+    NO_HISTORY_REASON is not None, reason=NO_HISTORY_REASON or ""
 )
 
 
@@ -64,9 +83,10 @@ def test_migration_reproduces_its_own_committed_output():
     for byte.
 
     Not today's golden.yaml, deliberately: ``structural-08`` gained a second
-    endpoint label in 13fcd9d and three prose anchors were hardened onto
-    signature lines in review. Those are signed-off edits made ON TOP of the
-    migration, so the migration reproducing them would mean it was no longer
+    endpoint label in 13fcd9d, three prose anchors were hardened onto signature
+    lines in review round 1, and ``nl-09``'s ``anchor_end`` was moved off an
+    indent-unique fragment in round 2. Those are signed-off edits made ON TOP of
+    the migration, so the migration reproducing them would mean it was no longer
     reproducing the migration.
     """
     source = pre_migration_golden()

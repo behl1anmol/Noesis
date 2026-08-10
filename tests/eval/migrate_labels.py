@@ -38,11 +38,13 @@ untouched.
 
 This reproduces commit ``3307997``'s golden.yaml (46 labels). It is NOT
 today's golden.yaml: ``structural-08`` gained a second endpoint label in
-``13fcd9d`` (47 labels), and three prose anchors — ``nl-07`` and ``nl-13``'s
-``anchor``, ``structural-04``'s ``anchor_end`` — were hardened onto signature
-and field lines in the PR #42 review. Those are signed-off edits made after the
-migration, not part of it — which is why this script can no longer write
-``golden.yaml`` and only writes where you point it.
+``13fcd9d`` (47 labels), and four anchors were hardened in the PR #42 review —
+``nl-07`` and ``nl-13``'s ``anchor`` and ``structural-04``'s ``anchor_end``
+moved off docstring prose onto signature and field lines (round 1), and
+``nl-09``'s ``anchor_end`` moved off ``WHERE id = ?``, which was unique only by
+its indentation (round 2). Those are signed-off edits made after the migration,
+not part of it — which is why this script can no longer write ``golden.yaml``
+and refuses an ``--out`` that resolves to it.
 
 Usage:  python tests/eval/migrate_labels.py [--out PATH]
 
@@ -241,8 +243,9 @@ def pre_migration_golden() -> str:
     blob = blob_at(MIGRATION_BASE, GOLDEN_REL)
     if blob is None:
         raise SystemExit(
-            f"cannot read {GOLDEN_REL} at {MIGRATION_BASE} — this needs the "
-            f"repository history (a shallow clone will not have it)"
+            f"cannot read {GOLDEN_REL} at {MIGRATION_BASE} — the object is not "
+            f"reachable. Either this is a shallow clone (CI uses fetch-depth: 0), "
+            f"or {MIGRATION_BASE} no longer names a commit in this history."
         )
     return blob
 
@@ -390,6 +393,28 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Validate the destination BEFORE the ~12 s of git reads below. Three
+    # defects, all from the PR #42 round-2 review:
+    #   * `--out ""` did the whole run and then silently degraded to a dry run,
+    #     because the old test was `if args.out:` and "" is falsy;
+    #   * a missing parent directory surfaced as a bare FileNotFoundError after
+    #     the work, rather than as an argument error before it;
+    #   * nothing refused `--out tests/eval/golden.yaml`, so the reason given
+    #     for dropping `--write` — "a reproduction tool able to revert
+    #     signed-off edits is a footgun" — was only half delivered.
+    out_path: Path | None = None
+    if args.out is not None:
+        if not args.out.strip():
+            parser.error("--out needs a path; omit the flag entirely for a dry run")
+        out_path = Path(args.out).expanduser()
+        if out_path.resolve() == (REPO_ROOT / GOLDEN_REL).resolve():
+            parser.error(
+                f"--out must not be {GOLDEN_REL}. This script reproduces the "
+                f"MIGRATION, and golden.yaml has carried signed-off edits since "
+                f"(structural-08's second endpoint, four hardened anchors) — "
+                f"writing there would revert them. Write elsewhere and diff."
+            )
+
     source = pre_migration_golden()
     resolved, unresolved = compute_anchors(source)
     print(f"resolved {len(resolved)} labels, unresolved {len(unresolved)}")
@@ -403,8 +428,8 @@ def main() -> int:
     if unresolved:
         print("\nrefusing to write: every label must resolve", file=sys.stderr)
         return 1
-    if args.out:
-        out_path = Path(args.out)
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(rewrite(resolved, source), encoding="utf-8")
         print(f"\nwrote {out_path}")
         print(f"compare: git show {MIGRATION_COMMIT}:{GOLDEN_REL} | diff - {out_path}")
