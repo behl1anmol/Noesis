@@ -5,9 +5,12 @@ allowed-tools: Bash(uv run pytest *:*), Bash(python .claude/scripts/devlog.py *:
 1. Run `uv run pytest tests/eval/ -m golden -s` (the golden-set harness). It takes
    roughly two hours and loads the real embedder and reranker.
 2. Read `tests/eval/report_latest.md` — verdicts first, then provenance, then
-   the tables. Do NOT report from the terminal output alone; the documented
-   invocation is `-q`, and printed tables being swallowed is the bug ADR-65
-   was written for.
+   the tables. Do NOT report from the terminal output alone: pytest captures
+   stdout, so the printed tables reach a terminal only when `-s` is passed, and
+   tables being swallowed is the bug ADR-65 was written for. (`-q` is innocent
+   — measured: bare `pytest` hides the print too, and `-s -q` shows it.)
+   The verdict block also states whether the run **re-baselined**; a run that
+   wrote the reference gated nothing, so never read its tables as a pass.
 3. Report the three layers as the harness decided them, not as you judge them:
    - L1 relational (same-run): hybrid vs dense on Recall@10 overall and on the
      symbol subset, and hybrid+rerank vs hybrid on NDCG@10.

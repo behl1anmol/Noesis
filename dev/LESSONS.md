@@ -7,8 +7,8 @@ the DB on a fresh clone, run `devlog.py lessons import`, which reads this file
 and `LESSONS-archive.md` together and restores ids and statuses (ADR-61).
 
 Injected verbatim into context at the start of every session
-(`.claude/hooks/session_start.py`). Subordinate to `CLAUDE.md` rules 1-6 — a
-lesson may never weaken those. See `architecture-docs/code-indexer-expanded-architecture.md`
+(`.claude/hooks/session_start.py`). Subordinate to `CLAUDE.md` rules 1-6 or 9 —
+a lesson may never weaken those. See `architecture-docs/code-indexer-expanded-architecture.md`
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
