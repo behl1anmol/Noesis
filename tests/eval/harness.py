@@ -711,7 +711,13 @@ def zero_recall_queries(reports: dict[str, dict[str, Any]]) -> list[str]:
 
     Dense, sparse, hybrid and rerank fail for different reasons, so a query
     that all four miss is far likelier to be a broken label than a retrieval
-    failure. Surfacing this is the loop back to Finding C: had the harness
+    failure. The intersection covers the diagnostic channel too — all five, not
+    the four gated ones — and that is deliberate rather than an oversight: every
+    label is a ``.py`` file, so the python-only filter can remove distractors
+    and never a true positive, and a query it *can* answer is by definition not
+    one whose label is unreachable. Including it only ever shortens this list,
+    and shortens it by exactly the queries that do not belong on it.
+    Surfacing this is the loop back to Finding C: had the harness
     printed it, `nl-10` and `symbol-12` — which could never match anything —
     would have been visible from the very first M2 run instead of being found
     two milestones later by hand-reading a JSON file.
