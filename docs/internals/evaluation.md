@@ -18,7 +18,14 @@ Each retrieval query lists its relevant items as a `path` plus an **`anchor`** �
 
 Labels used to store `lines: [start, end]`. Because a result must overlap that range to count, a label whose code moved silently forced its query to zero — and by 2026-08, **22 of 46 labels had drifted off their own ranges**, with two that never matched anything from the day they were written. Nothing detected it, while `structural_patterns` in the very same file stayed correct across three commits because a default-suite test pinned it.
 
-So the labels are content-addressed and `tests/eval/test_golden_labels.py` runs **in the default suite**, on every pull request: it re-resolves every anchor against the working tree, checks each labeled file is one the corpus actually indexes, and requires a `symbol` query's identifier to appear inside its own labeled span. Rot now fails on the commit that causes it. `tests/eval/migrate_labels.py` records how the original 46 labels were mechanically re-derived.
+So the labels are content-addressed and `tests/eval/test_golden_labels.py` runs **in the default suite**, on every pull request. Four checks, each of which has caught something real:
+
+1. every anchor still resolves against a fresh read of the working tree — **both** ends, since `anchor_end` is the half that drifts (a span's last line usually belongs to a body that grows);
+2. no anchor is unique *only* because of its indentation — `nl-09`'s `anchor_end` was `"        WHERE id = ?"`, where the bare fragment matches 13 lines of `state.py`, so one more SQL statement at that indent would have broken collection;
+3. every labeled file is one the corpus actually indexes (the general form of `nl-10`'s failure);
+4. a `symbol` query's identifier appears inside its own labeled span.
+
+Rot now fails on the commit that causes it. `tests/eval/migrate_labels.py` records how the original 46 labels were mechanically re-derived, and `tests/eval/test_migrate_labels.py` pins that reproduction byte-for-byte — in CI too, which is why the `tests` job checks out with `fetch-depth: 0`.
 
 Width follows the question: a `symbol` query is an identifier lookup, so its label is the definition site. `nl` and `structural` queries ask about a region, and there the width matters — deduplication keeps only the best-ranked chunk per file, so a one-line label would score zero whenever the right region was retrieved but ranked behind another chunk of the same file.
 

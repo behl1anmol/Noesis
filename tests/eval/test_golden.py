@@ -621,6 +621,40 @@ def test_run_duration_is_recorded_but_never_a_comparability_term():
     assert reference_mismatches(slower, faster) == []
 
 
+@pytest.mark.parametrize(
+    ("rebaselining", "tree_dirty", "refuses"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+        (False, False, False),
+    ],
+)
+def test_rebaseline_refuses_only_a_dirty_tree(monkeypatch, rebaselining, tree_dirty, refuses):
+    """Layer 3's refusal, probed on all four corners.
+
+    It fires only for the one combination that matters, and the guard now has
+    two call sites — the `corpus` fixture calls it BEFORE copying and indexing
+    the tree, and the test body calls it again before the measurement. It used
+    to live only in the second place, so pytest reached it after the session
+    fixture had already built the corpus: a dirty tree cost 5m36s here before
+    being refused, observed while answering the PR #42 round-2 review. The
+    second call site is kept because it catches the tree being edited *during*
+    the run, which is exactly how that was found.
+    """
+    monkeypatch.setitem(globals(), "_tracked_dirty", lambda: tree_dirty)
+    if rebaselining:
+        monkeypatch.setenv(REBASELINE_ENV, "1")
+    else:
+        monkeypatch.delenv(REBASELINE_ENV, raising=False)
+
+    if refuses:
+        with pytest.raises(pytest.fail.Exception, match="refusing to record a reference"):
+            _refuse_rebaseline_on_dirty_tree("probe")
+    else:
+        _refuse_rebaseline_on_dirty_tree("probe")
+
+
 def test_zero_recall_queries_flags_only_universal_misses():
     def with_queries(*pairs):
         report = _report(0.5, 0.5, 0.5)
@@ -756,6 +790,51 @@ def _server_version_or_skip(url: str) -> str:
     return version
 
 
+def _tracked_dirty() -> bool:
+    """True when git reports uncommitted changes to TRACKED files.
+
+    Tracked only. The corpus fixture builds from ``git ls-files``, so untracked
+    files are not in the measurement and cannot affect whether it reproduces —
+    counting them would block a re-baseline over a stray `.idea/` directory
+    while proving nothing.
+
+    ``check=True`` like the fixture's own ``git ls-files``: without it a failing
+    git yields empty stdout, which reads as "clean" and silently permits the one
+    thing layer 3 exists to refuse (PR #42 review). git is already a hard
+    requirement of this tier, so raising beats inventing a verdict.
+    """
+    return bool(
+        subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    )
+
+
+def _refuse_rebaseline_on_dirty_tree(when: str) -> None:
+    """ADR-65 layer 3's refusal, callable from both ends of the run.
+
+    A reference that cannot be reproduced from a commit is not a measurement
+    standard. This is called twice on purpose:
+
+    * at the top of the ``corpus`` fixture, BEFORE the tree is copied and
+      indexed — the guard used to sit only in the test body, which pytest
+      reaches after that setup, so a dirty tree cost a full corpus build
+      (observed: 5m36s) before refusing;
+    * in the test body, which additionally catches a tree that was clean at
+      setup and got edited while the run was in flight — how the gap above was
+      found in the first place.
+    """
+    if os.environ.get(REBASELINE_ENV) == "1" and _tracked_dirty():
+        pytest.fail(
+            f"refusing to record a reference from a dirty tree ({when}) — commit "
+            f"first, so the numbers name a reproducible state of the corpus"
+        )
+
+
 @pytest.fixture(scope="session")
 def corpus(tmp_path_factory):
     """Self-index this repo once: real embedder, embedded or real Qdrant.
@@ -775,6 +854,10 @@ def corpus(tmp_path_factory):
     one store can never gate the other.
     """
     import shutil
+
+    # Before anything expensive: a re-baseline on a dirty tree is refused here
+    # rather than after the copy-and-index below.
+    _refuse_rebaseline_on_dirty_tree("checked before the corpus was built")
 
     eval_tmp = tmp_path_factory.mktemp("eval")
     corpus_root = eval_tmp / "corpus"
@@ -844,33 +927,12 @@ async def test_golden_set_gate_numbers(corpus):
     """
     store, embedder, project_id = corpus.store, corpus.embedder, corpus.project_id
     rebaseline = os.environ.get(REBASELINE_ENV) == "1"
-    # Tracked changes only. The corpus fixture builds from `git ls-files`, so
-    # untracked files are not in the measurement and cannot affect whether it
-    # reproduces — counting them would block a re-baseline over a stray .idea/
-    # directory while proving nothing.
-    #
-    # check=True, like the corpus fixture's `git ls-files`: without it a failing
-    # git yields empty stdout, which reads as "clean" and silently permits the
-    # one thing layer 3 exists to refuse (PR #42 review). git is already a hard
-    # requirement of this tier, so raising is strictly better than inventing a
-    # verdict.
-    dirty = bool(
-        subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    )
-    # Checked before the two-hour measurement, not after it: a reference that
-    # cannot be reproduced from a commit is not a measurement standard, and
-    # learning that at the end would waste the whole run.
-    if rebaseline and dirty:
-        pytest.fail(
-            "refusing to record a reference from a dirty tree — commit first, "
-            "so the numbers name a reproducible state of the corpus"
-        )
+    # Second call site. The fixture already refused a dirty tree before building
+    # the corpus; this catches a tree that was clean then and was edited while
+    # the run was in flight — which is a real way to lose a run, observed while
+    # answering the PR #42 round-2 review.
+    _refuse_rebaseline_on_dirty_tree("checked again before the measurement")
+    dirty = _tracked_dirty()
     # Anchors resolve against the copy that was actually chunked, not the
     # working tree, so the line numbers describe the thing being measured.
     golden = load_golden(GOLDEN_PATH, corpus.corpus_root)
