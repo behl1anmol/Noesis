@@ -209,14 +209,25 @@ def pick_anchor_end(span: list[str], current: list[str], start: str) -> str | No
 
     Anchoring BOTH ends reproduces the original label's extent instead of
     collapsing it to a point, and that width is load-bearing rather than
-    decorative: ``dedupe_by_path`` keeps only the best-ranked chunk per file,
-    so a point label does not ask "was the relevant region retrieved" — it
-    asks "did the chunk containing this one line out-rank every other chunk of
-    the same file". A file whose right region ranked 4th behind another of its
-    own chunks would score 0 on a point label while the region was in fact
-    retrieved. The original labeling rule ("`lines` is optional and generous
-    (whole function/class)") existed for this reason; content-addressing the
-    two ends keeps it while making both ends rot-proof.
+    decorative.
+
+    The rationale AS IT STOOD AT MIGRATION TIME, stated in the past tense
+    because the scorer has since changed underneath it (PR #42 review round 4):
+    ``dedupe_by_path`` then kept only the best-ranked chunk per file, so a
+    point label did not ask "was the relevant region retrieved" — it asked
+    "did the chunk containing this one line out-rank every other chunk of the
+    same file", and a file whose right region ranked 4th behind another of its
+    own chunks scored 0 while the region had in fact been retrieved. ADR-67
+    removed that particular trap by grouping a file's chunks instead of
+    collapsing them.
+
+    The width rule survives it on narrower grounds, which is why nothing here
+    changes: matching is still a span-overlap test, so a one-line label counts
+    only when the chunk holding that exact line comes back, while a
+    region-wide label counts whichever chunk of the region does. The original
+    labeling rule ("`lines` is optional and generous (whole function/class)")
+    existed for this; content-addressing the two ends keeps it while making
+    both ends rot-proof.
     """
 
     def usable(raw: str) -> str | None:
@@ -323,11 +334,13 @@ def compute_anchors(source: str | None = None) -> tuple[list[dict], list[dict]]:
             # today's `execute_run`, which is 1017 lines, and a span that wide
             # would let almost any chunk of indexer.py score as correct.
             #
-            # `nl` and `structural` queries ask about a region, and there the
-            # width is load-bearing: `dedupe_by_path` keeps only the
-            # best-ranked chunk per file, so a point label would score 0
-            # whenever the right region was retrieved but ranked behind
-            # another chunk of the same file.
+            # `nl` and `structural` queries ask about a region, and there
+            # the width is load-bearing: matching is a span-overlap test, so a
+            # point label counts only when the chunk holding that exact line is
+            # retrieved, while a region-wide label counts whichever chunk of
+            # the region comes back. (At migration time the sharper form of
+            # this was `dedupe_by_path` keeping only each file's best-ranked
+            # chunk; ADR-67 removed that. See `pick_anchor_end`.)
             anchor_end = None
             if query["category"] != "symbol":
                 anchor_end = pick_anchor_end(span, body, anchor)
