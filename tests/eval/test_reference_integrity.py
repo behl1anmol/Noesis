@@ -19,7 +19,7 @@ Deliberately NOT asserted: that the query ids match today's `golden.yaml`. The
 reference is a *past* measurement, and a label edit is supposed to make it stale —
 `reference_mismatches` already refuses to gate across a `golden_sha256` change.
 Coupling this test to the live golden set would mean every label edit turned the
-default suite red until someone found a GPU and spent 11 minutes, which is a
+default suite red until someone found a GPU and spent ~15 minutes, which is a
 strong incentive to stop editing labels — the exact pressure issue #38 was about.
 """
 
@@ -30,7 +30,13 @@ from pathlib import Path
 
 import pytest
 
-from .harness import CATEGORIES, _METRICS
+from .harness import (
+    CATEGORIES,
+    SCORER_VERSION,
+    _METRICS,
+    reference_mismatches,
+    zero_recall_queries,
+)
 
 REFERENCE_PATH = Path(__file__).resolve().parent / "baselines" / "reference.json"
 
@@ -60,7 +66,13 @@ def test_reference_records_per_query_rows():
 
 @pytest.mark.parametrize("channel", CHANNELS)
 def test_stored_aggregates_reconstruct_from_the_stored_rows(channel):
-    """Every aggregate in the reference is the mean of its own per-query rows."""
+    """Every *quality* aggregate is the mean of its own per-query rows.
+
+    Quality only, and deliberately: ADR-69 stores no per-query latency, so the
+    ``latency_p50_ms`` / ``latency_p95_ms`` columns of the 20 stored aggregate
+    rows have nothing here to reconstruct them from. Saying "every aggregate"
+    overstated what this test can see (PR #42 review round 4).
+    """
     stored = REFERENCE["channels"][channel]
     rows = _rows(channel)
 
@@ -95,3 +107,47 @@ def test_every_channel_measured_the_same_queries():
     assert len(first) == REFERENCE["provenance"]["labels"]["n_queries"], (
         "provenance n_queries disagrees with the number of stored rows"
     )
+
+
+def test_the_stored_provenance_could_gate_a_run():
+    """A committed reference whose provenance cannot gate is dead weight.
+
+    The default suite used to accept one: delete ``corpus.chunks``, ``models``
+    and ``store`` from the reference and every test here still passed, with the
+    defect surfacing only after someone had spent ~15 GPU-minutes on a run that
+    then refused to compare (PR #42 review round 4).
+
+    Comparing the provenance against ITSELF is the check — every predicate in
+    ``reference_mismatches`` must be satisfiable, which is exactly what a
+    missing or null field breaks. It says nothing about today's tree, so a
+    label edit or a growing corpus cannot turn this red.
+    """
+    provenance = REFERENCE["provenance"]
+    assert reference_mismatches(provenance, provenance) == [], (
+        "the stored reference cannot gate even an identical run — some field "
+        "reference_mismatches reads is missing or null"
+    )
+    # Spelled out, because self-comparison passes when a field is absent from
+    # *both* sides: absent == absent.
+    assert provenance["corpus"]["chunks"] > 0
+    assert provenance["models"]["embedding_model"]
+    assert provenance["models"]["reranker_model"]
+    assert provenance["store"]["kind"]
+    assert provenance["labels"]["golden_sha256"]
+    assert provenance["scoring"]["version"] == SCORER_VERSION, (
+        "the reference was measured under a different scorer than this tree "
+        "runs (ADR-70); re-baseline, or bump SCORER_VERSION deliberately"
+    )
+
+
+def test_the_reference_records_which_queries_no_channel_can_answer():
+    """The dead-query count can only change deliberately.
+
+    Two of forty queries score 0 on all five channels. Both labels are
+    reachable — chunks do overlap their resolved spans — so these are genuine
+    retrieval misses rather than issue #38's rotted labels, but they subtract
+    2/14 from every ``nl`` aggregate permanently, and until ADR-69 the count
+    lived only in a gitignored report. A re-baseline that changes it now has to
+    change this line too, which is the point.
+    """
+    assert zero_recall_queries(REFERENCE["channels"]) == ["nl-05", "nl-13"]

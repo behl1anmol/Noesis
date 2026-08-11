@@ -1621,6 +1621,9 @@
       "embedding_model": "nomic-ai/CodeRankEmbed",
       "reranker_model": "BAAI/bge-reranker-v2-m3"
     },
+    "scoring": {
+      "version": 2
+    },
     "store": {
       "kind": "embedded",
       "server_version": null

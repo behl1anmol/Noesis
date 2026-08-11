@@ -2,9 +2,12 @@
 
 Loads the human-labeled golden set (``tests/eval/golden.yaml``), runs a
 search function per query, and reports Recall@5, Recall@10 and NDCG@10 per
-query category (nl / symbol / structural) plus overall. The M3 gate compares
-the hybrid channel against the stored M2 dense-only baseline
-(``tests/eval/baselines/m2_dense.json``) — numbers or it didn't happen.
+query category (nl / symbol / structural) plus overall. The gate compares the
+run against the living reference at ``tests/eval/baselines/reference.json``
+(ADR-65) — numbers or it didn't happen. ``baselines/m2_dense.json`` is a
+frozen historical record of what M2 measured and is read by no code path;
+this docstring named it as the gate's baseline for two milestones after that
+stopped being true (PR #42 review round 4).
 
 M4 (§3.8): every row also carries search latency p50/p95 in milliseconds —
 wall time of the full search call per query, nearest-rank percentiles — so
@@ -103,6 +106,46 @@ def resolve_anchor(lines: list[str], anchor: str, where: str) -> int:
     return hits[0]
 
 
+# The complete key vocabulary of golden.yaml's `queries` section. Anything
+# outside these sets is a typo, and a typo is refused rather than dropped.
+_QUERY_KEYS = frozenset({"id", "category", "query", "relevant"})
+_ITEM_KEYS = frozenset({"path", "anchor", "anchor_end"})
+
+
+def _reject_unknown_keys(
+    where: str, mapping: dict[str, Any], allowed: frozenset[str]
+) -> None:
+    """Refuse keys the loader does not read, instead of silently dropping them.
+
+    A label is data the gate's numbers are computed from, and the silent
+    failure is not hypothetical: a mistyped ``anchor_end`` (``anchor-end``,
+    ``anchorend``, or the correct spelling at the wrong indent) was accepted
+    and dropped, collapsing the span to the single anchor line. ``matches`` is
+    a span-overlap test, so that narrows what the label credits and can turn a
+    hit into a miss — with nothing raised and no line of any file changed.
+
+    ``lines`` gets its own message because it is the one key a reader of the
+    pre-ADR-64 format would reach for.
+    """
+    unknown = set(mapping) - allowed
+    if not unknown:
+        return
+    if "lines" in unknown:
+        raise ValueError(
+            f"{where} carries 'lines' — ADR-64 replaced stored line numbers "
+            f"with anchors, and a 'lines' key is silently ignored rather than "
+            f"honoured. Delete it; the span comes from anchor/anchor_end."
+        )
+    # repr() rather than the bare keys: YAML permits a non-string key (`1: 2`
+    # beside `oops: 3`), and sorting int against str raises TypeError — still
+    # loud, but not the message this was written to deliver.
+    raise ValueError(
+        f"{where} has unknown key(s) {sorted(map(repr, unknown))} — allowed: "
+        f"{', '.join(sorted(allowed))}. A typo here is silently dropped, and a "
+        f"dropped 'anchor_end' shrinks the span its label credits."
+    )
+
+
 def load_golden(path: str | Path, root: str | Path) -> list[GoldenQuery]:
     """Parse and validate golden.yaml, resolving anchors against *root*.
 
@@ -126,6 +169,12 @@ def load_golden(path: str | Path, root: str | Path) -> list[GoldenQuery]:
         if not qid or qid in seen_ids:
             raise ValueError(f"{path}: query #{i} has a missing or duplicate id")
         seen_ids.add(qid)
+        # Checked at BOTH levels. The item-level guard alone was escapable by
+        # one indent: an `anchor_end` written one level out lands here, is
+        # dropped, and the label's span silently collapses to its anchor line —
+        # the very failure the guard was added for, surviving at the level
+        # above it (PR #42 review round 4).
+        _reject_unknown_keys(f"{path}: query {qid!r}", entry, _QUERY_KEYS)
         category = entry.get("category")
         if category not in CATEGORIES:
             raise ValueError(
@@ -143,30 +192,9 @@ def load_golden(path: str | Path, root: str | Path) -> list[GoldenQuery]:
             rel_path = item.get("path")
             if not rel_path:
                 raise ValueError(f"{path}: query {qid!r} has a relevant item with no path")
-            # Unknown keys are refused rather than ignored. A label is data the
-            # gate's numbers are computed from, and the silent failure here is
-            # not hypothetical: a mistyped `anchor_end` (`anchor-end`,
-            # `anchorend`) was accepted and dropped, collapsing the span to the
-            # single anchor line. `matches` is a span-overlap test, so that
-            # narrows what the label credits and can turn a hit into a miss —
-            # with nothing raised and no line of the file changed. `lines` gets
-            # its own message because it is the one key a reader of the old
-            # format would reach for, and ADR-64 is the reason it is gone.
-            unknown = set(item) - {"path", "anchor", "anchor_end"}
-            if "lines" in unknown:
-                raise ValueError(
-                    f"{path}: query {qid!r} item {rel_path!r} carries 'lines' — "
-                    f"ADR-64 replaced stored line numbers with anchors, and a "
-                    f"'lines' key is silently ignored rather than honoured. "
-                    f"Delete it; the span comes from anchor/anchor_end."
-                )
-            if unknown:
-                raise ValueError(
-                    f"{path}: query {qid!r} item {rel_path!r} has unknown "
-                    f"key(s) {sorted(unknown)} — allowed: path, anchor, "
-                    f"anchor_end. A typo here is silently dropped, and a "
-                    f"dropped 'anchor_end' shrinks the span the label credits."
-                )
+            _reject_unknown_keys(
+                f"{path}: query {qid!r} item {rel_path!r}", item, _ITEM_KEYS
+            )
             anchor = item.get("anchor")
             if not anchor or not isinstance(anchor, str):
                 raise ValueError(
@@ -324,10 +352,19 @@ def score_query(
     credit and L1 unmatched: recall 0.5, with both labels sitting in retrieved
     chunks. Matching gives A to L1 and B to L0: recall 1.0. That is ADR-67's
     own defect — a retrieved, matching chunk earning no credit — one level
-    below where ADR-67 fixed it, and it is reachable on exactly the labels
-    ADR-67 was written for: structural-03 (two async methods in embedder.py)
-    and structural-08 (two endpoints in routes.py) are the two golden queries
-    with two labels in one file.
+    below where ADR-67 fixed it.
+
+    Exposure, as an upper bound rather than a live hit. Only a query with two
+    labels in ONE file can be affected at all, and the golden set has exactly
+    two: structural-03 (two async methods in embedder.py) and structural-08
+    (two endpoints in routes.py). At today's chunk boundaries neither is
+    actually reachable — chunking both labeled files and testing every chunk
+    against both of its query's labels, no chunk overlaps more than one (5
+    chunks examined, max overlap 1), so first fit and maximum matching are
+    provably identical on the whole set right now. Corroborated by
+    measurement: every Recall aggregate is bit-identical across the scorer
+    change. This is hardening against a chunk/label shape the corpus does not
+    currently produce, not a recall improvement (PR #42 review round 4).
 
     The matching is built incrementally in rank order, so the size after slot
     *r* is the maximum matching over slots 0..r — which is what recall@k needs,
@@ -368,6 +405,13 @@ def score_query(
 
     scores: dict[str, float] = {}
     for k in ks:
+        # `matched_after[min(k, n) - 1]` is "the matching after the first k rank
+        # slots". k <= 0 is refused rather than allowed to index from the end:
+        # k=0 would read matched_after[-1], the FULL matching, and report every
+        # item as found "in the top 0 slots" (PR #42 review round 4). No caller
+        # passes it today; the guard is here because `ks` is a parameter.
+        if k <= 0:
+            raise ValueError(f"score_query: k must be >= 1, got {k}")
         found = matched_after[min(k, len(matched_after)) - 1] if matched_after else 0
         scores[f"recall@{k}"] = found / len(relevant)
 
@@ -463,19 +507,42 @@ def save_reference(
     when quality is bit-identical, and drown the rows that actually moved. The
     p50/p95 summary in each row above keeps the cost visible.
     """
+    for channel, report in reports.items():
+        # Refuse rather than write `"queries": []`. Without this a re-baseline
+        # ran the full ~15 GPU-minutes, exited green, and left a reference the
+        # DEFAULT suite then rejected as rows-less — the cost paid, the artifact
+        # unusable, and the failure surfacing on someone else's next `pytest`
+        # (PR #42 review round 4). ADR-69: the rows ARE the artifact.
+        rows = report.get("queries")
+        if not rows:
+            raise ValueError(
+                f"save_reference: channel {channel!r} carries no per-query rows, "
+                f"so the reference could not support a per-query claim (ADR-69). "
+                f"Refusing to write {path}."
+            )
+        missing = sorted({m for m in _METRICS for row in rows if m not in row})
+        if missing:
+            raise ValueError(
+                f"save_reference: channel {channel!r} has rows missing {missing}, "
+                f"so the stored aggregates could not be re-derived from them "
+                f"(ADR-69). Refusing to write {path}."
+            )
     payload = {
         "provenance": provenance,
         "channels": {
             channel: {
                 "overall": report["overall"],
                 "categories": report["categories"],
+                # No `if m in row` guard: a row missing a metric is a harness
+                # defect, and dropping it here would surface as a bare KeyError
+                # inside test_reference_integrity instead.
                 "queries": [
                     {
                         "id": row["id"],
                         "category": row["category"],
-                        **{m: row[m] for m in _METRICS if m in row},
+                        **{m: row[m] for m in _METRICS},
                     }
-                    for row in report.get("queries", [])
+                    for row in report["queries"]
                 ],
             }
             for channel, report in reports.items()
@@ -493,6 +560,22 @@ def load_reference(path: str | Path) -> dict[str, Any] | None:
 
 
 _METRICS = ("recall@5", "recall@10", f"ndcg@{NDCG_K}")
+
+# ADR-70: the scoring rules are part of a reference's provenance.
+#
+# `reference_mismatches` already refuses a reference measured on different
+# models, a different store or different labels. Until PR #42 round 4 it had no
+# term for the SCORER, so numbers produced under one scoring rule could be
+# gated against numbers produced under another — and that is not hypothetical:
+# ADR-67 and ADR-68 each changed what a retrieved chunk credits, and both times
+# the only thing that forced a re-baseline was a human remembering to.
+#
+# Bump this whenever a change to `score_query`, `group_by_path` or `matches`
+# can move a stored number. A reference written before the field existed
+# carries no version, reads as None, and correctly refuses to gate.
+#   1  grouped scoring, credit assigned by first fit (ADR-67)
+#   2  credit assigned by maximum bipartite matching (ADR-68)
+SCORER_VERSION = 2
 
 
 # --- ADR-65: provenance, comparability, regression ------------------------
@@ -573,6 +656,15 @@ def reference_mismatches(reference: dict[str, Any], run: dict[str, Any]) -> list
             reasons.append(
                 f"{key}: reference {ref_models.get(key)!r} != run {run_models.get(key)!r}"
             )
+    ref_scorer = reference.get("scoring", {}).get("version")
+    run_scorer = run.get("scoring", {}).get("version")
+    if ref_scorer != run_scorer:
+        reasons.append(
+            f"scorer version: reference {ref_scorer!r} != run {run_scorer!r} — "
+            f"the two sets of numbers were produced by different scoring rules "
+            f"(ADR-70), so a difference between them measures the scorer, not "
+            f"retrieval"
+        )
     ref_store, run_store = reference.get("store", {}), run.get("store", {})
     if ref_store.get("kind") != run_store.get("kind"):
         reasons.append(
@@ -766,6 +858,44 @@ def rerank_query_deltas(
     return gained, lost
 
 
+def reference_query_deltas(
+    reports: dict[str, dict[str, Any]],
+    reference_channels: dict[str, Any],
+    metric: str = "recall@10",
+) -> list[tuple[str, str, float, float]]:
+    """Queries that crossed zero against the reference: ``(channel, id, was, now)``.
+
+    ADR-71. ADR-69 committed the per-query rows so a reader could check a
+    per-query claim by hand — but nothing *compared* them between runs, and the
+    aggregates cannot: permuting 12 of 40 hybrid rows among same-category
+    queries leaves every stored aggregate bit-identical and both gate layers
+    passing (PR #42 review round 4). A channel can therefore swap which queries
+    it answers, completely, and the gate sees a flat line.
+
+    Crossing zero is the signal worth naming: a query that went from answered
+    to unanswered is either a retrieval regression or a rotted label, and both
+    are worth a human look. A query moving 1.0 -> 0.5 is ordinary rank churn
+    and is left to the aggregate.
+
+    Reported, never gated — the same standing as :func:`rerank_query_deltas`.
+    Per-query retrieval is noisy, the cost of a false red here is a 15-minute
+    re-run, and the gate already has a layer that fires on the aggregate.
+    """
+    crossings: list[tuple[str, str, float, float]] = []
+    for channel in sorted(reports):
+        run_rows = reports[channel].get("queries") or []
+        ref_rows = (reference_channels.get(channel) or {}).get("queries") or []
+        before = {row["id"]: row for row in ref_rows}
+        for row in run_rows:
+            prior = before.get(row["id"])
+            if prior is None or metric not in prior or metric not in row:
+                continue
+            was, now = prior[metric], row[metric]
+            if (was > 0) != (now > 0):
+                crossings.append((channel, row["id"], was, now))
+    return crossings
+
+
 def render_report(
     reports: dict[str, dict[str, Any]],
     provenance: dict[str, Any],
@@ -773,6 +903,8 @@ def render_report(
     mismatches: list[str],
     regression: list[str] | None,
     rebaseline: bool = False,
+    wrote_reference: bool = False,
+    reference_channels: dict[str, Any] | None = None,
 ) -> str:
     """The run, as markdown — verdicts first, so `-q` can no longer bury them.
 
@@ -780,12 +912,20 @@ def render_report(
     case renders the tables under an explicit NOT A GATE banner rather than
     letting a reader mistake an ungated table for a passing one.
 
-    *rebaseline* is True when this run wrote the reference. It has to reach the
-    file: re-baselining is the most consequential thing a run can do, the
+    *rebaseline* is True when this run was ASKED to re-baseline;
+    *wrote_reference* is True only once the file has actually been written.
+    They are separate because they can disagree, and the report used to assume
+    they could not: the report is rendered before the gate's assertions run, so
+    a re-baseline run that failed layer 1 left a persisted report announcing
+    "THIS RUN WROTE THE REFERENCE ... now holds these numbers" for a file it
+    never touched (PR #42 review round 4). The stamp has to reach the file at
+    all — re-baselining is the most consequential thing a run can do, the
     persisted report is the artifact of record (`.claude/commands/eval.md` sends
-    the reader here rather than to the terminal), and before this it was
-    announced only by a stdout `print` that pytest's capture eats (PR #42
-    round-2 review).
+    the reader here rather than to the terminal), and before round 2 it was
+    announced only by a stdout `print` that pytest's capture eats — but it has
+    to say which of the two things happened.
+
+    *reference_channels* enables the ADR-71 per-query block; None omits it.
     """
     lines = ["# Golden run", "", "## Verdicts", ""]
     lines.append(
@@ -797,10 +937,19 @@ def render_report(
     if regression is None:
         lines.append(
             "- L2 regression vs reference: **NOT RUN** — "
-            + ("this run re-baselined" if rebaseline else "no comparable reference")
+            + (
+                "this run re-baselined"
+                if rebaseline
+                else "no comparable reference"
+            )
         )
+        # Label them. Under a re-baseline the line above already gave a reason,
+        # so bare bullets read as if they explained it; they are a second,
+        # independent fact (PR #42 review round 4).
+        if mismatches and rebaseline:
+            lines.append("    - the stored reference was also incomparable:")
         for reason in mismatches:
-            lines.append(f"    - {reason}")
+            lines.append(f"    {'    ' if rebaseline else ''}- {reason}")
     else:
         lines.append(
             "- L2 regression vs reference: "
@@ -808,7 +957,7 @@ def render_report(
         )
         for failure in regression:
             lines.append(f"    - {failure}")
-    if rebaseline:
+    if rebaseline and wrote_reference:
         lines.append(
             "- L3 re-baseline: **THIS RUN WROTE THE REFERENCE** "
             "(`NOESIS_EVAL_REBASELINE=1`)"
@@ -817,6 +966,17 @@ def render_report(
             "    - `tests/eval/baselines/reference.json` now holds these numbers. "
             "Nothing measured them against a standard — they *are* the new "
             "standard, and L1 above is the only assertion they passed."
+        )
+    elif rebaseline:
+        lines.append(
+            "- L3 re-baseline: **REQUESTED BUT NOT WRITTEN** "
+            "(`NOESIS_EVAL_REBASELINE=1`)"
+        )
+        lines.append(
+            "    - a gate layer above failed, so `tests/eval/baselines/"
+            "reference.json` was NOT touched and still holds the previous "
+            "numbers. A run that fails its own exit criterion is not a "
+            "measurement standard (lesson 8)."
         )
     zero = zero_recall_queries(reports)
     lines.append(
@@ -836,6 +996,32 @@ def render_report(
         )
         for qid, before_v, after_v in lost:
             lines.append(f"    - lost: {qid} {before_v:.2f} -> {after_v:.2f}")
+    has_reference_rows = any(
+        (channel or {}).get("queries") for channel in (reference_channels or {}).values()
+    )
+    if has_reference_rows:
+        # ADR-71: the aggregates cannot see a channel swap WHICH queries it
+        # answers. Reported, never gated. Skipped against a reference recorded
+        # before ADR-69, which stores no rows to compare — otherwise the
+        # zero-recall line below would report every query as newly changed.
+        crossings = reference_query_deltas(reports, reference_channels)
+        lines.append(
+            "- Per-query vs reference (recall@10 crossing zero, reported not "
+            "gated): " + (f"**{len(crossings)}**" if crossings else "none")
+        )
+        for channel, qid, was, now in crossings:
+            verb = "lost" if was > now else "gained"
+            lines.append(
+                f"    - {verb}: {qid} on {channel} {was:.2f} -> {now:.2f}"
+            )
+        ref_zero = zero_recall_queries(reference_channels)
+        if ref_zero != zero:
+            lines.append(
+                "    - zero-recall set changed: was "
+                + (", ".join(ref_zero) or "none")
+                + " / now "
+                + (", ".join(zero) or "none")
+            )
     if regression is None:
         lines.append("")
         lines.append("> **THE TABLES BELOW ARE NOT A GATE.**")
