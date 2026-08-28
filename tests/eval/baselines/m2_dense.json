@@ -24,7 +24,11 @@
     "corpus": "git-tracked tree minus tests/eval/ (see test_golden.py corpus fixture)",
     "date": "2026-07-04",
     "embedding_model": "nomic-ai/CodeRankEmbed",
-    "milestone": "M2"
+    "frozen": true,
+    "known_defect": "nl-10 and symbol-12 both score 0 in this run. An earlier version of this note attributed that to the labeled ranges pointing past EOF the day they were written; the PR #42 round-5 review measured that specific claim false — the ranges were content-valid both before and after a same-day refresh at ce3fc64, and rotted only later, against HEAD, which is issue #38's actual finding (see ADR-64 in decisions.md). These numbers are therefore a floor, not a like-for-like reference (issue #38, Finding C).",
+    "milestone": "M2",
+    "note": "Frozen historical record of what M2 measured on the 2026-07-04 corpus and the pre-ADR-64 positional label set. Read by nothing; kept because docs quote this milestone. The living gate reference is tests/eval/baselines/reference.json. (An earlier version quoted the corpus as \"~94 files\"; the PR #42 round-5 review measured 61/70/76 tracked files across that day's commits and found no tree supporting 94, so the figure was dropped rather than guessed — PR #42 review round 5, finding 17.)",
+    "superseded_by": "tests/eval/baselines/reference.json"
   },
   "overall": {
     "n_queries": 40,

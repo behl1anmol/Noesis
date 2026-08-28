@@ -47,8 +47,12 @@ async def test_structural_pattern_exact_counts(project, gp):
     got: dict[str, int] = {}
     for m in result["matches"]:
         got[m["file_path"]] = got.get(m["file_path"], 0) + 1
+    # timed_out FIRST: a scan that hit its deadline returns {} regardless of
+    # the pattern, and the `got == expected` failure below would otherwise
+    # name the pattern as wrong when the real cause is the scan running out of
+    # time (issue #43; PR #42 review round 5, finding 13).
+    assert result["timed_out"] is False
     assert got == gp.expected, (
         f"{gp.id}: pattern {gp.pattern!r} returned {got}, expected {gp.expected}"
     )
     assert result["truncated"] is False
-    assert result["timed_out"] is False

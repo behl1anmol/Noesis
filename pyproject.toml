@@ -52,7 +52,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: loads the real embedding model (slow, large download); run with -m integration",
-    "golden: M3 eval harness — self-indexes this repo with the real model; run with -m golden",
+    "golden: M3 eval harness — self-indexes this repo with the real model; run with -m golden -s (pytest's stdout capture eats the progress prints without -s)",
     "server: needs a live Qdrant server (docker compose up -d); run with -m server",
 ]
 addopts = "-m 'not integration and not golden and not server'"

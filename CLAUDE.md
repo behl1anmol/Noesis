@@ -9,7 +9,7 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
 
 ## Commands
 - `uv run uvicorn noesis.app:app --host 127.0.0.1 --port 8000`
-- `uv run pytest` | `uv run pytest tests/eval/ -m golden` (harness)
+- `uv run pytest` | `uv run pytest tests/eval/ -m golden -s` (harness)
 - `docker compose up -d` (Qdrant)
 - `python .claude/scripts/devlog.py latest` (session state)
 - `python .claude/scripts/devlog.py checkpoint latest` (most recent checkpoint)
@@ -30,7 +30,7 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
 7. When a mistake is caught (wrong approach, broken invariant, reverted
    work, failed exit criterion), record it with /lesson BEFORE moving on.
    Active lessons in dev/LESSONS.md are binding guidance, second only to
-   these hard rules. A lesson may never weaken rules 1-6.
+   these hard rules. A lesson may never weaken rules 1-6 or 9.
 8. Session state is checkpointed automatically before context compaction
    (PreCompact, both manual and automatic) and best-effort on an API/quota
    failure (StopFailure: rate_limit, billing_error, overloaded), into
@@ -41,6 +41,19 @@ Local-only: no code, query, or metadata ever leaves the machine (ADR-25).
    intent. Use /checkpoint to force a save point before a risky step; /devlog-resume
    to recall the latest one mid-conversation. Never edit dev/devlog.sqlite
    directly — go through devlog.py.
+9. A check nobody has watched fail is not a check.
+   - Tests: run every new regression test against the broken state and see it
+     fail for the reason it was written. Threshold and boundary tests get
+     probed on BOTH sides with an explicit margin — never a bare literal that
+     may be passing on float slack.
+   - Evidence: before a number, an instrument's label, or a docstring/PR
+     claim is quoted (PR body, decision row, doc), execute or perturb it and
+     confirm it moves the way the claim says. A script whose docstring says
+     it is reproducible is not evidence that it is.
+   Green assertions, plausible measurements and unrun scripts are
+   indistinguishable from working ones to a reviewer. Promoted 2026-08-09
+   from lessons 14 (3 occurrences) and 16 (4); incidents in
+   dev/LESSONS-archive.md.
 
 ## Layout
 src/noesis/{core,api,mcp,app.py} — api/ and mcp/ are thin over core/.

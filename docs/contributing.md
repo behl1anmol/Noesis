@@ -20,7 +20,7 @@ Python ≥ 3.11 (3.12 targeted), managed by [uv](https://docs.astral.sh/uv/);
 |---|---|
 | `uv run pytest` | full offline suite (~300 tests) — `FakeEmbedder` + in-memory Qdrant, no Docker, no model downloads |
 | `uv run pytest -m integration` | opt-in: loads the real embedding model |
-| `uv run pytest tests/eval/ -m golden` | the [evaluation harness](internals/evaluation.md) — self-indexes this repo against the 40-query golden set |
+| `uv run pytest tests/eval/ -m golden -s` | the [evaluation harness](internals/evaluation.md) — self-indexes this repo against the 40-query golden set |
 | `bash .claude/scripts/ci_greps.sh` | guardrail greps (local-only invariants) |
 
 ## Guardrails enforced in CI

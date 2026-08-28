@@ -270,7 +270,7 @@ Noesis retrieves over three complementary channels, fused with Reciprocal Rank F
 | **Rerank** | `BAAI/bge-reranker-v2-m3` cross-encoder | reorders the top candidates for precision | **off** (opt-in) |
 
 **Why the reranker is off by default:** measured on a T4 GPU it added ~+0.106 NDCG@10
-but cost ~13 s per reranked query — an unacceptable interactive latency
+but cost ~12.2 s p50 / ~13.4 s p95 per reranked query — an unacceptable interactive latency
 ([ADR-35](architecture-docs/code-indexer-expanded-architecture.md), full numbers in
 [`m4-reranker-benchmarks.md`](architecture-docs/m4-reranker-benchmarks.md)). It ships
 as a per-request opt-in: set `reranker.enabled = true` in config to make it available,
@@ -420,12 +420,12 @@ the dashboard control is locked and shows the pin.
 ```bash
 uv run pytest                          # full suite (offline: fakes, in-memory Qdrant)
 uv run pytest -m integration           # opt-in: loads the real embedding model
-uv run pytest tests/eval/ -m golden    # M3 evaluation harness (self-indexes this repo)
+uv run pytest tests/eval/ -m golden -s    # M3 evaluation harness (self-indexes this repo)
 bash .claude/scripts/ci_greps.sh       # guardrail greps (local-only invariants)
 ```
 
 The suite runs fully offline against a `FakeEmbedder` and an in-memory Qdrant — no
-model download, no Docker required. The `integration` and `golden` marks exercise the
+model download, no Docker required. The `integration`, `golden` and `server` marks exercise the
 real model and are excluded from the default run.
 
 **Guardrails enforced in CI:** no `sentence_transformers` import outside the two model

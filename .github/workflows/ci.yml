@@ -17,7 +17,15 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
+      # Full history, not the default depth-1 clone. tests/eval/test_migrate_labels.py
+      # pins the label migration by reading two commits (216450e, 3307997) out of
+      # git; at depth 1 those objects are absent and the two tests skipped on every
+      # pull request, so the PR body's "pinned in the default suite" was true only
+      # on the author's machine (PR #42 round-2 review). `.git` is ~13 MB here, so
+      # the whole history costs less than the uv sync below.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
       # --locked: fail if uv.lock is stale against pyproject.toml rather than
       # silently re-locking. tests/test_qdrant_pin_compat.py takes the client

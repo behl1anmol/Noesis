@@ -1,0 +1,1632 @@
+{
+  "channels": {
+    "dense": {
+      "categories": {
+        "nl": {
+          "latency_p50_ms": 42.26035700048669,
+          "latency_p95_ms": 283.76040700004523,
+          "n_queries": 14,
+          "ndcg@10": 0.4261733128684399,
+          "recall@10": 0.5357142857142857,
+          "recall@5": 0.5
+        },
+        "structural": {
+          "latency_p50_ms": 39.69356199922913,
+          "latency_p95_ms": 60.46774300011748,
+          "n_queries": 12,
+          "ndcg@10": 0.4052177635008029,
+          "recall@10": 0.5833333333333334,
+          "recall@5": 0.5
+        },
+        "symbol": {
+          "latency_p50_ms": 32.92950600007316,
+          "latency_p95_ms": 52.024156000697985,
+          "n_queries": 14,
+          "ndcg@10": 0.5518658995748361,
+          "recall@10": 0.7857142857142857,
+          "recall@5": 0.7142857142857143
+        }
+      },
+      "overall": {
+        "latency_p50_ms": 39.54706999957125,
+        "latency_p95_ms": 60.46774300011748,
+        "n_queries": 40,
+        "ndcg@10": 0.4638790534053875,
+        "recall@10": 0.6375,
+        "recall@5": 0.575
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.18457569677956817,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.3333333333333333,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.19342640361727081,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.6131471927654584,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.3333333333333333,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
+    },
+    "dense (python-only)": {
+      "categories": {
+        "nl": {
+          "latency_p50_ms": 36.27169899937144,
+          "latency_p95_ms": 48.22176600009698,
+          "n_queries": 14,
+          "ndcg@10": 0.5639284197245749,
+          "recall@10": 0.6071428571428571,
+          "recall@5": 0.6071428571428571
+        },
+        "structural": {
+          "latency_p50_ms": 36.01015599997481,
+          "latency_p95_ms": 50.02961500031233,
+          "n_queries": 12,
+          "ndcg@10": 0.5586985331323738,
+          "recall@10": 0.75,
+          "recall@5": 0.7083333333333334
+        },
+        "symbol": {
+          "latency_p50_ms": 33.38439199978893,
+          "latency_p95_ms": 52.02205300065543,
+          "n_queries": 14,
+          "ndcg@10": 0.610107255363702,
+          "recall@10": 0.7857142857142857,
+          "recall@5": 0.7857142857142857
+        }
+      },
+      "overall": {
+        "latency_p50_ms": 36.01015599997481,
+        "latency_p95_ms": 48.22176600009698,
+        "n_queries": 40,
+        "ndcg@10": 0.5785220462206091,
+        "recall@10": 0.7125,
+        "recall@5": 0.7
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.6131471927654584,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.20438239758848611,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.6131471927654584,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
+    },
+    "hybrid": {
+      "categories": {
+        "nl": {
+          "latency_p50_ms": 72.8885150001588,
+          "latency_p95_ms": 98.91067399985332,
+          "n_queries": 14,
+          "ndcg@10": 0.4748547216345688,
+          "recall@10": 0.6428571428571429,
+          "recall@5": 0.5714285714285714
+        },
+        "structural": {
+          "latency_p50_ms": 64.19282300066698,
+          "latency_p95_ms": 94.22470199933741,
+          "n_queries": 12,
+          "ndcg@10": 0.5368757289317726,
+          "recall@10": 0.8333333333333334,
+          "recall@5": 0.625
+        },
+        "symbol": {
+          "latency_p50_ms": 62.16413499987539,
+          "latency_p95_ms": 97.01871200013557,
+          "n_queries": 14,
+          "ndcg@10": 0.5221859113905175,
+          "recall@10": 0.8571428571428571,
+          "recall@5": 0.7857142857142857
+        }
+      },
+      "overall": {
+        "latency_p50_ms": 68.78538500041032,
+        "latency_p95_ms": 94.69440700013365,
+        "n_queries": 40,
+        "ndcg@10": 0.510026940238312,
+        "recall@10": 0.775,
+        "recall@5": 0.6625
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.31546487678572877,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.2640681225725909,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.3065735963827292,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.3333333333333333,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.9197207891481876,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.31546487678572877,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
+    },
+    "hybrid+rerank": {
+      "categories": {
+        "nl": {
+          "latency_p50_ms": 10363.234938999994,
+          "latency_p95_ms": 13337.218849000237,
+          "n_queries": 14,
+          "ndcg@10": 0.44273899322162497,
+          "recall@10": 0.6428571428571429,
+          "recall@5": 0.5714285714285714
+        },
+        "structural": {
+          "latency_p50_ms": 10630.538487000194,
+          "latency_p95_ms": 11856.994293000753,
+          "n_queries": 12,
+          "ndcg@10": 0.6197177509627686,
+          "recall@10": 0.8333333333333334,
+          "recall@5": 0.8333333333333334
+        },
+        "symbol": {
+          "latency_p50_ms": 10526.917940000203,
+          "latency_p95_ms": 11575.83211400015,
+          "n_queries": 14,
+          "ndcg@10": 0.7230139765210964,
+          "recall@10": 1.0,
+          "recall@5": 0.9285714285714286
+        }
+      },
+      "overall": {
+        "latency_p50_ms": 10593.170932000248,
+        "latency_p95_ms": 11856.994293000753,
+        "n_queries": 40,
+        "ndcg@10": 0.593928864698783,
+        "recall@10": 0.825,
+        "recall@5": 0.775
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.3065735963827292,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.9197207891481876,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 0.6934264036172708,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
+    },
+    "sparse": {
+      "categories": {
+        "nl": {
+          "latency_p50_ms": 30.564685000172176,
+          "latency_p95_ms": 86.00717100034672,
+          "n_queries": 14,
+          "ndcg@10": 0.3740135712588688,
+          "recall@10": 0.5357142857142857,
+          "recall@5": 0.5
+        },
+        "structural": {
+          "latency_p50_ms": 28.952775000107067,
+          "latency_p95_ms": 33.254364000640635,
+          "n_queries": 12,
+          "ndcg@10": 0.6551411272684202,
+          "recall@10": 0.8333333333333334,
+          "recall@5": 0.7916666666666666
+        },
+        "symbol": {
+          "latency_p50_ms": 21.46117400025105,
+          "latency_p95_ms": 29.925440999249986,
+          "n_queries": 14,
+          "ndcg@10": 0.406537079515854,
+          "recall@10": 0.6428571428571429,
+          "recall@5": 0.5714285714285714
+        }
+      },
+      "overall": {
+        "latency_p50_ms": 28.952775000107067,
+        "latency_p95_ms": 33.254364000640635,
+        "n_queries": 40,
+        "ndcg@10": 0.4697350659516791,
+        "recall@10": 0.6625,
+        "recall@5": 0.6125
+      },
+      "queries": [
+        {
+          "category": "nl",
+          "id": "nl-01",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-04",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-06",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-07",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-08",
+          "ndcg@10": 0.21840743681816419,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-09",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-11",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-13",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "nl",
+          "id": "nl-14",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-01",
+          "ndcg@10": 0.5,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-02",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-03",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-04",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-05",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-06",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-07",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-08",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-09",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-10",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-12",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-13",
+          "ndcg@10": 0.3562071871080222,
+          "recall@10": 1.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "symbol",
+          "id": "symbol-14",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-01",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-02",
+          "ndcg@10": 0.0,
+          "recall@10": 0.0,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-03",
+          "ndcg@10": 0.38685280723454163,
+          "recall@10": 0.5,
+          "recall@5": 0.5
+        },
+        {
+          "category": "structural",
+          "id": "structural-04",
+          "ndcg@10": 0.8503449055347546,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-05",
+          "ndcg@10": 0.43067655807339306,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-06",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-07",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-08",
+          "ndcg@10": 0.3010299956639812,
+          "recall@10": 0.5,
+          "recall@5": 0.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-09",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-10",
+          "ndcg@10": 0.6309297535714575,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-11",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        },
+        {
+          "category": "structural",
+          "id": "structural-12",
+          "ndcg@10": 1.0,
+          "recall@10": 1.0,
+          "recall@5": 1.0
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "corpus": {
+      "chunks": 572,
+      "commit": "5ae17ea7afea5fa0d79b0199b1af3d3c77cc2f30",
+      "dirty": false,
+      "files_indexed": 184,
+      "files_total": 184,
+      "manifest_sha256": "2bf3cead1e01cab9559d5ccf5757420702edf851fccabc8255bc9ba61114c559"
+    },
+    "date": "2026-08-28",
+    "device": {
+      "cuda_available": true,
+      "embedder": "cuda",
+      "embedder_batch_size": 32,
+      "reranker": "cuda",
+      "reranker_batch_size": 16,
+      "torch": "2.12.1+cu130"
+    },
+    "duration": {
+      "measure_s": 430.4,
+      "total_s": 828.4
+    },
+    "labels": {
+      "golden_sha256": "6bcd4b113d2e1fba07074b13a57430b224ec2284ac675330b55198012d2d1231",
+      "n_queries": 40
+    },
+    "models": {
+      "embedding_model": "nomic-ai/CodeRankEmbed",
+      "reranker_model": "BAAI/bge-reranker-v2-m3"
+    },
+    "scoring": {
+      "version": 3
+    },
+    "store": {
+      "kind": "embedded",
+      "server_version": null
+    }
+  }
+}

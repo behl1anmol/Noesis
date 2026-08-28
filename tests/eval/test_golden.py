@@ -1,60 +1,156 @@
 """Golden-set evaluation (doc §6.2; M3 + M4 gates) plus harness metric tests.
 
 The ``golden``-marked test self-indexes this repository with the real
-embedder and an in-memory Qdrant, evaluates the dense / sparse / hybrid /
-hybrid+rerank channels against ``tests/eval/golden.yaml``, prints the
-comparison tables (quality + latency p50/p95), and writes
-``tests/eval/report_latest.json``. It asserts only harness mechanics — the
-gates themselves (M3: hybrid beats stored M2 dense; M4: rerank default-on
-only on a measured NDCG@10 win over same-run hybrid, Finding 2) are
-stakeholder decisions made from the printed numbers. The M4 comparison is
-same-run by design: both channels share the corpus, models and labels, so
-no stale stored baseline can skew it (lesson 3).
+embedder and Qdrant (embedded by default, a real server under ADR-66),
+evaluates five channels against ``tests/eval/golden.yaml``, and writes
+``report_latest.json`` plus a rendered ``report_latest.md``.
 
-The unmarked tests cover the metric math with fabricated results and run in
-the default suite.
+It now **gates** (ADR-65), in three layers:
+
+1. Relational, same-run: M3's exit criterion (hybrid beats dense on
+   Recall@10, especially the symbol subset) and ADR-35's rerank NDCG claim.
+   Same corpus, labels and models, so corpus growth cannot skew it.
+2. Regression against one living ``baselines/reference.json``, and only when
+   that reference's provenance says it is comparable — same models, same
+   store, same questions, corpus within a band. Otherwise the run fails with
+   the re-baseline command and the tables are marked NOT A GATE.
+3. No run writes a baseline implicitly. ``NOESIS_EVAL_REBASELINE=1`` is the
+   only write path, it refuses a dirty tree, and layer 1 still asserts.
+
+Before issue #38 the assertions here were harness mechanics only, so a run
+where every metric had halved reported ``1 passed``; the actual gate was a
+human reading a table that the documented ``-q`` invocation suppresses, in a
+tier no CI job runs. None of these layers run in CI either — the cheap part,
+label integrity, lives in ``test_golden_labels.py`` in the default suite.
+
+The unmarked tests here cover the metric math and the gate logic itself with
+fabricated reports, and run in the default suite.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import time
+import uuid
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+import httpx
 import pytest
+import yaml
 from qdrant_client import QdrantClient
 
 from noesis.core import state
+from noesis.core.discovery import discover_files
 from noesis.core.embedder import LocalSTEmbedder
-from noesis.core.indexer import index_project
+from noesis.core.indexer import IndexResult, index_project
 from noesis.core.reranker import LocalCrossEncoderReranker
 from noesis.core.retriever import search_code
 from noesis.core.vectorstore import VectorStore
 
 from .harness import (
     CATEGORIES,
+    CATEGORY_REGRESSION_TOLERANCE,
+    CORPUS_DRIFT_TOLERANCE,
     LATENCY_KEYS,
+    OVERALL_REGRESSION_TOLERANCE,
+    SCORER_VERSION,
     GoldenQuery,
     RelevantItem,
     dedupe_by_path,
     evaluate,
     format_delta,
     format_table,
-    load_baseline,
+    golden_digest,
     load_golden,
+    load_reference,
+    load_structural_patterns,
+    manifest_sha256,
     percentile,
-    save_baseline,
+    reference_mismatches,
+    reference_query_deltas,
+    regression_failures,
+    relational_failures,
+    render_report,
+    rerank_query_deltas,
+    save_reference,
     score_query,
+    zero_recall_queries,
 )
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parents[1]
 GOLDEN_PATH = EVAL_DIR / "golden.yaml"
-BASELINE_PATH = EVAL_DIR / "baselines" / "m2_dense.json"
-M3_BASELINE_PATH = EVAL_DIR / "baselines" / "m3_hybrid.json"
-M4_BASELINE_PATH = EVAL_DIR / "baselines" / "m4_hybrid_rerank.json"
+REFERENCE_PATH = EVAL_DIR / "baselines" / "reference.json"
 REPORT_PATH = EVAL_DIR / "report_latest.json"
+REPORT_MD_PATH = EVAL_DIR / "report_latest.md"
+
+# ADR-65 layer 3. An environment variable rather than a pytest flag, for one
+# property worth having: `.claude/commands/eval.md` may only run
+# `Bash(uv run pytest *:*)`, which cannot carry an env prefix — so /eval is
+# structurally incapable of re-baselining, and recording a new measurement
+# standard stays a deliberate human act with a decision row behind it.
+REBASELINE_ENV = "NOESIS_EVAL_REBASELINE"
+
+# Wall clock from this module's import to the moment provenance is assembled.
+#
+# Recorded because runtime claims about this tier were being quoted from memory:
+# "a thirteen-minute run", "12m58s" — neither appeared in reference.json, in
+# report_latest.*, or in any decision row, because the harness stored no
+# duration at all (PR #42 round-2 review). A number nobody can re-derive from a
+# committed artifact is exactly what hard rule 9 forbids quoting.
+#
+# Import happens at collection, so this covers the corpus build and both model
+# loads as well as the measurement — which is what an operator actually waits
+# for. `measure_s` beside it isolates the part that is retrieval.
+_IMPORTED_AT = time.perf_counter()
+# ADR-66. Unset -> embedded Qdrant, exactly as before.
+QDRANT_URL_ENV = "NOESIS_EVAL_QDRANT_URL"
+
+# Model placement. Unset -> today's behaviour exactly: `resolve_device`
+# auto-detects and the runners use their own default batch sizes.
+#
+# These exist because the harness had no way to place its models at all. It
+# constructs LocalSTEmbedder() and LocalCrossEncoderReranker() directly and
+# never reads config.toml, so the `[embedder]`/`[reranker] device` knobs that
+# production honours could not reach it. On a 16 GB T4 (where the M4
+# benchmarks were measured) that is invisible; on an 8 GB laptop GPU, indexing
+# this corpus with both a 137M embedder and a 568M cross-encoder resident
+# drove device memory to 7600 MiB of 8151 and WSL2's paravirtualization layer
+# failed an allocation with `dxgkio_make_resident: Ioctl failed: -12`
+# (ENOMEM) — which CUDA then surfaced as `cudaErrorIllegalInstruction`, not as
+# an out-of-memory error. Placement is recorded in provenance, so a reference
+# always says how it was measured.
+EMBEDDER_DEVICE_ENV = "NOESIS_EVAL_EMBEDDER_DEVICE"
+RERANKER_DEVICE_ENV = "NOESIS_EVAL_RERANKER_DEVICE"
+EMBED_BATCH_ENV = "NOESIS_EVAL_EMBED_BATCH_SIZE"
+RERANK_BATCH_ENV = "NOESIS_EVAL_RERANK_BATCH_SIZE"
+
+
+def _env_device(name: str) -> str | None:
+    """A device string for `resolve_device`, which takes a non-empty value
+    verbatim — the operator's explicit choice is never second-guessed."""
+    return os.environ.get(name) or None
+
+
+def _env_batch_size(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        # ValueError, not pytest.fail: same fail-loudly rule load_golden uses,
+        # and it keeps the helper testable without reaching into pytest's
+        # BaseException-derived outcomes.
+        raise ValueError(f"{name}={raw!r} is not an integer") from exc
+    if value < 1:
+        raise ValueError(f"{name}={value} must be >= 1")
+    return value
 
 
 # --- metric math (default suite, no model) ---------------------------------
@@ -105,6 +201,115 @@ def test_dedupe_keeps_best_rank_and_counts_file_once():
     assert scores["recall@10"] == 0.5
 
 
+def test_matching_chunk_survives_a_higher_ranked_sibling():
+    """ADR-67: the right chunk must not be discarded by a wrong one.
+
+    Taken from the measured failure — query `chunk_point_id` retrieved a usage
+    chunk of vectorstore.py at rank 1 and the chunk holding the definition at
+    rank 2, and the old scoring kept only the first, reporting 0.
+    """
+    relevant = (RelevantItem("vectorstore.py", lines=(75, 75)),)
+    results = [
+        result("vectorstore.py", 171, 296),  # usage chunk, outranks the answer
+        result("vectorstore.py", 1, 83),  # holds the definition at line 75
+    ]
+    scores = score_query(results, relevant)
+    assert scores["recall@10"] == 1.0
+    # One rank slot for the file, so NDCG credits rank 0, not rank 1.
+    assert scores["ndcg@10"] == 1.0
+
+
+def test_one_file_can_answer_two_relevant_items_via_different_chunks():
+    """structural-08 labels two endpoints in the same file; both must count."""
+    relevant = (
+        RelevantItem("routes.py", lines=(69, 70)),
+        RelevantItem("routes.py", lines=(102, 106)),
+    )
+    results = [result("routes.py", 60, 90), result("routes.py", 99, 207)]
+    assert score_query(results, relevant)["recall@10"] == 1.0
+
+
+def test_credit_is_assigned_optimally_not_first_fit():
+    """A chunk must not spend itself on an item another chunk could have taken.
+
+    ADR-67 removed the case where a matching chunk was discarded because a
+    sibling outranked it. This is the same defect one level lower, inside the
+    assignment: chunk A overlaps both labels, chunk B overlaps only L0. First
+    fit hands A to L0 (it is simply first in the list), which leaves B with
+    nothing to credit and L0's partner unmatched — 0.5, with *both* labels
+    sitting inside retrieved chunks.
+
+    Which assertion carries which claim, because they are not the same claim
+    (PR #42 review round 4). Only the FIRST ordering reproduces the defect: run
+    against the pre-fix scorer it gives ``recall@10 == 0.5``, while the reversed
+    ordering already gave 1.0 under first fit — the wide chunk meets L1 first
+    there and first fit happens to guess right. The second assertion therefore
+    pins order-independence, not the defect, and is kept for exactly that.
+    """
+    l0, l1 = RelevantItem("f.py", lines=(10, 12)), RelevantItem("f.py", lines=(40, 42))
+    wide, narrow = result("f.py", 1, 50), result("f.py", 9, 13)
+    # The discriminating case: first fit scores 0.5 here.
+    assert score_query([wide, narrow], (l0, l1))["recall@10"] == 1.0
+    # Order-independence: first fit also scores 1.0 here, by luck.
+    assert score_query([wide, narrow], (l1, l0))["recall@10"] == 1.0
+    # The file still occupies one rank slot, and — since PR #42 review round 5
+    # finding 1 — IDCG's ideal now counts unique FILES rather than items, so a
+    # query whose two labels share one file has an ideal of exactly one slot.
+    # Answering both fills that one slot completely: ndcg@10 == 1.0. Before the
+    # fix this scored 0.6131 (1 / (1 + 1/log2(3))), the mathematical ceiling for
+    # an ideal that could never be reached because IDCG assumed two slots DCG
+    # can only ever fill one of.
+    assert score_query([wide, narrow], (l0, l1))["ndcg@10"] == pytest.approx(
+        1.0, abs=1e-9
+    )
+
+
+def test_ndcg_ideal_counts_unique_files_not_relevant_items():
+    """Pins PR #42 review round 5, finding 1, against both shapes it names.
+
+    Same-file case: with the fix, DCG's binary per-slot gain (module doc: "a
+    file scores one slot however many of its labels it answers") means
+    answering ONE of two same-file labels already fills that file's one
+    possible slot — ndcg@10 is 1.0 whether one or both labels are matched.
+    Verified rather than assumed: the round-5 review's own aside ("a half
+    answer scores less than a full one") does not hold for this shape, and
+    was never quoted there with a computed number the way the 0.6131 finding
+    was — recall@10 is what tells a half answer from a full one here (0.5 vs
+    1.0), which is the metric that already discriminates.
+
+    Cross-file case: two relevant items in two DIFFERENT files is where
+    "half answered scores less than fully answered" is actually true and was
+    already true before this fix — `len({paths})` and `len(relevant)` agree
+    when no two items share a path, so this shape was never broken.
+    """
+    l0, l1 = RelevantItem("f.py", lines=(10, 12)), RelevantItem("f.py", lines=(40, 42))
+    wide, narrow = result("f.py", 1, 50), result("f.py", 9, 13)
+    both = score_query([wide, narrow], (l0, l1))
+    half = score_query([narrow], (l0, l1))  # only l0 retrieved; l1 not retrieved at all
+    assert both["recall@10"] == 1.0 and half["recall@10"] == 0.5
+    assert both["ndcg@10"] == pytest.approx(1.0, abs=1e-9)
+    assert half["ndcg@10"] == pytest.approx(1.0, abs=1e-9)  # saturates, by design
+
+    a0, b0 = RelevantItem("a.py", lines=(1, 1)), RelevantItem("b.py", lines=(1, 1))
+    full_cross = score_query([result("a.py", 1, 5), result("b.py", 1, 5)], (a0, b0))
+    half_cross = score_query([result("a.py", 1, 5)], (a0, b0))
+    assert full_cross["ndcg@10"] == pytest.approx(1.0, abs=1e-9)
+    assert half_cross["ndcg@10"] < full_cross["ndcg@10"]
+
+
+def test_grouping_still_counts_one_file_as_one_rank_slot():
+    """The property the old dedupe existed to protect, kept intact: a file's
+    many chunks must not flood the ranking and push a second relevant file
+    out of the top k."""
+    relevant = (RelevantItem("a.py"), RelevantItem("b.py"))
+    results = [result("a.py", i * 10, i * 10 + 9) for i in range(8)] + [
+        result("b.py", 1, 10)
+    ]
+    scores = score_query(results, relevant, ks=(5,))
+    # b.py sits at raw index 8 but group index 1 — inside @5.
+    assert scores["recall@5"] == 1.0
+
+
 def test_two_relevant_greedy_credit():
     relevant = (
         RelevantItem("a.py", lines=(1, 10)),
@@ -112,6 +317,42 @@ def test_two_relevant_greedy_credit():
     )
     # One deduped result can credit only one of two same-file items.
     scores = score_query([result("a.py", 1, 60)], relevant)
+    assert scores["recall@10"] == 0.5
+
+
+def test_score_query_rejects_non_positive_k():
+    """The k<=0 guard round 4 added had no test at all — the mutant that
+    deletes the guard entirely survives the whole suite without this (PR #42
+    review round 5, finding 6)."""
+    relevant = (RelevantItem("a.py"),)
+    with pytest.raises(ValueError, match="k must be >= 1"):
+        score_query([result("a.py")], relevant, ks=(0,))
+    # Margin: k=1 is the smallest valid value and must not raise.
+    assert score_query([result("a.py")], relevant, ks=(1,))["recall@1"] == 1.0
+
+
+def test_score_query_rejects_empty_relevant():
+    """`load_golden` already refuses this at parse time, but `score_query` is
+    exported and directly unit-tested, and an empty tuple otherwise divides by
+    zero at the recall line instead of naming what went wrong (PR #42 review
+    round 5, finding 23)."""
+    with pytest.raises(ValueError, match="relevant"):
+        score_query([result("a.py")], ())
+
+
+def test_score_query_dedupes_identical_chunk_ids_before_matching():
+    """One physical chunk retrieved twice (duplicate chunk_id) must not get
+    two rank slots' worth of credit — that would let one wide chunk answer
+    both labels of a two-label query, defeating the one-chunk-one-item cap
+    ADR-68's matching relies on. Latent today: the current retriever cannot
+    produce this (Qdrant's FusionQuery(RRF) fuses by point id), so this is
+    robustness rather than a live bug (PR #42 review round 5, finding 26)."""
+    l0 = RelevantItem("f.py", lines=(10, 12))
+    l1 = RelevantItem("f.py", lines=(40, 42))
+    wide = {"file_path": "f.py", "start_line": 1, "end_line": 50, "chunk_id": "w"}
+    duplicate_of_wide = dict(wide)
+    scores = score_query([wide, duplicate_of_wide], (l0, l1))
+    # One physical chunk can credit at most one label, duplicate or not.
     assert scores["recall@10"] == 0.5
 
 
@@ -159,30 +400,1079 @@ async def test_evaluate_reports_latency_percentiles():
     assert report["categories"]["symbol"]["latency_p50_ms"] == 0.0
 
 
+def _golden_yaml(body: str) -> str:
+    return "queries:\n  - id: x\n    category: nl\n    query: q\n" + body
+
+
 def test_load_golden_rejects_bad_entries(tmp_path):
     bad = tmp_path / "golden.yaml"
     bad.write_text("queries:\n  - id: x\n    category: nope\n    query: q\n")
     with pytest.raises(ValueError, match="category"):
-        load_golden(bad)
+        load_golden(bad, tmp_path)
     bad.write_text("queries:\n  - id: x\n    category: nl\n    query: q\n")
     with pytest.raises(ValueError, match="relevant"):
-        load_golden(bad)
+        load_golden(bad, tmp_path)
 
 
-# --- golden-set run (opt-in: uv run pytest tests/eval/ -m golden) -----------
+def test_load_golden_resolves_anchors(tmp_path):
+    (tmp_path / "a.py").write_text("import os\n\n\ndef target():\n    return 1\n")
+    good = tmp_path / "golden.yaml"
+    good.write_text(
+        _golden_yaml(
+            '    relevant:\n      - path: a.py\n        anchor: "def target():"\n'
+        )
+    )
+    item = load_golden(good, tmp_path)[0].relevant[0]
+    assert item.lines == (4, 4)  # anchor alone -> a one-line span
+
+    good.write_text(
+        _golden_yaml(
+            "    relevant:\n      - path: a.py\n"
+            '        anchor: "def target():"\n        anchor_end: "return 1"\n'
+        )
+    )
+    assert load_golden(good, tmp_path)[0].relevant[0].lines == (4, 5)
+
+
+def test_load_golden_rejects_unknown_and_legacy_item_keys(tmp_path):
+    """A mistyped key must raise, not be dropped.
+
+    Reproduced against the pre-fix loader: an item carrying ``lines: [1, 3]``
+    plus a junk key loaded clean, ``lines`` was ignored, and the span came from
+    the anchor alone. The harmful case is a typo of ``anchor_end`` — it silently
+    shrinks the span to one line, and ``matches`` is a span-overlap test, so the
+    label quietly credits less than it was written to credit.
+    """
+    (tmp_path / "a.py").write_text("import os\n\n\ndef target():\n    return 1\n")
+    bad = tmp_path / "golden.yaml"
+    base = '    relevant:\n      - path: a.py\n        anchor: "def target():"\n'
+
+    bad.write_text(_golden_yaml(base + "        lines: [1, 3]\n"))
+    with pytest.raises(ValueError, match="ADR-64"):
+        load_golden(bad, tmp_path)
+
+    bad.write_text(_golden_yaml(base + '        anchor-end: "return 1"\n'))
+    with pytest.raises(ValueError, match="unknown key"):
+        load_golden(bad, tmp_path)
+
+    # The margin: the correctly spelled key still loads, and still widens.
+    bad.write_text(_golden_yaml(base + '        anchor_end: "return 1"\n'))
+    assert load_golden(bad, tmp_path)[0].relevant[0].lines == (4, 5)
+
+
+def test_load_golden_rejects_unknown_keys_at_the_query_level_too(tmp_path):
+    """The item-level guard was escapable by one indent (PR #42 review round 4).
+
+    A correctly spelled ``anchor_end`` written one level out lands on the QUERY
+    mapping, where it was accepted and dropped — so the label's span silently
+    collapsed to its anchor line, which is the exact failure the item-level
+    guard was added for, surviving one level above it. Both levels are checked
+    now, and the reproduction is the span: 4-5 when the key is placed right,
+    4-4 when it drifts out.
+    """
+    (tmp_path / "a.py").write_text("import os\n\n\ndef target():\n    return 1\n")
+    bad = tmp_path / "golden.yaml"
+    item = '    relevant:\n      - path: a.py\n        anchor: "def target():"\n'
+
+    # `anchor_end` at query indent (4 spaces) instead of item indent (8).
+    bad.write_text(_golden_yaml(item + '    anchor_end: "return 1"\n'))
+    with pytest.raises(ValueError, match="unknown key"):
+        load_golden(bad, tmp_path)
+
+    bad.write_text(_golden_yaml(item + "    lines: [1, 3]\n"))
+    with pytest.raises(ValueError, match="ADR-64"):
+        load_golden(bad, tmp_path)
+
+    # A non-string key must still produce the written message, not a TypeError
+    # from sorting int against str.
+    bad.write_text(_golden_yaml(item + "    1: 2\n    oops: 3\n"))
+    with pytest.raises(ValueError, match="unknown key"):
+        load_golden(bad, tmp_path)
+
+    # The margin: the four real query keys load unchanged.
+    bad.write_text(_golden_yaml(item))
+    assert load_golden(bad, tmp_path)[0].relevant[0].lines == (4, 4)
+
+
+def test_load_golden_rejects_unknown_top_level_keys(tmp_path):
+    """Round 4 hardened query-level and item-level typos; the top level had
+    the same silent-drop hole one level further out (PR #42 review round 5,
+    finding 25)."""
+    bad = tmp_path / "golden.yaml"
+    bad.write_text("queries: []\ntypo_key: 1\n")
+    with pytest.raises(ValueError, match="unknown key"):
+        load_golden(bad, tmp_path)
+
+    # The margin: both real top-level keys load unchanged.
+    ok = tmp_path / "ok.yaml"
+    ok.write_text("queries: []\nstructural_patterns: []\n")
+    assert load_golden(ok, tmp_path) == []
+
+
+def test_load_structural_patterns_rejects_unknown_keys(tmp_path):
+    """The docstring already claimed load_golden's fail-loudly rule; nothing
+    enforced it — a typo'd key ("expectd") loaded clean and silently dropped
+    what it named (PR #42 review round 5, finding 11)."""
+    good = tmp_path / "golden.yaml"
+    good.write_text(
+        "structural_patterns:\n"
+        "  - id: s1\n"
+        "    pattern: 'x'\n"
+        "    language: python\n"
+        "    expected: {a.py: 1}\n"
+    )
+    assert load_structural_patterns(good)[0].expected == {"a.py": 1}
+
+    # The repro that mattered: BOTH the correct key and a typo present, so the
+    # old loader used `expected` and silently dropped `expectd` — the typo'd
+    # extra file never got checked at all, rather than raising anything.
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "structural_patterns:\n"
+        "  - id: s1\n"
+        "    pattern: 'x'\n"
+        "    language: python\n"
+        "    expected: {a.py: 1}\n"
+        "    expectd: {b.py: 9}\n"
+    )
+    with pytest.raises(ValueError, match="unknown key"):
+        load_structural_patterns(bad)
+
+
+def test_load_golden_rejects_unresolvable_anchors(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\nx = 1\ndef target():\n    return 1\n")
+    bad = tmp_path / "golden.yaml"
+
+    # ADR-64's whole point: a label that stopped matching raises instead of
+    # silently scoring its query 0 forever (issue #38, Finding C).
+    bad.write_text(
+        _golden_yaml('    relevant:\n      - path: a.py\n        anchor: "gone()"\n')
+    )
+    with pytest.raises(ValueError, match="matches no line"):
+        load_golden(bad, tmp_path)
+
+    bad.write_text(
+        _golden_yaml('    relevant:\n      - path: a.py\n        anchor: "x = 1"\n')
+    )
+    with pytest.raises(ValueError, match="matches 2 lines"):
+        load_golden(bad, tmp_path)
+
+    bad.write_text(
+        _golden_yaml(
+            "    relevant:\n      - path: a.py\n"
+            '        anchor: "def target():"\n        anchor_end: "x = 1"\n'
+        )
+    )
+    with pytest.raises(ValueError, match="matches 2 lines"):
+        load_golden(bad, tmp_path)
+
+    bad.write_text(
+        _golden_yaml('    relevant:\n      - path: missing.py\n        anchor: "z"\n')
+    )
+    with pytest.raises(ValueError, match="does not exist"):
+        load_golden(bad, tmp_path)
+
+    # An item with a path and nothing else. This is what covers the "has no
+    # 'anchor'" branch, and it needs no other key: written with `lines: [1, 2]`
+    # it stopped exercising that branch when the legacy-key guard landed, and
+    # `match="anchor"` was loose enough to keep passing against the *other*
+    # message — which mentions "anchors" too (PR #42 review round 4).
+    bad.write_text(_golden_yaml("    relevant:\n      - path: a.py\n"))
+    with pytest.raises(ValueError, match="has no 'anchor'"):
+        load_golden(bad, tmp_path)
+
+
+def test_load_golden_rejects_reversed_anchor_end(tmp_path):
+    (tmp_path / "a.py").write_text("first = 1\ndef target():\n    return 1\n")
+    bad = tmp_path / "golden.yaml"
+    bad.write_text(
+        _golden_yaml(
+            "    relevant:\n      - path: a.py\n"
+            '        anchor: "def target():"\n        anchor_end: "first = 1"\n'
+        )
+    )
+    with pytest.raises(ValueError, match="before"):
+        load_golden(bad, tmp_path)
+
+
+# --- gate logic (default suite, fabricated reports, no model) --------------
+
+
+def _row(n: int, r5: float, r10: float, ndcg: float) -> dict:
+    return {
+        "n_queries": n,
+        "recall@5": r5,
+        "recall@10": r10,
+        f"ndcg@{10}": ndcg,
+        "latency_p50_ms": 1.0,
+        "latency_p95_ms": 2.0,
+    }
+
+
+def _report(r5: float, r10: float, ndcg: float, symbol_r10: float | None = None) -> dict:
+    categories = {
+        "nl": _row(14, r5, r10, ndcg),
+        "symbol": _row(14, r5, symbol_r10 if symbol_r10 is not None else r10, ndcg),
+        "structural": _row(12, r5, r10, ndcg),
+    }
+    return {"overall": _row(40, r5, r10, ndcg), "categories": categories}
+
+
+def _provenance(**overrides) -> dict:
+    base = {
+        "corpus": {"chunks": 5000, "files_indexed": 184},
+        "models": {
+            "embedding_model": "nomic-ai/CodeRankEmbed",
+            "reranker_model": "BAAI/bge-reranker-v2-m3",
+        },
+        "store": {"kind": "embedded", "server_version": None},
+        "labels": {"golden_sha256": "abc", "n_queries": 40},
+        "scoring": {"version": SCORER_VERSION},
+    }
+    base.update(overrides)
+    return base
+
+
+# The numbers issue #38 actually observed: a full golden run whose metrics had
+# roughly halved against the stored M2 baseline, which the old gate passed.
+_DEGRADED = {
+    "dense": _report(0.3750, 0.4125, 0.2992),
+    "hybrid": _report(0.4375, 0.5000, 0.3404),
+    "hybrid+rerank": _report(0.5000, 0.5875, 0.4196),
+}
+_M2_REFERENCE_CHANNELS = {"dense": _report(0.6500, 0.7375, 0.6149)}
+
+
+def test_regression_gate_catches_the_halving_that_shipped_green():
+    """The keystone: the exact run issue #38 was filed about must now FAIL.
+
+    Without this the new gate would be exactly as unverified as the one it
+    replaces (lesson 2: never assert before seeing the losing outcome).
+    """
+    failures = regression_failures(_DEGRADED, _M2_REFERENCE_CHANNELS)
+    assert failures, "the gate must reject a run where every metric halved"
+    assert any("dense/overall/recall@10" in f for f in failures)
+
+
+def test_relational_gate_alone_would_have_passed_the_halving():
+    """Why layer 2 is not redundant, stated as a test rather than a comment.
+
+    In that same degraded run dense 0.4125 < hybrid 0.5000 < rerank, so every
+    relational claim still held. Uniform degradation is invisible to a
+    same-run comparison by construction — which is exactly the blind spot the
+    provenance-guarded reference exists to cover.
+    """
+    assert relational_failures(_DEGRADED) == []
+
+
+def test_relational_gate_catches_hybrid_losing_to_dense():
+    reports = {
+        "dense": _report(0.65, 0.74, 0.61),
+        "hybrid": _report(0.60, 0.70, 0.58),
+        "hybrid+rerank": _report(0.62, 0.72, 0.60),
+    }
+    failures = relational_failures(reports)
+    assert any("must beat dense" in f for f in failures)
+
+
+def test_relational_gate_catches_symbol_subset_and_rerank_losses():
+    symbol_loss = {
+        "dense": _report(0.65, 0.74, 0.61, symbol_r10=0.90),
+        "hybrid": _report(0.66, 0.75, 0.62, symbol_r10=0.80),
+        "hybrid+rerank": _report(0.67, 0.76, 0.63, symbol_r10=0.80),
+    }
+    assert any("symbol subset" in f for f in relational_failures(symbol_loss))
+
+    rerank_loss = {
+        "dense": _report(0.65, 0.74, 0.61),
+        "hybrid": _report(0.66, 0.75, 0.62),
+        "hybrid+rerank": _report(0.66, 0.75, 0.55),
+    }
+    assert any("ADR-35" in f for f in relational_failures(rerank_loss))
+
+
+def test_relational_gate_tie_overall_fails_but_tie_on_symbol_passes():
+    """The two operators `harness.py` argues for at length, pinned (PR #42
+    review round 5, finding 4). Overall uses `<=` because a tie is a real
+    result at n=40; the symbol subset uses `<` because n=14 makes a tie the
+    resolution limit, not a regression. Both flips silently held the whole
+    suite before this test existed.
+    """
+    tied_overall = {
+        "dense": _report(0.65, 0.70, 0.60, symbol_r10=0.80),
+        "hybrid": _report(0.65, 0.70, 0.60, symbol_r10=0.80),  # exact tie
+        "hybrid+rerank": _report(0.65, 0.72, 0.62, symbol_r10=0.80),
+    }
+    assert any("must beat dense" in f for f in relational_failures(tied_overall))
+
+    tied_symbol_only = {
+        "dense": _report(0.65, 0.75, 0.60, symbol_r10=0.80),
+        "hybrid": _report(0.66, 0.76, 0.61, symbol_r10=0.80),  # overall wins, symbol ties
+        "hybrid+rerank": _report(0.67, 0.77, 0.62, symbol_r10=0.80),
+    }
+    assert not any("symbol subset" in f for f in relational_failures(tied_symbol_only))
+
+
+def test_model_placement_env_defaults_to_current_behaviour(monkeypatch):
+    for name in (EMBEDDER_DEVICE_ENV, RERANKER_DEVICE_ENV, EMBED_BATCH_ENV):
+        monkeypatch.delenv(name, raising=False)
+    assert _env_device(EMBEDDER_DEVICE_ENV) is None  # -> resolve_device auto
+    assert _env_batch_size(EMBED_BATCH_ENV, 32) == 32
+
+    monkeypatch.setenv(RERANKER_DEVICE_ENV, "cpu")
+    monkeypatch.setenv(EMBED_BATCH_ENV, "8")
+    assert _env_device(RERANKER_DEVICE_ENV) == "cpu"
+    assert _env_batch_size(EMBED_BATCH_ENV, 32) == 8
+
+    # An empty value is "unset", not an empty device string — resolve_device
+    # takes any non-empty value verbatim and would try to load onto "".
+    monkeypatch.setenv(RERANKER_DEVICE_ENV, "")
+    assert _env_device(RERANKER_DEVICE_ENV) is None
+
+
+def test_model_placement_env_rejects_nonsense(monkeypatch):
+    """Fail loudly rather than silently falling back to a default the operator
+    did not ask for — a run placed differently than requested is a benchmark
+    whose provenance lies."""
+    monkeypatch.setenv(EMBED_BATCH_ENV, "lots")
+    with pytest.raises(ValueError, match="not an integer"):
+        _env_batch_size(EMBED_BATCH_ENV, 32)
+    monkeypatch.setenv(EMBED_BATCH_ENV, "0")
+    with pytest.raises(ValueError, match="must be >= 1"):
+        _env_batch_size(EMBED_BATCH_ENV, 32)
+
+
+def test_diagnostic_channel_is_recorded_but_never_gated():
+    """The python-only channel explains regressions; it does not detect them.
+
+    It is stored in the reference like every other channel, so the trend is
+    readable, but a drop in it must not fail a run — `dense` already carries
+    that evidence, and gating both would double-count it.
+    """
+    reference = {
+        "dense": _report(0.65, 0.7375, 0.6149),
+        "dense (python-only)": _report(0.80, 0.90, 0.85),
+    }
+    collapsed = {
+        "dense": _report(0.65, 0.7375, 0.6149),
+        "dense (python-only)": _report(0.10, 0.10, 0.10),
+    }
+    assert regression_failures(collapsed, reference) == []
+
+
+def test_regression_gate_passes_an_identical_run_and_tolerates_one_query():
+    same = {"dense": _report(0.65, 0.7375, 0.6149)}
+    assert regression_failures(same, same) == []
+
+    # One query of 40 is 0.025 absolute. A relative band alone would call that
+    # a 3.4% drop and pass it; the absolute floor is what makes "one query is
+    # noise" true regardless of the score level.
+    one_query_worse = {"dense": _report(0.65, 0.7375 - 0.025, 0.6149)}
+    assert regression_failures(one_query_worse, same) == []
+
+    # The binding limit here is the RELATIVE band: 10% of 0.7375 = 0.07375,
+    # above one query's 1/40 = 0.025. Probed from both sides with a margin
+    # (see the floor test below for why a bare literal is not enough).
+    # The tolerance is imported, not retyped: a literal 0.10 here would keep
+    # passing if the constant moved, testing the number rather than the gate
+    # (PR #42 review round 4) — the sibling floor test already imports its own.
+    limit = OVERALL_REGRESSION_TOLERANCE * 0.7375
+    assert OVERALL_REGRESSION_TOLERANCE * 0.7375 > 1 / 40, (
+        "this test asserts the RELATIVE band binds; if the tolerance ever drops "
+        "below one query it is probing the absolute floor instead"
+    )
+    just_under = {"dense": _report(0.65, 0.7375 - limit * 0.999, 0.6149)}
+    assert regression_failures(just_under, same) == []
+
+    # Exactly ON the boundary: the gate fires on `>`, not `>=`, so a drop
+    # exactly equal to the limit must still PASS. Without this probe,
+    # tightening `>` to `>=` survives the whole suite (PR #42 review round 5,
+    # finding 5) — the two straddling probes above never land on the point
+    # that tells them apart.
+    at_boundary = {"dense": _report(0.65, 0.7375 - limit, 0.6149)}
+    assert regression_failures(at_boundary, same) == []
+
+    just_over = {"dense": _report(0.65, 0.7375 - limit * 1.001, 0.6149)}
+    failures = regression_failures(just_over, same)
+    assert any("dense/overall/recall@10" in f for f in failures)
+
+
+def test_regression_gate_absolute_floor_holds_at_low_scores():
+    """The bug a purely relative band would have: at a low baseline, one
+    query's movement exceeds any sane relative percentage.
+
+    Probed with an explicit margin on both sides. Written as the bare literal
+    ``0.25 - (1 / 12)`` this passed on 1.4e-17 of float slack — reassociating
+    the arithmetic flipped it red — and it never asserted that the gate FIRES
+    just above the floor, so half of the boundary was untested (PR #42 review).
+    """
+    low = {"dense": _report(0.20, 0.25, 0.20)}
+    # structural is the smallest category (n=12), so one query is 1/12 ≈ 0.083:
+    # a 33% relative drop, way past the 20% category band, but still one query.
+    # The floor is what has to win here, and only here.
+    one_query = 1 / 12
+    assert one_query > CATEGORY_REGRESSION_TOLERANCE * 0.25, (
+        "this test only means something while the floor, not the relative "
+        "band, is the binding limit at this score level"
+    )
+
+    inside = {"dense": _report(0.20, 0.25, 0.20)}
+    inside["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query * 0.999
+    assert regression_failures(inside, low) == []
+
+    # Exactly ON the floor: `>`, not `>=`, so a drop of exactly one query's
+    # worth must still PASS — round 4 added this discipline for
+    # CORPUS_DRIFT_TOLERANCE but not for this threshold (PR #42 review round
+    # 5, finding 5).
+    at_boundary = {"dense": _report(0.20, 0.25, 0.20)}
+    at_boundary["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query
+    assert regression_failures(at_boundary, low) == []
+
+    outside = {"dense": _report(0.20, 0.25, 0.20)}
+    outside["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query * 1.001
+    failures = regression_failures(outside, low)
+    assert any("dense/structural/recall@10" in f for f in failures)
+
+
+def test_reference_mismatches_names_every_incomparability():
+    run = _provenance()
+    assert reference_mismatches(run, run) == []
+
+    other_model = _provenance(
+        models={"embedding_model": "other", "reranker_model": "BAAI/bge-reranker-v2-m3"}
+    )
+    assert any("embedding_model" in r for r in reference_mismatches(other_model, run))
+
+    server = _provenance(store={"kind": "server", "server_version": "1.18.3"})
+    assert any("store kind" in r for r in reference_mismatches(server, run))
+
+    relabeled = _provenance(labels={"golden_sha256": "zzz", "n_queries": 40})
+    assert any("golden.yaml changed" in r for r in reference_mismatches(relabeled, run))
+
+    grown = _provenance(corpus={"chunks": 10000, "files_indexed": 380})
+    reasons = reference_mismatches(grown, run)
+    assert any("corpus drift" in r and "files indexed" in r for r in reasons)
+
+    # Either side failing to record its corpus size is an incomparability, not
+    # a reason to skip the check — the two must be symmetric (PR #42 review).
+    countless = _provenance(corpus={"files_indexed": 184})
+    assert any("reference records no chunk count" in r
+               for r in reference_mismatches(countless, run))
+    assert any("run records no chunk count" in r
+               for r in reference_mismatches(run, countless))
+
+    # Three branches that existed but nothing exercised (PR #42 review round 4).
+    other_reranker = _provenance(
+        models={"embedding_model": "nomic-ai/CodeRankEmbed", "reranker_model": "other"}
+    )
+    assert any("reranker_model" in r for r in reference_mismatches(other_reranker, run))
+
+    newer_server = _provenance(store={"kind": "embedded", "server_version": "1.19.0"})
+    assert any("server version" in r for r in reference_mismatches(newer_server, run))
+
+    fewer = _provenance(labels={"golden_sha256": "abc", "n_queries": 39})
+    assert any("query count" in r for r in reference_mismatches(fewer, run))
+
+
+def test_reference_mismatches_names_a_scorer_change():
+    """ADR-70: a reference measured under different scoring rules cannot gate.
+
+    The gap this closes is not hypothetical. ADR-67 and ADR-68 each changed
+    what a retrieved chunk credits, and both times nothing in the gate noticed
+    — the reference was replaced because a human remembered to. A reference
+    that predates the field carries no version at all and must refuse by
+    absence rather than pass by it.
+    """
+    run = _provenance()
+    older = _provenance(scoring={"version": SCORER_VERSION - 1})
+    assert any("scorer version" in r for r in reference_mismatches(older, run))
+
+    unversioned = _provenance()
+    del unversioned["scoring"]
+    assert any("scorer version" in r for r in reference_mismatches(unversioned, run))
+    # Symmetric: a run that cannot say which scorer produced it is equally
+    # uncomparable, and must not be gated against a versioned reference.
+    assert any("scorer version" in r for r in reference_mismatches(run, unversioned))
+
+    # The margin on the other side: matching versions are not an obstacle.
+    assert reference_mismatches(run, _provenance()) == []
+
+
+def test_reference_mismatches_refuses_an_explicit_null_section_instead_of_crashing():
+    """`.get(section, {})` covers a MISSING section; a present-but-`null` one
+    (a malformed or hand-edited provenance block) reached `.get()` on `None`
+    and crashed with AttributeError instead of refusing (PR #42 review round
+    5, finding 12). ADR-70's documented behaviour — "reads as None and refuses
+    in both directions" — held for absence but not for an explicit null.
+    """
+    run = _provenance()
+    assert any(
+        "scorer version" in r for r in reference_mismatches(_provenance(scoring=None), run)
+    )
+    assert any(
+        "embedding_model" in r for r in reference_mismatches(_provenance(models=None), run)
+    )
+    assert any(
+        "store kind" in r for r in reference_mismatches(_provenance(store=None), run)
+    )
+    assert any(
+        "golden.yaml changed" in r
+        for r in reference_mismatches(_provenance(labels=None), run)
+    )
+    assert any(
+        "chunk count" in r for r in reference_mismatches(_provenance(corpus=None), run)
+    )
+
+
+def test_reference_mismatches_tolerates_ordinary_corpus_growth():
+    run = _provenance(corpus={"chunks": 5500, "files_indexed": 195})
+    assert reference_mismatches(_provenance(), run) == []
+
+
+def test_corpus_drift_band_is_probed_on_both_sides():
+    """The drift band, with an explicit margin either side.
+
+    It was the one threshold in the gate with no both-sides probe: the existing
+    tests sit at 10% (passes) and 100% (fires), which leaves the boundary itself
+    unwatched — hard rule 9 (PR #42 review round 4). Chunk counts are integers,
+    so the finest possible margin is one chunk, and that is what is used: 5999
+    is 19.98% and must pass, 6001 is 20.02% and must fire.
+
+    The middle probe sits exactly ON the boundary, and it is not decoration:
+    with only the two straddling probes, tightening the comparison from ``>``
+    to ``>=`` survived — the two differ solely at exactly 20%, and chunk counts
+    are quantised at 1/5000, so 6000 is the one value that can tell them apart.
+    """
+    reference = _provenance(corpus={"chunks": 5000, "files_indexed": 184})
+    limit = CORPUS_DRIFT_TOLERANCE * 5000
+
+    inside = _provenance(
+        corpus={"chunks": round(5000 + limit) - 1, "files_indexed": 190}
+    )
+    assert reference_mismatches(reference, inside) == []
+
+    # Exactly at the band: comparable. The band is what a reference tolerates,
+    # not where it starts refusing.
+    at_limit = _provenance(corpus={"chunks": round(5000 + limit), "files_indexed": 190})
+    assert reference_mismatches(reference, at_limit) == []
+
+    outside = _provenance(
+        corpus={"chunks": round(5000 + limit) + 1, "files_indexed": 190}
+    )
+    assert any("corpus drift" in r for r in reference_mismatches(reference, outside))
+
+    # And in the other direction — the band is on |drift|, not on growth.
+    shrunk = _provenance(
+        corpus={"chunks": round(5000 - limit) - 1, "files_indexed": 120}
+    )
+    assert any("corpus drift" in r for r in reference_mismatches(reference, shrunk))
+
+
+def test_run_duration_is_recorded_but_never_a_comparability_term():
+    """`duration` is evidence, like `manifest_sha256` — not a predicate.
+
+    The run's wall time is recorded so a claim like "a thirteen-minute run" can
+    be checked against a committed artifact instead of quoted from memory (PR
+    #42 round-2 review: the harness stored no duration at all). It must never
+    gate: latency already has its own measured columns, and a reference that
+    stopped being comparable because the machine was busier that day would be a
+    gate that fires on nothing anyone can act on.
+    """
+    slower = _provenance(duration={"measure_s": 4000.0, "total_s": 5000.0})
+    faster = _provenance(duration={"measure_s": 40.0, "total_s": 50.0})
+    assert reference_mismatches(slower, faster) == []
+
+
+@pytest.mark.parametrize(
+    ("rebaselining", "tree_dirty", "refuses"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+        (False, False, False),
+    ],
+)
+def test_rebaseline_refuses_only_a_dirty_tree(monkeypatch, rebaselining, tree_dirty, refuses):
+    """Layer 3's refusal, probed on all four corners.
+
+    It fires only for the one combination that matters, and the guard now has
+    two call sites — the `corpus` fixture calls it BEFORE copying and indexing
+    the tree, and the test body calls it again before the measurement. It used
+    to live only in the second place, so pytest reached it after the session
+    fixture had already built the corpus: a dirty tree cost 5m36s here before
+    being refused, observed while answering the PR #42 round-2 review. The
+    second call site is kept because it catches the tree being edited *during*
+    the run, which is exactly how that was found.
+    """
+    monkeypatch.setitem(globals(), "_tracked_dirty", lambda: tree_dirty)
+    if rebaselining:
+        monkeypatch.setenv(REBASELINE_ENV, "1")
+    else:
+        monkeypatch.delenv(REBASELINE_ENV, raising=False)
+
+    if refuses:
+        with pytest.raises(pytest.fail.Exception, match="refusing to record a reference"):
+            _refuse_rebaseline_on_dirty_tree("probe")
+    else:
+        _refuse_rebaseline_on_dirty_tree("probe")
+
+
+def test_validate_golden_path_fails_fast_on_missing_or_broken_yaml(monkeypatch, tmp_path):
+    real_path = GOLDEN_PATH
+    missing = tmp_path / "nope.yaml"
+    monkeypatch.setitem(globals(), "GOLDEN_PATH", missing)
+    with pytest.raises(pytest.fail.Exception, match="does not exist"):
+        _validate_golden_path()
+
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("queries: [unterminated\n")
+    monkeypatch.setitem(globals(), "GOLDEN_PATH", broken)
+    with pytest.raises(pytest.fail.Exception, match="not valid YAML"):
+        _validate_golden_path()
+
+    # The margin: the real, valid file passes.
+    monkeypatch.setitem(globals(), "GOLDEN_PATH", real_path)
+    _validate_golden_path()
+
+
+def test_zero_recall_queries_flags_only_universal_misses():
+    def with_queries(*pairs):
+        report = _report(0.5, 0.5, 0.5)
+        report["queries"] = [{"id": qid, "recall@10": r} for qid, r in pairs]
+        return report
+
+    reports = {
+        "dense": with_queries(("a", 0.0), ("b", 0.0), ("c", 1.0)),
+        "hybrid": with_queries(("a", 0.0), ("b", 1.0), ("c", 1.0)),
+    }
+    assert zero_recall_queries(reports) == ["a"]
+
+
+def test_format_table_requires_latency_columns_uniform_across_channels():
+    """Sampling only the first channel to decide whether latency columns
+    exist, then indexing every channel with them, KeyErrors the moment a
+    later channel is the one missing them — the mixed case the function's own
+    docstring describes (a fresh run beside a stored pre-M4 baseline) (PR #42
+    review round 5, finding 28)."""
+    def strip_latency(row: dict) -> dict:
+        return {k: v for k, v in row.items() if k not in LATENCY_KEYS}
+
+    with_latency = _report(0.6, 0.7, 0.6)
+    without_latency = {
+        "overall": strip_latency(with_latency["overall"]),
+        "categories": {c: strip_latency(r) for c, r in with_latency["categories"].items()},
+    }
+    mixed = {"dense": with_latency, "hybrid": without_latency}
+    rendered = format_table(mixed)  # must not KeyError
+    assert "latency_p50_ms" not in rendered
+
+
+def test_render_report_marks_an_ungated_run():
+    reports = {"dense": _report(0.6, 0.7, 0.6)}
+    rendered = render_report(
+        reports, _provenance(), [], ["no reference at x"], None
+    )
+    assert "NOT A GATE" in rendered
+    assert "NOT RUN" in rendered
+
+    gated = render_report(reports, _provenance(), [], [], [])
+    assert "NOT A GATE" not in gated
+    assert "L2 regression vs reference: PASS" in gated
+
+
+def test_render_report_stamps_a_run_that_rewrote_the_reference():
+    """The persisted report must say the run re-baselined.
+
+    Before this, the only signal was a stdout ``print`` — which pytest's capture
+    eats without ``-s`` — while ``report_latest.md`` said nothing more than
+    "no comparable reference". ``.claude/commands/eval.md`` sends the reader to
+    that file rather than to the terminal, so the artifact of record was silent
+    about the most consequential act a run can perform (PR #42 round-2 review).
+    """
+    reports = {"dense": _report(0.6, 0.7, 0.6)}
+    stamped = render_report(
+        reports, _provenance(), [], [], None, rebaseline=True, wrote_reference=True
+    )
+    assert "THIS RUN WROTE THE REFERENCE" in stamped
+    assert "**NOT RUN** — this run re-baselined" in stamped
+    # Still not a gate: nothing measured these numbers against a standard.
+    assert "NOT A GATE" in stamped
+
+    # And an ordinary ungated run must NOT claim to have written anything.
+    ordinary = render_report(reports, _provenance(), [], ["no reference"], None)
+    assert "THIS RUN WROTE THE REFERENCE" not in ordinary
+    assert "**NOT RUN** — no comparable reference" in ordinary
+
+
+def test_report_never_claims_a_write_that_a_failed_layer_prevented():
+    """A re-baseline that fails layer 1 writes nothing, and must say so.
+
+    The report is rendered while the verdicts are still being decided, and
+    ``rebaseline`` at that point is only the REQUEST. Taking it as the outcome
+    left the artifact of record announcing "THIS RUN WROTE THE REFERENCE ...
+    `reference.json` now holds these numbers" for a file the run never touched
+    — beside its own "L1 relational: FAIL" line (PR #42 review round 4).
+    """
+    reports = {"dense": _report(0.6, 0.7, 0.6)}
+    refused = render_report(
+        reports,
+        _provenance(),
+        ["hybrid lost Recall@10 to dense"],
+        [],
+        None,
+        rebaseline=True,
+        wrote_reference=False,
+    )
+    assert "L1 relational (same-run): **FAIL**" in refused
+    assert "THIS RUN WROTE THE REFERENCE" not in refused
+    assert "REQUESTED BUT NOT WRITTEN" in refused
+    assert "was NOT touched" in refused
+    assert "the relational gate (L1) failed above" in refused
+    # Round 4's own fix did not reach the sibling L2 line: it still said the
+    # run "re-baselined" three lines above "NOT WRITTEN" (PR #42 review round
+    # 5, finding 3).
+    assert "**NOT RUN** — this run re-baselined" not in refused
+    assert "**NOT RUN** — a re-baseline was requested, so nothing was gated" in refused
+
+
+def test_report_names_the_write_itself_when_l1_passed_but_the_write_failed():
+    """Distinct from the L1-failure case above: when L1 PASSED and the write
+    still didn't happen, the only remaining cause is ``save_reference`` itself
+    refusing (e.g. ADR-69's rows-less guard) — the report must say that,
+    not blame "a gate layer above" for a layer that never failed (PR #42
+    review round 5, finding 3b)."""
+    reports = {"dense": _report(0.6, 0.7, 0.6)}
+    refused = render_report(
+        reports, _provenance(), [], [], None, rebaseline=True, wrote_reference=False
+    )
+    assert "L1 relational (same-run): PASS" in refused
+    assert "the write itself was refused" in refused
+    assert "a gate layer above failed" not in refused
+    assert "the relational gate (L1) failed above" not in refused
+
+
+def test_report_labels_mismatch_reasons_it_prints_under_a_re_baseline():
+    """Two independent facts must not read as one.
+
+    Under a re-baseline the L2 line already gives its reason, so incomparability
+    reasons printed as bare bullets beneath it read as if they explained it.
+    """
+    reports = {"dense": _report(0.6, 0.7, 0.6)}
+    rendered = render_report(
+        reports,
+        _provenance(),
+        [],
+        ["golden.yaml changed since the reference was recorded"],
+        None,
+        rebaseline=True,
+        wrote_reference=True,
+    )
+    assert "the stored reference was also incomparable:" in rendered
+
+
+def _report_with_queries(base: dict, pairs) -> dict:
+    report = dict(base)
+    report["queries"] = [{"id": qid, "recall@10": value} for qid, value in pairs]
+    return report
+
+
+def test_rerank_query_deltas_names_the_queries_the_reranker_costs():
+    """Aggregate win, per-query cost — both, because only the first was visible.
+
+    On the 2026-08-09 reference the reranker gains 5 queries and loses 3 for a
+    net +0.05 on Recall@10. The three losses were discoverable only by reading
+    raw JSON, which is how a per-query claim about ``structural-08`` went out
+    wrong (PR #42 round-2 review).
+    """
+    reports = {
+        "hybrid": _report_with_queries(
+            _report(0.6, 0.7, 0.6), [("a", 1.0), ("b", 0.0), ("c", 0.5)]
+        ),
+        "hybrid+rerank": _report_with_queries(
+            _report(0.6, 0.7, 0.6), [("a", 0.0), ("b", 1.0), ("c", 0.5)]
+        ),
+    }
+    gained, lost = rerank_query_deltas(reports)
+    assert gained == [("b", 0.0, 1.0)]
+    assert lost == [("a", 1.0, 0.0)]
+
+    rendered = render_report(reports, _provenance(), [], [], [])
+    assert "**+1 / −1** queries" in rendered
+    assert "lost: a 1.00 -> 0.00" in rendered
+    # The query rerank left alone is noise, not a finding.
+    assert "c 0.50" not in rendered
+
+
+def test_rerank_query_deltas_is_silent_without_per_query_rows():
+    """Stored references carry only aggregates, so the section must vanish
+    rather than raise when the per-query rows are absent."""
+    reports = {"hybrid": _report(0.6, 0.7, 0.6), "hybrid+rerank": _report(0.7, 0.8, 0.7)}
+    assert rerank_query_deltas(reports) == ([], [])
+    assert "Reranker vs same-run hybrid" not in render_report(
+        reports, _provenance(), [], [], []
+    )
+
+
+def test_reference_query_deltas_sees_a_swap_the_aggregates_cannot():
+    """ADR-71. The case: same aggregate, different queries answered.
+
+    Permuting scores among same-category queries leaves every stored aggregate
+    bit-identical, so both gate layers pass clean while the channel has changed
+    which questions it can answer (PR #42 review round 4). Only crossings of
+    zero are named — ``a`` and ``b`` swap here, ``c`` moves 1.00 -> 0.50 and is
+    ordinary rank churn the aggregate already covers.
+    """
+    reference_channels = {
+        "hybrid": _report_with_queries(
+            _report(0.6, 0.5, 0.6), [("a", 1.0), ("b", 0.0), ("c", 1.0)]
+        )
+    }
+    reports = {
+        "hybrid": _report_with_queries(
+            _report(0.6, 0.5, 0.6), [("a", 0.0), ("b", 1.0), ("c", 0.5)]
+        )
+    }
+    # The aggregate is untouched, and layer 2 therefore sees nothing.
+    assert regression_failures(reports, reference_channels) == []
+
+    crossings = reference_query_deltas(reports, reference_channels)
+    assert crossings == [("hybrid", "a", 1.0, 0.0), ("hybrid", "b", 0.0, 1.0)]
+
+    rendered = render_report(
+        reports, _provenance(), [], [], [], reference_channels=reference_channels
+    )
+    assert "lost: a on hybrid 1.00 -> 0.00" in rendered
+    assert "gained: b on hybrid 0.00 -> 1.00" in rendered
+    # `"c 0.50"` can never occur in this format ("c on hybrid 1.00 -> 0.50"),
+    # so the assertion could not fail regardless of correctness — inert since
+    # it was copied from the sibling test above, where the format has no
+    # channel name (PR #42 review round 5, finding 21).
+    assert "c on hybrid" not in rendered
+    # Reported, never gated: the run still passes.
+    assert "L2 regression vs reference: PASS" in rendered
+
+
+def test_per_query_block_is_skipped_against_a_reference_without_rows():
+    """A reference recorded before ADR-69 stores no rows to compare against.
+
+    Without this the zero-recall line would report every query as newly
+    changed, which is a finding invented by the absence of data.
+    """
+    reports = {
+        "hybrid": _report_with_queries(_report(0.6, 0.7, 0.6), [("a", 0.0)]),
+    }
+    rows_less = {"hybrid": _report(0.6, 0.7, 0.6)}
+    assert reference_query_deltas(reports, rows_less) == []
+    rendered = render_report(
+        reports, _provenance(), [], [], [], reference_channels=rows_less
+    )
+    assert "Per-query vs reference" not in rendered
+
+
+def test_save_reference_refuses_a_reference_that_cannot_answer_a_per_query_claim(
+    tmp_path,
+):
+    """ADR-69's rows are the artifact, so writing without them is refused.
+
+    It used to write ``"queries": []`` instead, and the gate test returns
+    immediately after ``save_reference`` — so a ~15 GPU-minute re-baseline
+    exited green having produced a reference the DEFAULT suite then rejected,
+    with the failure surfacing on someone else's next ``pytest`` (PR #42 review
+    round 4).
+    """
+    target = tmp_path / "reference.json"
+    rows_less = {"dense": _report(0.6, 0.7, 0.6)}
+    with pytest.raises(ValueError, match="no per-query rows"):
+        save_reference(rows_less, target, _provenance())
+    assert not target.exists()
+
+    incomplete = {
+        "dense": _report_with_queries(_report(0.6, 0.7, 0.6), [("a", 1.0)]),
+    }
+    # `_report_with_queries` writes only recall@10, so recall@5 and ndcg@10 are
+    # missing — a row that could not re-derive its own aggregate.
+    with pytest.raises(ValueError, match="rows missing"):
+        save_reference(incomplete, target, _provenance())
+    assert not target.exists()
+
+    # `id` and `category` were not checked here at all — a row missing either
+    # raised a bare KeyError two lines below instead of this named refusal
+    # (PR #42 review round 5, finding 22).
+    missing_category = {"dense": _report(0.6, 0.7, 0.6)}
+    missing_category["dense"]["queries"] = [
+        {"id": "a", "recall@5": 0.6, "recall@10": 0.7, "ndcg@10": 0.6}  # no "category"
+    ]
+    with pytest.raises(ValueError, match="rows missing"):
+        save_reference(missing_category, target, _provenance())
+    assert not target.exists()
+
+    # The margin: complete rows are written, and carry the metrics ADR-69 names.
+    complete = {"dense": _report(0.6, 0.7, 0.6)}
+    complete["dense"]["queries"] = [
+        {"id": "a", "category": "nl", "recall@5": 0.6, "recall@10": 0.7, "ndcg@10": 0.6}
+    ]
+    save_reference(complete, target, _provenance())
+    written = json.loads(target.read_text())
+    assert written["channels"]["dense"]["queries"] == [
+        {"id": "a", "category": "nl", "recall@5": 0.6, "recall@10": 0.7, "ndcg@10": 0.6}
+    ]
+
+
+# --- golden-set run (opt-in: uv run pytest tests/eval/ -m golden -s) --------
+#
+# `-s` is part of the invocation, not a nicety: pytest captures stdout and
+# releases it only on failure, so without it a run of this length prints a bare
+# filename and is indistinguishable from a hung one. Every documented command
+# carries it (PR #42 review); this comment is one of the two that had been
+# missed.
+
+
+@dataclass(frozen=True)
+class CorpusRun:
+    """What one indexed corpus offers the gate — including the provenance
+    inputs, so the gate never has to re-derive what it measured."""
+
+    store: VectorStore
+    embedder: LocalSTEmbedder
+    project_id: str
+    corpus_root: Path
+    indexed: IndexResult
+    store_meta: dict
+
+
+def _server_version_or_fail(url: str) -> str:
+    """Live server version, or a loud failure.
+
+    Same shape as ``tests/test_qdrant_server_smoke.py:_server_version_or_skip``
+    and for the same reason — a plain REST GET, because the client runs its
+    compatibility check on a daemon thread and anything built on catching that
+    warning would race. Not imported from there: that module is ``server``-
+    marked and keys off ``QDRANT_URL``, while this tier is opt-in through its
+    own variable so a developer who merely has a server running does not
+    silently get their golden numbers measured somewhere else.
+
+    It FAILS rather than skips, unlike its sibling, because it is only reached
+    when the operator set the variable themselves. A down or misconfigured
+    server is then a broken request, not an absent capability — and the cost of
+    getting it wrong is that a ~15-minute gate reports an anonymous ``s``
+    instead of measuring where it was told to (PR #42 review round 4).
+    """
+    try:
+        response = httpx.get(url, timeout=5.0)
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — any failure means "not available"
+        pytest.fail(
+            f"{QDRANT_URL_ENV}={url} is set, but no Qdrant server answered "
+            f"there ({exc}). Start one with `docker compose up -d`, or unset "
+            f"{QDRANT_URL_ENV} to measure against the embedded store."
+        )
+    version = response.json().get("version")
+    if not version:
+        pytest.fail(f"{url} answered but reported no version: {response.text!r}")
+    return version
+
+
+def _tracked_dirty() -> bool:
+    """True when git reports uncommitted changes to TRACKED files.
+
+    Tracked only. The corpus fixture builds from ``git ls-files``, so untracked
+    files are not in the measurement and cannot affect whether it reproduces —
+    counting them would block a re-baseline over a stray `.idea/` directory
+    while proving nothing.
+
+    ``check=True`` like the fixture's own ``git ls-files``: without it a failing
+    git yields empty stdout, which reads as "clean" and silently permits the one
+    thing layer 3 exists to refuse (PR #42 review). git is already a hard
+    requirement of this tier, so raising beats inventing a verdict.
+    """
+    return bool(
+        subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    )
+
+
+def _refuse_rebaseline_on_dirty_tree(when: str) -> None:
+    """ADR-65 layer 3's refusal, callable from both ends of the run.
+
+    A reference that cannot be reproduced from a commit is not a measurement
+    standard. This is called twice on purpose:
+
+    * at the top of the ``corpus`` fixture, BEFORE the tree is copied and
+      indexed — the guard used to sit only in the test body, which pytest
+      reaches after that setup, so a dirty tree cost a full corpus build
+      (observed: 5m36s) before refusing;
+    * in the test body, which additionally catches a tree that was clean at
+      setup and got edited while the run was in flight — how the gap above was
+      found in the first place.
+    """
+    if os.environ.get(REBASELINE_ENV) == "1" and _tracked_dirty():
+        pytest.fail(
+            f"refusing to record a reference from a dirty tree ({when}) — commit "
+            f"first, so the numbers name a reproducible state of the corpus"
+        )
+
+
+def _validate_golden_path() -> None:
+    """Fail fast on a missing or unparseable golden.yaml, before the corpus
+    fixture spends minutes building an index to measure it against.
+
+    ``load_golden`` needs the corpus root to resolve anchors, and that root
+    does not exist yet at the top of this fixture — so this checks only what
+    CAN be checked before that: the file exists and parses as YAML. There was
+    deliberately no ``skipif`` guard for a missing file (the loudness is the
+    point), but nothing made that loudness cheap: a broken golden.yaml used to
+    surface only after the full corpus build, deep inside ``load_golden`` (PR
+    #42 review round 5, finding 14) — the same late-guard shape round 2 fixed
+    for the dirty-tree refusal, which cost 336.60s before being moved earlier.
+    A structurally valid but anchor-broken file still fails later inside
+    ``load_golden``, just as loudly, once there is a root to resolve against.
+    """
+    if not GOLDEN_PATH.is_file():
+        pytest.fail(f"{GOLDEN_PATH} does not exist — nothing to measure against.")
+    try:
+        yaml.safe_load(GOLDEN_PATH.read_bytes())
+    except yaml.YAMLError as exc:
+        pytest.fail(f"{GOLDEN_PATH} is not valid YAML: {exc}")
 
 
 @pytest.fixture(scope="session")
 def corpus(tmp_path_factory):
-    """Self-index this repo once: real embedder, in-memory Qdrant.
+    """Self-index this repo once: real embedder, embedded or real Qdrant.
 
     The corpus is the git-tracked tree copied to a tmp dir, minus
     ``tests/eval/`` — golden.yaml contains every query string verbatim, so
     indexing it would hand the lexical channel its own answer key and
     poison the gate numbers. Tracked-files-only also keeps the corpus
-    reproducible (no local junk, honors the same set CI would see)."""
+    reproducible (no local junk, honors the same set CI would see).
+
+    ADR-66: with ``NOESIS_EVAL_QDRANT_URL`` set the run measures against a real
+    server on a throwaway collection instead of ``:memory:``. ADR-62 left that
+    open deliberately — the embedded client is a Python reimplementation of the
+    query semantics, and sparse IDF plus RRF fusion are computed server-side,
+    so ranking can move between the two with nothing failing. The store is
+    recorded in provenance and is a hard comparability term, so numbers from
+    one store can never gate the other.
+    """
     import shutil
-    import subprocess
+
+    # Before anything expensive: a broken golden.yaml or a dirty re-baseline
+    # tree are both refused here rather than after the copy-and-index below.
+    _validate_golden_path()
+    _refuse_rebaseline_on_dirty_tree("checked before the corpus was built")
+
+    # An aborted run (CUDA OOM is a documented failure mode in this file) used
+    # to leave the PREVIOUS run's report on disk — a plausible-looking PASS
+    # from a stale code state, with `.claude/commands/eval.md` sending the
+    # reader straight to it. Clearing both at the top of a fresh run means an
+    # aborted one leaves no artifact rather than a misleading one (PR #42
+    # review round 5, finding 9).
+    REPORT_PATH.unlink(missing_ok=True)
+    REPORT_MD_PATH.unlink(missing_ok=True)
 
     eval_tmp = tmp_path_factory.mktemp("eval")
     corpus_root = eval_tmp / "corpus"
@@ -196,29 +1486,82 @@ def corpus(tmp_path_factory):
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / rel, dst)
 
+    qdrant_url = os.environ.get(QDRANT_URL_ENV)
+    if qdrant_url:
+        server_version = _server_version_or_fail(qdrant_url)
+        # Unique, dropped afterwards: this talks to whatever server the
+        # developer is running, which is very likely their real index.
+        collection = f"noesis_eval_{uuid.uuid4().hex[:12]}"
+        client = QdrantClient(url=qdrant_url)
+        store = VectorStore(client, collection_name=collection)
+        store_meta = {"kind": "server", "server_version": server_version}
+    else:
+        client = QdrantClient(":memory:")
+        store = VectorStore(client)
+        store_meta = {"kind": "embedded", "server_version": None}
+
     conn = state.connect(eval_tmp / "state.sqlite")
     state.init_db(conn)
-    embedder = LocalSTEmbedder()
-    store = VectorStore(QdrantClient(":memory:"))
-    store.ensure_collection(embedder)
-    indexed = asyncio.run(index_project(conn, store, embedder, str(corpus_root)))
-    assert indexed.chunks_written > 0
-    yield store, embedder, indexed.project_id
-    embedder.close()
-    conn.close()
+    embedder = LocalSTEmbedder(
+        device=_env_device(EMBEDDER_DEVICE_ENV),
+        batch_size=_env_batch_size(EMBED_BATCH_ENV, 32),
+    )
+    try:
+        store.ensure_collection(embedder)
+        indexed = asyncio.run(index_project(conn, store, embedder, str(corpus_root)))
+        assert indexed.chunks_written > 0
+        yield CorpusRun(
+            store=store,
+            embedder=embedder,
+            project_id=indexed.project_id,
+            corpus_root=corpus_root,
+            indexed=indexed,
+            store_meta=store_meta,
+        )
+    finally:
+        embedder.close()
+        conn.close()
+        if qdrant_url:
+            client.delete_collection(collection_name=store.collection_name)
+        client.close()
 
 
 @pytest.mark.golden
-@pytest.mark.skipif(
-    not GOLDEN_PATH.exists(),
-    reason="tests/eval/golden.yaml not present — golden set not labeled yet",
-)
 async def test_golden_set_gate_numbers(corpus):
-    store, embedder, project_id = corpus
-    golden = load_golden(GOLDEN_PATH)
-    reranker = LocalCrossEncoderReranker()
+    """The gate (ADR-65). Three layers, and every one of them asserts.
 
-    def channel_fn(channel: str, rerank: bool = False):
+    Before this, the only assertions here were harness mechanics — categories
+    present, values inside [0,1] — so a run where every metric had roughly
+    halved reported ``1 passed`` (issue #38, Finding A). The real gate was a
+    human reading a printed table that the documented ``-q`` invocation
+    suppresses, in a tier no CI job runs.
+
+    There is deliberately no ``skipif(not GOLDEN_PATH.exists())`` guard.
+    ``golden.yaml`` is a committed artifact, so its absence is a defect, not an
+    environment — and a guard turned that defect into an anonymous ``s``, which
+    is the exact silent-skip shape round 2 removed from
+    ``test_migrate_labels.py`` (PR #42 review round 4). Its siblings
+    ``test_golden_labels.py`` and ``test_reference_integrity.py`` load their
+    artifact at import and fail collection instead; a missing file now reaches
+    ``load_golden`` here and raises.
+    """
+    store, embedder, project_id = corpus.store, corpus.embedder, corpus.project_id
+    rebaseline = os.environ.get(REBASELINE_ENV) == "1"
+    # Second call site. The fixture already refused a dirty tree before building
+    # the corpus; this catches a tree that was clean then and was edited while
+    # the run was in flight — which is a real way to lose a run, observed while
+    # answering the PR #42 round-2 review.
+    _refuse_rebaseline_on_dirty_tree("checked again before the measurement")
+    dirty = _tracked_dirty()
+    # Anchors resolve against the copy that was actually chunked, not the
+    # working tree, so the line numbers describe the thing being measured.
+    golden = load_golden(GOLDEN_PATH, corpus.corpus_root)
+    reranker = LocalCrossEncoderReranker(
+        device=_env_device(RERANKER_DEVICE_ENV),
+        batch_size=_env_batch_size(RERANK_BATCH_ENV, 16),
+    )
+
+    def channel_fn(channel: str, rerank: bool = False, language: str | None = None):
         async def fn(query: str) -> list[dict]:
             result = await search_code(
                 store,
@@ -226,6 +1569,7 @@ async def test_golden_set_gate_numbers(corpus):
                 query,
                 project_id,
                 top_k=10,
+                language=language,
                 channel=channel,
                 reranker=reranker if rerank else None,
                 rerank=rerank or None,
@@ -248,82 +1592,219 @@ async def test_golden_set_gate_numbers(corpus):
         "cuda_available": torch.cuda.is_available(),
         "embedder": embedder.resolved_device,
         "reranker": reranker.resolved_device,
+        # Batch sizes belong beside the devices: they change the latency
+        # column and the peak memory a run needs, so a benchmark that records
+        # the device but not the batch is still not reproducible.
+        "embedder_batch_size": _env_batch_size(EMBED_BATCH_ENV, 32),
+        "reranker_batch_size": _env_batch_size(RERANK_BATCH_ENV, 16),
     }
-    print(f"\n== compute device ==\n{device}")
+    print(f"\n== compute device ==\n{device}", flush=True)
 
+    channels = {
+        "dense": channel_fn("dense"),
+        # Diagnostic channel, reported and never gated. Every label in the
+        # golden set is a .py file, so filtering to python can only remove
+        # distractors and never a true positive: the dense -> dense
+        # (python-only) gap separates "the haystack grew" from "retrieval got
+        # worse", which is the question Finding B could not answer without it.
+        # One extra pass over the already-built index.
+        "dense (python-only)": channel_fn("dense", language="python"),
+        "sparse": channel_fn("sparse"),
+        "hybrid": channel_fn("hybrid"),
+        "hybrid+rerank": channel_fn("hybrid", rerank=True),
+    }
     try:
-        reports = {
-            "dense": await evaluate(channel_fn("dense"), golden),
-            "sparse": await evaluate(channel_fn("sparse"), golden),
-            "hybrid": await evaluate(channel_fn("hybrid"), golden),
-            "hybrid+rerank": await evaluate(channel_fn("hybrid", rerank=True), golden),
-        }
+        reports: dict[str, dict] = {}
+        measure_started = time.perf_counter()
+        # Emitted per channel, flushed, because this tier runs for minutes to
+        # hours and used to print nothing at all until it finished: stdout is
+        # block-buffered to a file, so even the device line sat unflushed. A
+        # run with no progress signal is indistinguishable from a hung one,
+        # which cost several false diagnoses while building this.
+        for name, fn in channels.items():
+            started = time.perf_counter()
+            reports[name] = await evaluate(fn, golden)
+            print(
+                f"  channel {name:<20} recall@10="
+                f"{reports[name]['overall']['recall@10']:.3f}"
+                f"  ({time.perf_counter() - started:.0f}s)",
+                flush=True,
+            )
+        measure_s = time.perf_counter() - measure_started
+
+        # Assert the filter's contract rather than a ranking relation. The
+        # monotonicity you would expect (python-only recall >= unfiltered) is
+        # true in principle but can flip on a tie-break, and a flaky assertion
+        # on a run this long is worse than none. This cannot flake, and it is
+        # what catches the filter being dropped from one prefetch.
+        filtered = await search_code(
+            store, embedder, golden[0].query, project_id, top_k=10, language="python"
+        )
+        assert filtered["hits"], "python-only filter returned nothing at all"
+        assert {hit["language"] for hit in filtered["hits"]} == {"python"}
     finally:
         reranker.close()
 
-    baseline = load_baseline(BASELINE_PATH)
-    baseline_note = ""
-    if baseline is None:
-        save_baseline(
-            reports["dense"],
-            BASELINE_PATH,
-            meta={
-                "embedding_model": embedder.model_id,
-                "date": date.today().isoformat(),
-                "milestone": "M2",
-                "channel": "dense",
-            },
-        )
-        baseline = load_baseline(BASELINE_PATH)
-        baseline_note = (
-            "NOTE: no stored baseline found — this dense run was recorded as "
-            f"the M2 baseline at {BASELINE_PATH}.\n"
-        )
+    # check=True for the same reason as the dirty check: a failed rev-parse
+    # would record `commit: ""` in provenance, i.e. a reference that names no
+    # corpus state at all — silently unusable rather than loudly absent.
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    indexed = corpus.indexed
+    provenance = {
+        "corpus": {
+            "files_total": indexed.files_total,
+            "files_indexed": indexed.files_indexed,
+            "chunks": indexed.chunks_written,
+            "commit": head,
+            "dirty": dirty,
+            "manifest_sha256": manifest_sha256(discover_files(str(corpus.corpus_root))),
+        },
+        # ADR-70. Without this the gate had no term for the scorer, so numbers
+        # produced under one set of scoring rules could be compared against
+        # numbers produced under another — which ADR-67 and ADR-68 both did,
+        # each time relying on a human to remember to re-baseline.
+        "scoring": {"version": SCORER_VERSION},
+        "models": {
+            "embedding_model": embedder.model_id,
+            "reranker_model": reranker.model_id,
+        },
+        "store": corpus.store_meta,
+        "labels": {
+            "golden_sha256": golden_digest(GOLDEN_PATH),
+            "n_queries": len(golden),
+        },
+        "device": device,
+        "date": date.today().isoformat(),
+        # Seconds, one decimal. `measure_s` is the five channels' evaluation
+        # loop; `total_s` adds collection, the corpus build and both model
+        # loads — the number an operator experiences.
+        "duration": {
+            "measure_s": round(measure_s, 1),
+            "total_s": round(time.perf_counter() - _IMPORTED_AT, 1),
+        },
+    }
 
-    # Record both M4-gate channels from this same clean run (lesson 3:
-    # baselines carry their provenance; the gate comparison itself is
-    # same-run and never reads these files).
-    for path, channel, milestone in (
-        (M3_BASELINE_PATH, "hybrid", "M3"),
-        (M4_BASELINE_PATH, "hybrid+rerank", "M4"),
-    ):
-        save_baseline(
-            reports[channel],
-            path,
-            meta={
-                "embedding_model": embedder.model_id,
-                "reranker_model": reranker.model_id,
-                "date": date.today().isoformat(),
-                "milestone": milestone,
-                "channel": channel,
-                "device": device,
-            },
-        )
+    reference = load_reference(REFERENCE_PATH)
+    if reference is None:
+        mismatches = [f"no reference at {REFERENCE_PATH}"]
+    else:
+        mismatches = reference_mismatches(reference["provenance"], provenance)
+    # A run that just wrote the reference cannot also be judged against it.
+    gated = reference is not None and not mismatches and not rebaseline
+    regression = regression_failures(reports, reference["channels"]) if gated else None
+    relational = relational_failures(reports)
 
     REPORT_PATH.write_text(json.dumps(reports, indent=2, sort_keys=True) + "\n")
 
-    print("\n\n== Channel comparison (quality + latency) ==")
-    print(format_table(reports))
-    print("\n== M3 gate: hybrid vs stored M2 dense baseline ==")
-    print(baseline_note + format_delta(reports["hybrid"], baseline))
-    print("\n== M4 gate: hybrid+rerank vs same-run hybrid (Finding 2) ==")
-    print(
-        format_delta(
-            reports["hybrid+rerank"],
-            reports["hybrid"],
-            challenger_label="hybrid+rerank",
-            baseline_label="hybrid (same run)",
-        )
-    )
+    # Whether the reference was actually written. Distinct from `rebaseline`,
+    # which is only the request: the write happens after the layer-1 assertion
+    # below, so a re-baseline run that fails layer 1 writes nothing. The report
+    # used to be rendered here, before that was known, and stamped "THIS RUN
+    # WROTE THE REFERENCE ... now holds these numbers" onto a file it never
+    # touched (PR #42 review round 4).
+    wrote_reference = False
 
-    # Harness mechanics only — the gate decisions are made from the numbers.
-    for report in reports.values():
-        assert set(report["categories"]) == set(CATEGORIES)
-        for row in (report["overall"], *report["categories"].values()):
-            for key, value in row.items():
-                if key == "n_queries" or key in LATENCY_KEYS:
-                    assert value >= 0
-                else:
-                    assert 0.0 <= value <= 1.0
-    assert reports["hybrid+rerank"]["overall"]["n_queries"] == len(golden)
-    assert reports["hybrid"]["overall"]["n_queries"] == len(golden)
+    def persist_report() -> None:
+        """The artifact of record — written whatever the verdicts turn out to be.
+
+        In a ``finally`` because the assertions below can fail, and a report
+        that goes missing exactly when the run failed is useless: the failing
+        run is the one a human most needs the tables for.
+        """
+        REPORT_MD_PATH.write_text(
+            render_report(
+                reports,
+                provenance,
+                relational,
+                mismatches,
+                regression,
+                rebaseline=rebaseline,
+                wrote_reference=wrote_reference,
+                # Only when the reference is comparable: across a label change
+                # the query ids need not even mean the same thing, so a
+                # per-query diff would be noise dressed as a finding.
+                reference_channels=(
+                    reference["channels"]
+                    if reference is not None and not mismatches
+                    else None
+                ),
+            )
+        )
+
+    try:
+        print("\n\n== Channel comparison (quality + latency) ==", flush=True)
+        print(format_table(reports))
+        if reference is not None:
+            print("\n== hybrid vs stored reference ==", flush=True)
+            print(
+                format_delta(
+                    reports["hybrid"],
+                    reference["channels"]["hybrid"],
+                    baseline_label="reference (stored)",
+                )
+            )
+        print("\n== M4: hybrid+rerank vs same-run hybrid (Finding 2) ==", flush=True)
+        print(
+            format_delta(
+                reports["hybrid+rerank"],
+                reports["hybrid"],
+                challenger_label="hybrid+rerank",
+                baseline_label="hybrid (same run)",
+            )
+        )
+        print(f"\n== verdicts ==\n{REPORT_MD_PATH}", flush=True)
+
+        # Harness mechanics first: a malformed report would make every verdict
+        # below meaningless.
+        for report in reports.values():
+            assert set(report["categories"]) == set(CATEGORIES)
+            for row in (report["overall"], *report["categories"].values()):
+                for key, value in row.items():
+                    if key == "n_queries" or key in LATENCY_KEYS:
+                        assert value >= 0
+                    else:
+                        assert 0.0 <= value <= 1.0
+        assert reports["hybrid"]["overall"]["n_queries"] == len(golden)
+        assert reports["hybrid+rerank"]["overall"]["n_queries"] == len(golden)
+
+        # Layer 1 before layer 2, deliberately: a corpus change big enough to
+        # make the reference incomparable must never be able to mask a fusion
+        # regression. Layer 1 holds even while re-baselining — a run that fails
+        # M3's own exit criterion is not a measurement standard (lesson 8).
+        assert not relational, "M3/M4 relational gate failed:\n  " + "\n  ".join(
+            relational
+        )
+
+        if rebaseline:
+            save_reference(reports, REFERENCE_PATH, provenance)
+            wrote_reference = True
+            print(
+                f"\nREBASELINED: wrote {REFERENCE_PATH}. Layer 2 was skipped for "
+                f"this run. Record it: python .claude/scripts/devlog.py decision "
+                f'add --title "golden reference {provenance["date"]}"',
+                flush=True,
+            )
+            return
+
+        assert reference is not None and not mismatches, (
+            "the stored golden reference cannot gate this run:\n  "
+            + "\n  ".join(mismatches)
+            + f"\nNothing was gated. The tables in {REPORT_MD_PATH} are NOT A GATE.\n"
+            f"Review them, then re-baseline deliberately:\n"
+            # -s deliberately: this string is handed to an operator at the exact
+            # moment they are about to start another long run, which is the one
+            # invocation most likely to be copied verbatim (PR #42 round-2 review).
+            f"  {REBASELINE_ENV}=1 uv run pytest tests/eval/ -m golden -s"
+        )
+        assert not regression, (
+            "quality regressed against the stored reference:\n  "
+            + "\n  ".join(regression)
+        )
+    finally:
+        persist_report()
