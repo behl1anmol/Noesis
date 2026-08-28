@@ -58,21 +58,36 @@ The absolute floor beside the relative band is deliberate arithmetic. The gate m
 
 **What the aggregates cannot see, and what is reported instead ([ADR-71](../project/decisions.md)).** Permuting hybrid per-query rows among same-category queries leaves every stored aggregate bit-identical and both gate layers passing clean: a channel can change *which* questions it answers while the gate reads a flat line. (An earlier draft quoted "12 of 40" rows; the PR #42 round-5 review found no committed artifact recording a 12-row permutation — the mechanism is real and reproduces against the live reference, the count was not, so it is stated without one.) So the verdict block names every query whose Recall@10 crossed zero against the reference, per channel, plus any change to the zero-recall set. **Reported, never gated** — per-query retrieval is noisy, a false red costs a ~15-minute re-run, and layer 2 already fires on the aggregate. Movements that do not cross zero (1.0 → 0.5) are ordinary rank churn and are deliberately left to the aggregate.
 
-### The current reference (2026-08-10)
+### The current reference (2026-08-28)
 
-Measured under content-anchored labels ([ADR-64](../project/decisions.md)), grouped scoring ([ADR-67](../project/decisions.md)) and matched credit ([ADR-68](../project/decisions.md)) — 184 files, 566 chunks, embedded Qdrant, CodeRankEmbed and bge-reranker-v2-m3 both on CUDA at their default batch sizes (32 / 16), at commit `30cd229`. The run took **15 m 25 s** (`total_s` 924.7) from collection to the report being written — corpus build and both model loads included — of which **6 m 15 s** (`measure_s` 374.8) was the five channels' evaluation loop. Both figures come from the reference's own `provenance.duration`, not from a terminal, and the raw seconds are quoted beside them because the minutes-and-seconds conversion is where the previous text went wrong (15 m 45 s, against a stored 924.7 s).
+Measured under content-anchored labels ([ADR-64](../project/decisions.md)), grouped scoring ([ADR-67](../project/decisions.md)), matched credit ([ADR-68](../project/decisions.md)) and file-counted NDCG ([ADR-72](../project/decisions.md)) — 184 files, 572 chunks, embedded Qdrant, CodeRankEmbed and bge-reranker-v2-m3 both on CUDA at their default batch sizes (32 / 16), at commit `5ae17ea`. The run took **13 m 48 s** (`total_s` 828.4) from collection to the report being written — corpus build and both model loads included — of which **7 m 10 s** (`measure_s` 430.4) was the five channels' evaluation loop. Both figures come from the reference's own `provenance.duration`, not from a terminal.
 
 | channel | Recall@5 | Recall@10 | NDCG@10 | p50 latency |
 |---|---|---|---|---|
-| dense | 0.575 | 0.637 | 0.456 | 43 ms |
-| dense (python-only) | 0.700 | 0.713 | 0.570 | 42 ms |
-| sparse | 0.613 | 0.662 | 0.463 | 27 ms |
-| **hybrid** | 0.662 | **0.775** | 0.504 | 76 ms |
-| **hybrid+rerank** | 0.775 | **0.825** | 0.583 | 9 258 ms |
+| dense | 0.575 | 0.637 | 0.464 | 40 ms |
+| dense (python-only) | 0.700 | 0.713 | 0.579 | 36 ms |
+| sparse | 0.613 | 0.662 | 0.470 | 29 ms |
+| **hybrid** | 0.662 | **0.775** | 0.510 | 69 ms |
+| **hybrid+rerank** | 0.775 | **0.825** | 0.594 | 10 593 ms |
 
 Each channel's **per-query rows** are stored alongside these aggregates ([ADR-69](../project/decisions.md)), and `tests/eval/test_reference_integrity.py` re-derives all 60 aggregate cells from them in the default suite. Every number in the table above is therefore checkable from the repository alone.
 
-!!! note "What ADR-68's scorer change moved: nothing"
+!!! note "What ADR-72's fix moved: NDCG only, on `structural` and `overall`"
+    Re-recorded because ADR-72 fixed IDCG counting relevant items instead of unique files. Comparing stored floats against the previous (2026-08-10) reference: **zero Recall cells differ, anywhere.** NDCG@10 moved on exactly the cells the fix predicts — `structural` and `overall`, on every channel, since `structural-03` and `structural-08` (both same-file two-label queries) are the only queries the fix touches:
+
+    | channel | structural NDCG@10 before | after | delta |
+    |---|---|---|---|
+    | dense | 0.3806 | 0.4052 | +0.0246 |
+    | dense (python-only) | 0.5301 | 0.5587 | +0.0286 |
+    | sparse | 0.6330 | 0.6551 | +0.0222 |
+    | hybrid | 0.5160 | 0.5369 | +0.0209 |
+    | hybrid+rerank | 0.5875 | 0.6197 | +0.0322 |
+
+    Overall NDCG@10 moved by +0.006 to +0.011 per channel — proportional to how much of that channel's 40-query mean the two affected queries carry. `nl` and `symbol` are untouched on every channel but one: `hybrid+rerank`/`nl` moved +0.0030, which is ordinary corpus drift (566 → 572 chunks between the two runs), not the fix — `nl` has no same-file multi-label query for the fix to touch.
+
+    **Latency** moved within the ±20% run-to-run band already documented below (p50: dense ×0.93, python-only ×0.86, sparse ×1.07, hybrid ×0.91, hybrid+rerank ×1.14 against the previous run, same batch sizes).
+
+!!! note "What ADR-68's scorer change moved: nothing (2026-08-10 re-baseline)"
     The reference was re-recorded because ADR-69 adds per-query rows to it and ADR-68 changes how credit is assigned. Comparing stored floats against the previous reference, **5 of 60 aggregate cells differ, and not one of them is a Recall figure**:
 
     | channel / scope | NDCG@10 before | after | delta |
