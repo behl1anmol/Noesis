@@ -136,7 +136,10 @@ def test_the_stored_provenance_could_gate_a_run():
     assert provenance["labels"]["golden_sha256"]
     assert provenance["scoring"]["version"] == SCORER_VERSION, (
         "the reference was measured under a different scorer than this tree "
-        "runs (ADR-70); re-baseline, or bump SCORER_VERSION deliberately"
+        "runs (ADR-70). Policy: a scorer change and its re-baseline land in "
+        "the same commit — bump SCORER_VERSION and re-baseline together "
+        "(NOESIS_EVAL_REBASELINE=1 uv run pytest tests/eval/ -m golden -s), "
+        "don't land the version bump alone"
     )
 
 

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 import subprocess
 import time
@@ -42,6 +41,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from qdrant_client import QdrantClient
 
 from noesis.core import state
@@ -68,6 +68,7 @@ from .harness import (
     golden_digest,
     load_golden,
     load_reference,
+    load_structural_patterns,
     manifest_sha256,
     percentile,
     reference_mismatches,
@@ -251,11 +252,49 @@ def test_credit_is_assigned_optimally_not_first_fit():
     assert score_query([wide, narrow], (l0, l1))["recall@10"] == 1.0
     # Order-independence: first fit also scores 1.0 here, by luck.
     assert score_query([wide, narrow], (l1, l0))["recall@10"] == 1.0
-    # The file still occupies one rank slot, so NDCG is unchanged by the extra
-    # credit — one slot of gain against an ideal of two items.
+    # The file still occupies one rank slot, and — since PR #42 review round 5
+    # finding 1 — IDCG's ideal now counts unique FILES rather than items, so a
+    # query whose two labels share one file has an ideal of exactly one slot.
+    # Answering both fills that one slot completely: ndcg@10 == 1.0. Before the
+    # fix this scored 0.6131 (1 / (1 + 1/log2(3))), the mathematical ceiling for
+    # an ideal that could never be reached because IDCG assumed two slots DCG
+    # can only ever fill one of.
     assert score_query([wide, narrow], (l0, l1))["ndcg@10"] == pytest.approx(
-        1 / (1 + 1 / math.log2(3)), abs=1e-9
+        1.0, abs=1e-9
     )
+
+
+def test_ndcg_ideal_counts_unique_files_not_relevant_items():
+    """Pins PR #42 review round 5, finding 1, against both shapes it names.
+
+    Same-file case: with the fix, DCG's binary per-slot gain (module doc: "a
+    file scores one slot however many of its labels it answers") means
+    answering ONE of two same-file labels already fills that file's one
+    possible slot — ndcg@10 is 1.0 whether one or both labels are matched.
+    Verified rather than assumed: the round-5 review's own aside ("a half
+    answer scores less than a full one") does not hold for this shape, and
+    was never quoted there with a computed number the way the 0.6131 finding
+    was — recall@10 is what tells a half answer from a full one here (0.5 vs
+    1.0), which is the metric that already discriminates.
+
+    Cross-file case: two relevant items in two DIFFERENT files is where
+    "half answered scores less than fully answered" is actually true and was
+    already true before this fix — `len({paths})` and `len(relevant)` agree
+    when no two items share a path, so this shape was never broken.
+    """
+    l0, l1 = RelevantItem("f.py", lines=(10, 12)), RelevantItem("f.py", lines=(40, 42))
+    wide, narrow = result("f.py", 1, 50), result("f.py", 9, 13)
+    both = score_query([wide, narrow], (l0, l1))
+    half = score_query([narrow], (l0, l1))  # only l0 retrieved; l1 not retrieved at all
+    assert both["recall@10"] == 1.0 and half["recall@10"] == 0.5
+    assert both["ndcg@10"] == pytest.approx(1.0, abs=1e-9)
+    assert half["ndcg@10"] == pytest.approx(1.0, abs=1e-9)  # saturates, by design
+
+    a0, b0 = RelevantItem("a.py", lines=(1, 1)), RelevantItem("b.py", lines=(1, 1))
+    full_cross = score_query([result("a.py", 1, 5), result("b.py", 1, 5)], (a0, b0))
+    half_cross = score_query([result("a.py", 1, 5)], (a0, b0))
+    assert full_cross["ndcg@10"] == pytest.approx(1.0, abs=1e-9)
+    assert half_cross["ndcg@10"] < full_cross["ndcg@10"]
 
 
 def test_grouping_still_counts_one_file_as_one_rank_slot():
@@ -278,6 +317,42 @@ def test_two_relevant_greedy_credit():
     )
     # One deduped result can credit only one of two same-file items.
     scores = score_query([result("a.py", 1, 60)], relevant)
+    assert scores["recall@10"] == 0.5
+
+
+def test_score_query_rejects_non_positive_k():
+    """The k<=0 guard round 4 added had no test at all — the mutant that
+    deletes the guard entirely survives the whole suite without this (PR #42
+    review round 5, finding 6)."""
+    relevant = (RelevantItem("a.py"),)
+    with pytest.raises(ValueError, match="k must be >= 1"):
+        score_query([result("a.py")], relevant, ks=(0,))
+    # Margin: k=1 is the smallest valid value and must not raise.
+    assert score_query([result("a.py")], relevant, ks=(1,))["recall@1"] == 1.0
+
+
+def test_score_query_rejects_empty_relevant():
+    """`load_golden` already refuses this at parse time, but `score_query` is
+    exported and directly unit-tested, and an empty tuple otherwise divides by
+    zero at the recall line instead of naming what went wrong (PR #42 review
+    round 5, finding 23)."""
+    with pytest.raises(ValueError, match="relevant"):
+        score_query([result("a.py")], ())
+
+
+def test_score_query_dedupes_identical_chunk_ids_before_matching():
+    """One physical chunk retrieved twice (duplicate chunk_id) must not get
+    two rank slots' worth of credit — that would let one wide chunk answer
+    both labels of a two-label query, defeating the one-chunk-one-item cap
+    ADR-68's matching relies on. Latent today: the current retriever cannot
+    produce this (Qdrant's FusionQuery(RRF) fuses by point id), so this is
+    robustness rather than a live bug (PR #42 review round 5, finding 26)."""
+    l0 = RelevantItem("f.py", lines=(10, 12))
+    l1 = RelevantItem("f.py", lines=(40, 42))
+    wide = {"file_path": "f.py", "start_line": 1, "end_line": 50, "chunk_id": "w"}
+    duplicate_of_wide = dict(wide)
+    scores = score_query([wide, duplicate_of_wide], (l0, l1))
+    # One physical chunk can credit at most one label, duplicate or not.
     assert scores["recall@10"] == 0.5
 
 
@@ -417,6 +492,51 @@ def test_load_golden_rejects_unknown_keys_at_the_query_level_too(tmp_path):
     # The margin: the four real query keys load unchanged.
     bad.write_text(_golden_yaml(item))
     assert load_golden(bad, tmp_path)[0].relevant[0].lines == (4, 4)
+
+
+def test_load_golden_rejects_unknown_top_level_keys(tmp_path):
+    """Round 4 hardened query-level and item-level typos; the top level had
+    the same silent-drop hole one level further out (PR #42 review round 5,
+    finding 25)."""
+    bad = tmp_path / "golden.yaml"
+    bad.write_text("queries: []\ntypo_key: 1\n")
+    with pytest.raises(ValueError, match="unknown key"):
+        load_golden(bad, tmp_path)
+
+    # The margin: both real top-level keys load unchanged.
+    ok = tmp_path / "ok.yaml"
+    ok.write_text("queries: []\nstructural_patterns: []\n")
+    assert load_golden(ok, tmp_path) == []
+
+
+def test_load_structural_patterns_rejects_unknown_keys(tmp_path):
+    """The docstring already claimed load_golden's fail-loudly rule; nothing
+    enforced it — a typo'd key ("expectd") loaded clean and silently dropped
+    what it named (PR #42 review round 5, finding 11)."""
+    good = tmp_path / "golden.yaml"
+    good.write_text(
+        "structural_patterns:\n"
+        "  - id: s1\n"
+        "    pattern: 'x'\n"
+        "    language: python\n"
+        "    expected: {a.py: 1}\n"
+    )
+    assert load_structural_patterns(good)[0].expected == {"a.py": 1}
+
+    # The repro that mattered: BOTH the correct key and a typo present, so the
+    # old loader used `expected` and silently dropped `expectd` — the typo'd
+    # extra file never got checked at all, rather than raising anything.
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "structural_patterns:\n"
+        "  - id: s1\n"
+        "    pattern: 'x'\n"
+        "    language: python\n"
+        "    expected: {a.py: 1}\n"
+        "    expectd: {b.py: 9}\n"
+    )
+    with pytest.raises(ValueError, match="unknown key"):
+        load_structural_patterns(bad)
 
 
 def test_load_golden_rejects_unresolvable_anchors(tmp_path):
@@ -571,6 +691,28 @@ def test_relational_gate_catches_symbol_subset_and_rerank_losses():
     assert any("ADR-35" in f for f in relational_failures(rerank_loss))
 
 
+def test_relational_gate_tie_overall_fails_but_tie_on_symbol_passes():
+    """The two operators `harness.py` argues for at length, pinned (PR #42
+    review round 5, finding 4). Overall uses `<=` because a tie is a real
+    result at n=40; the symbol subset uses `<` because n=14 makes a tie the
+    resolution limit, not a regression. Both flips silently held the whole
+    suite before this test existed.
+    """
+    tied_overall = {
+        "dense": _report(0.65, 0.70, 0.60, symbol_r10=0.80),
+        "hybrid": _report(0.65, 0.70, 0.60, symbol_r10=0.80),  # exact tie
+        "hybrid+rerank": _report(0.65, 0.72, 0.62, symbol_r10=0.80),
+    }
+    assert any("must beat dense" in f for f in relational_failures(tied_overall))
+
+    tied_symbol_only = {
+        "dense": _report(0.65, 0.75, 0.60, symbol_r10=0.80),
+        "hybrid": _report(0.66, 0.76, 0.61, symbol_r10=0.80),  # overall wins, symbol ties
+        "hybrid+rerank": _report(0.67, 0.77, 0.62, symbol_r10=0.80),
+    }
+    assert not any("symbol subset" in f for f in relational_failures(tied_symbol_only))
+
+
 def test_model_placement_env_defaults_to_current_behaviour(monkeypatch):
     for name in (EMBEDDER_DEVICE_ENV, RERANKER_DEVICE_ENV, EMBED_BATCH_ENV):
         monkeypatch.delenv(name, raising=False)
@@ -642,6 +784,14 @@ def test_regression_gate_passes_an_identical_run_and_tolerates_one_query():
     just_under = {"dense": _report(0.65, 0.7375 - limit * 0.999, 0.6149)}
     assert regression_failures(just_under, same) == []
 
+    # Exactly ON the boundary: the gate fires on `>`, not `>=`, so a drop
+    # exactly equal to the limit must still PASS. Without this probe,
+    # tightening `>` to `>=` survives the whole suite (PR #42 review round 5,
+    # finding 5) — the two straddling probes above never land on the point
+    # that tells them apart.
+    at_boundary = {"dense": _report(0.65, 0.7375 - limit, 0.6149)}
+    assert regression_failures(at_boundary, same) == []
+
     just_over = {"dense": _report(0.65, 0.7375 - limit * 1.001, 0.6149)}
     failures = regression_failures(just_over, same)
     assert any("dense/overall/recall@10" in f for f in failures)
@@ -669,6 +819,14 @@ def test_regression_gate_absolute_floor_holds_at_low_scores():
     inside = {"dense": _report(0.20, 0.25, 0.20)}
     inside["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query * 0.999
     assert regression_failures(inside, low) == []
+
+    # Exactly ON the floor: `>`, not `>=`, so a drop of exactly one query's
+    # worth must still PASS — round 4 added this discipline for
+    # CORPUS_DRIFT_TOLERANCE but not for this threshold (PR #42 review round
+    # 5, finding 5).
+    at_boundary = {"dense": _report(0.20, 0.25, 0.20)}
+    at_boundary["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query
+    assert regression_failures(at_boundary, low) == []
 
     outside = {"dense": _report(0.20, 0.25, 0.20)}
     outside["dense"]["categories"]["structural"]["recall@10"] = 0.25 - one_query * 1.001
@@ -738,6 +896,32 @@ def test_reference_mismatches_names_a_scorer_change():
 
     # The margin on the other side: matching versions are not an obstacle.
     assert reference_mismatches(run, _provenance()) == []
+
+
+def test_reference_mismatches_refuses_an_explicit_null_section_instead_of_crashing():
+    """`.get(section, {})` covers a MISSING section; a present-but-`null` one
+    (a malformed or hand-edited provenance block) reached `.get()` on `None`
+    and crashed with AttributeError instead of refusing (PR #42 review round
+    5, finding 12). ADR-70's documented behaviour — "reads as None and refuses
+    in both directions" — held for absence but not for an explicit null.
+    """
+    run = _provenance()
+    assert any(
+        "scorer version" in r for r in reference_mismatches(_provenance(scoring=None), run)
+    )
+    assert any(
+        "embedding_model" in r for r in reference_mismatches(_provenance(models=None), run)
+    )
+    assert any(
+        "store kind" in r for r in reference_mismatches(_provenance(store=None), run)
+    )
+    assert any(
+        "golden.yaml changed" in r
+        for r in reference_mismatches(_provenance(labels=None), run)
+    )
+    assert any(
+        "chunk count" in r for r in reference_mismatches(_provenance(corpus=None), run)
+    )
 
 
 def test_reference_mismatches_tolerates_ordinary_corpus_growth():
@@ -833,6 +1017,24 @@ def test_rebaseline_refuses_only_a_dirty_tree(monkeypatch, rebaselining, tree_di
         _refuse_rebaseline_on_dirty_tree("probe")
 
 
+def test_validate_golden_path_fails_fast_on_missing_or_broken_yaml(monkeypatch, tmp_path):
+    real_path = GOLDEN_PATH
+    missing = tmp_path / "nope.yaml"
+    monkeypatch.setitem(globals(), "GOLDEN_PATH", missing)
+    with pytest.raises(pytest.fail.Exception, match="does not exist"):
+        _validate_golden_path()
+
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("queries: [unterminated\n")
+    monkeypatch.setitem(globals(), "GOLDEN_PATH", broken)
+    with pytest.raises(pytest.fail.Exception, match="not valid YAML"):
+        _validate_golden_path()
+
+    # The margin: the real, valid file passes.
+    monkeypatch.setitem(globals(), "GOLDEN_PATH", real_path)
+    _validate_golden_path()
+
+
 def test_zero_recall_queries_flags_only_universal_misses():
     def with_queries(*pairs):
         report = _report(0.5, 0.5, 0.5)
@@ -844,6 +1046,25 @@ def test_zero_recall_queries_flags_only_universal_misses():
         "hybrid": with_queries(("a", 0.0), ("b", 1.0), ("c", 1.0)),
     }
     assert zero_recall_queries(reports) == ["a"]
+
+
+def test_format_table_requires_latency_columns_uniform_across_channels():
+    """Sampling only the first channel to decide whether latency columns
+    exist, then indexing every channel with them, KeyErrors the moment a
+    later channel is the one missing them — the mixed case the function's own
+    docstring describes (a fresh run beside a stored pre-M4 baseline) (PR #42
+    review round 5, finding 28)."""
+    def strip_latency(row: dict) -> dict:
+        return {k: v for k, v in row.items() if k not in LATENCY_KEYS}
+
+    with_latency = _report(0.6, 0.7, 0.6)
+    without_latency = {
+        "overall": strip_latency(with_latency["overall"]),
+        "categories": {c: strip_latency(r) for c, r in with_latency["categories"].items()},
+    }
+    mixed = {"dense": with_latency, "hybrid": without_latency}
+    rendered = format_table(mixed)  # must not KeyError
+    assert "latency_p50_ms" not in rendered
 
 
 def test_render_report_marks_an_ungated_run():
@@ -906,6 +1127,28 @@ def test_report_never_claims_a_write_that_a_failed_layer_prevented():
     assert "THIS RUN WROTE THE REFERENCE" not in refused
     assert "REQUESTED BUT NOT WRITTEN" in refused
     assert "was NOT touched" in refused
+    assert "the relational gate (L1) failed above" in refused
+    # Round 4's own fix did not reach the sibling L2 line: it still said the
+    # run "re-baselined" three lines above "NOT WRITTEN" (PR #42 review round
+    # 5, finding 3).
+    assert "**NOT RUN** — this run re-baselined" not in refused
+    assert "**NOT RUN** — a re-baseline was requested, so nothing was gated" in refused
+
+
+def test_report_names_the_write_itself_when_l1_passed_but_the_write_failed():
+    """Distinct from the L1-failure case above: when L1 PASSED and the write
+    still didn't happen, the only remaining cause is ``save_reference`` itself
+    refusing (e.g. ADR-69's rows-less guard) — the report must say that,
+    not blame "a gate layer above" for a layer that never failed (PR #42
+    review round 5, finding 3b)."""
+    reports = {"dense": _report(0.6, 0.7, 0.6)}
+    refused = render_report(
+        reports, _provenance(), [], [], None, rebaseline=True, wrote_reference=False
+    )
+    assert "L1 relational (same-run): PASS" in refused
+    assert "the write itself was refused" in refused
+    assert "a gate layer above failed" not in refused
+    assert "the relational gate (L1) failed above" not in refused
 
 
 def test_report_labels_mismatch_reasons_it_prints_under_a_re_baseline():
@@ -1000,7 +1243,11 @@ def test_reference_query_deltas_sees_a_swap_the_aggregates_cannot():
     )
     assert "lost: a on hybrid 1.00 -> 0.00" in rendered
     assert "gained: b on hybrid 0.00 -> 1.00" in rendered
-    assert "c 0.50" not in rendered
+    # `"c 0.50"` can never occur in this format ("c on hybrid 1.00 -> 0.50"),
+    # so the assertion could not fail regardless of correctness — inert since
+    # it was copied from the sibling test above, where the format has no
+    # channel name (PR #42 review round 5, finding 21).
+    assert "c on hybrid" not in rendered
     # Reported, never gated: the run still passes.
     assert "L2 regression vs reference: PASS" in rendered
 
@@ -1046,6 +1293,17 @@ def test_save_reference_refuses_a_reference_that_cannot_answer_a_per_query_claim
     # missing — a row that could not re-derive its own aggregate.
     with pytest.raises(ValueError, match="rows missing"):
         save_reference(incomplete, target, _provenance())
+    assert not target.exists()
+
+    # `id` and `category` were not checked here at all — a row missing either
+    # raised a bare KeyError two lines below instead of this named refusal
+    # (PR #42 review round 5, finding 22).
+    missing_category = {"dense": _report(0.6, 0.7, 0.6)}
+    missing_category["dense"]["queries"] = [
+        {"id": "a", "recall@5": 0.6, "recall@10": 0.7, "ndcg@10": 0.6}  # no "category"
+    ]
+    with pytest.raises(ValueError, match="rows missing"):
+        save_reference(missing_category, target, _provenance())
     assert not target.exists()
 
     # The margin: complete rows are written, and carry the metrics ADR-69 names.
@@ -1159,6 +1417,29 @@ def _refuse_rebaseline_on_dirty_tree(when: str) -> None:
         )
 
 
+def _validate_golden_path() -> None:
+    """Fail fast on a missing or unparseable golden.yaml, before the corpus
+    fixture spends minutes building an index to measure it against.
+
+    ``load_golden`` needs the corpus root to resolve anchors, and that root
+    does not exist yet at the top of this fixture — so this checks only what
+    CAN be checked before that: the file exists and parses as YAML. There was
+    deliberately no ``skipif`` guard for a missing file (the loudness is the
+    point), but nothing made that loudness cheap: a broken golden.yaml used to
+    surface only after the full corpus build, deep inside ``load_golden`` (PR
+    #42 review round 5, finding 14) — the same late-guard shape round 2 fixed
+    for the dirty-tree refusal, which cost 336.60s before being moved earlier.
+    A structurally valid but anchor-broken file still fails later inside
+    ``load_golden``, just as loudly, once there is a root to resolve against.
+    """
+    if not GOLDEN_PATH.is_file():
+        pytest.fail(f"{GOLDEN_PATH} does not exist — nothing to measure against.")
+    try:
+        yaml.safe_load(GOLDEN_PATH.read_bytes())
+    except yaml.YAMLError as exc:
+        pytest.fail(f"{GOLDEN_PATH} is not valid YAML: {exc}")
+
+
 @pytest.fixture(scope="session")
 def corpus(tmp_path_factory):
     """Self-index this repo once: real embedder, embedded or real Qdrant.
@@ -1179,9 +1460,19 @@ def corpus(tmp_path_factory):
     """
     import shutil
 
-    # Before anything expensive: a re-baseline on a dirty tree is refused here
-    # rather than after the copy-and-index below.
+    # Before anything expensive: a broken golden.yaml or a dirty re-baseline
+    # tree are both refused here rather than after the copy-and-index below.
+    _validate_golden_path()
     _refuse_rebaseline_on_dirty_tree("checked before the corpus was built")
+
+    # An aborted run (CUDA OOM is a documented failure mode in this file) used
+    # to leave the PREVIOUS run's report on disk — a plausible-looking PASS
+    # from a stale code state, with `.claude/commands/eval.md` sending the
+    # reader straight to it. Clearing both at the top of a fresh run means an
+    # aborted one leaves no artifact rather than a misleading one (PR #42
+    # review round 5, finding 9).
+    REPORT_PATH.unlink(missing_ok=True)
+    REPORT_MD_PATH.unlink(missing_ok=True)
 
     eval_tmp = tmp_path_factory.mktemp("eval")
     corpus_root = eval_tmp / "corpus"

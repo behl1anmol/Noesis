@@ -232,7 +232,8 @@ data/
 # .gitignore, and this repository indexes ITSELF, so three checkouts under
 # .claude/ tripled the tree the scanners walk — 196 files became 589 and
 # discovery went from 6.6s to 14.4s, past structural_search's 10s budget, which
-# left every labeled ast-grep pattern returning nothing (PR #42 review round 4).
+# left every labeled ast-grep pattern returning nothing (PR #42 review round 4,
+issue #43).
 .claude/worktrees/
 
 # eval harness scratch output (baselines/ IS committed; the latest run is not).

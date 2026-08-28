@@ -41,7 +41,11 @@ Scoring rules (deliberate, stated so the numbers are reproducible):
   fact been retrieved.
 - NDCG@10 uses binary gains: a rank slot gains 1 when it grows the matching,
   whatever number of items it adds, so a file scores one slot however many of
-  its labels it answers; IDCG assumes all relevant items ranked first.
+  its labels it answers; IDCG assumes the best case ranks first as many
+  distinct FILES as the query has relevant items in, capped at NDCG_K — the
+  same one-slot-per-file model DCG uses, not one slot per item (PR #42 review
+  round 5, finding 1: an item-counted IDCG could not be reached by a query
+  with two labels in one file, capping its best possible NDCG@10 at 0.6131).
 """
 
 from __future__ import annotations
@@ -110,6 +114,10 @@ def resolve_anchor(lines: list[str], anchor: str, where: str) -> int:
 # outside these sets is a typo, and a typo is refused rather than dropped.
 _QUERY_KEYS = frozenset({"id", "category", "query", "relevant"})
 _ITEM_KEYS = frozenset({"path", "anchor", "anchor_end"})
+# The two sections golden.yaml is allowed to carry at the top level. This is
+# the same class of guard round 4 added at query and item indent — a typo'd
+# top-level key was still silently dropped (PR #42 review round 5, finding 25).
+_TOP_LEVEL_KEYS = frozenset({"queries", "structural_patterns"})
 
 
 def _reject_unknown_keys(
@@ -159,7 +167,10 @@ def load_golden(path: str | Path, root: str | Path) -> list[GoldenQuery]:
     root = Path(root)
     with open(path, "rb") as fh:
         raw = yaml.safe_load(fh)
-    if not isinstance(raw, dict) or not isinstance(raw.get("queries"), list):
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a top-level mapping")
+    _reject_unknown_keys(str(path), raw, _TOP_LEVEL_KEYS)
+    if not isinstance(raw.get("queries"), list):
         raise ValueError(f"{path}: expected a top-level 'queries' list")
     file_cache: dict[str, list[str]] = {}
     queries: list[GoldenQuery] = []
@@ -251,6 +262,9 @@ class StructuralPattern:
     expected: dict[str, int]  # repo-relative path -> match count
 
 
+_STRUCTURAL_PATTERN_KEYS = frozenset({"id", "pattern", "language", "expected"})
+
+
 def load_structural_patterns(path: str | Path) -> list[StructuralPattern]:
     """Parse and validate the golden ``structural_patterns`` section. Same
     fail-loudly rule as load_golden: a silently skipped entry corrupts the
@@ -267,6 +281,11 @@ def load_structural_patterns(path: str | Path) -> list[StructuralPattern]:
         if not pid or pid in seen_ids:
             raise ValueError(f"{path}: pattern #{i} has a missing or duplicate id")
         seen_ids.add(pid)
+        # This docstring already claimed load_golden's fail-loudly rule; this
+        # call is what makes that true rather than aspirational — a mistyped
+        # key ("expectd") used to load clean and silently drop what it named
+        # (PR #42 review round 5, finding 11).
+        _reject_unknown_keys(f"{path}: pattern {pid!r}", entry, _STRUCTURAL_PATTERN_KEYS)
         if not entry.get("pattern") or not entry.get("language"):
             raise ValueError(f"{path}: pattern {pid!r} needs pattern and language")
         expected = entry.get("expected")
@@ -295,9 +314,13 @@ def matches(result: dict[str, Any], item: RelevantItem) -> bool:
 def dedupe_by_path(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep the best-ranked result per file (input is rank-ordered).
 
-    Retained for reporting a one-row-per-file view. Scoring uses
-    :func:`group_by_path` instead — see ADR-67 for why keeping only the
-    best-ranked chunk silently discarded correct answers.
+    Not called by any current scoring or reporting path — scoring uses
+    :func:`group_by_path` instead (ADR-67: keeping only the best-ranked chunk
+    per file silently discarded correct answers). Kept as a small,
+    independently tested utility rather than removed: collapsing to one row
+    per file is a real view a caller may still want, it was previously
+    claimed as a reporting-path caller this function does not have (PR #42
+    review round 5, finding 24).
     """
     seen: set[str] = set()
     deduped: list[dict[str, Any]] = []
@@ -371,7 +394,33 @@ def score_query(
     and it stays monotone in k. NDCG gain is still 1 per slot that adds any
     match: the file occupies one rank position however many items it answers.
     """
-    groups = group_by_path(results)
+    if not relevant:
+        # `load_golden` already refuses an empty `relevant` list at parse time,
+        # so the gate can never reach this — but score_query is exported and
+        # directly unit-tested, and an empty tuple otherwise divides by zero at
+        # the recall line below rather than naming what went wrong (PR #42
+        # review round 5, finding 23).
+        raise ValueError("score_query: relevant must be non-empty")
+    # Dedupe by chunk identity before grouping: two "chunks" that are really
+    # one physical retrieval (same chunk_id) must not each get their own rank
+    # slot in the matching below, or one wide chunk retrieved twice could
+    # answer two different labels — defeating the one-chunk-one-item cap this
+    # function exists to enforce. Latent today: the current retriever fuses by
+    # point id, so it cannot produce a literal duplicate (PR #42 review round
+    # 5, finding 26) — this is robustness against a future retriever, not a
+    # live bug.
+    seen_chunks: set[Any] = set()
+    deduped: list[dict[str, Any]] = []
+    for chunk in results:
+        identity = chunk.get("chunk_id")
+        if identity is None:
+            identity = (chunk.get("file_path"), chunk.get("start_line"), chunk.get("end_line"))
+        if identity in seen_chunks:
+            continue
+        seen_chunks.add(identity)
+        deduped.append(chunk)
+
+    groups = group_by_path(deduped)
     # Flat chunk list with, for each chunk, the items it could credit.
     chunk_items: list[list[int]] = []
     for group in groups:
@@ -420,7 +469,14 @@ def score_query(
         for r, size in enumerate(matched_after)
     ]
     dcg = sum(g / math.log2(rank + 2) for rank, g in enumerate(gains[:NDCG_K]))
-    ideal = min(len(relevant), NDCG_K)
+    # IDCG must imagine the same rank-slot model DCG uses: one slot per FILE,
+    # not per item (PR #42 review round 5). Before this fix, two labels in one
+    # file made IDCG assume two ideal slots when DCG can only ever fill one —
+    # a perfect answer to structural-03/structural-08 (every label hit, at the
+    # best possible rank) scored a flat 0.6131, indistinguishable from a half
+    # answer. `{item.path for item in relevant}` is the most slots the DCG
+    # model can ever fill, which is what "ideal" has to mean here.
+    ideal = min(len({item.path for item in relevant}), NDCG_K)
     idcg = sum(1 / math.log2(i + 2) for i in range(ideal))
     scores[f"ndcg@{NDCG_K}"] = dcg / idcg if idcg else 0.0
     return scores
@@ -520,12 +576,18 @@ def save_reference(
                 f"so the reference could not support a per-query claim (ADR-69). "
                 f"Refusing to write {path}."
             )
-        missing = sorted({m for m in _METRICS for row in rows if m not in row})
+        # `id` and `category` are as load-bearing as the three metrics below:
+        # they're what a per-query row is even identified and grouped by. Only
+        # _METRICS was checked here, so a row missing `id` or `category` raised
+        # a bare KeyError two lines down instead of this named refusal (PR #42
+        # review round 5, finding 22).
+        required_keys = (*_METRICS, "id", "category")
+        missing = sorted({k for k in required_keys for row in rows if k not in row})
         if missing:
             raise ValueError(
                 f"save_reference: channel {channel!r} has rows missing {missing}, "
-                f"so the stored aggregates could not be re-derived from them "
-                f"(ADR-69). Refusing to write {path}."
+                f"so the reference could not support a per-query claim (ADR-69). "
+                f"Refusing to write {path}."
             )
     payload = {
         "provenance": provenance,
@@ -573,9 +635,21 @@ _METRICS = ("recall@5", "recall@10", f"ndcg@{NDCG_K}")
 # Bump this whenever a change to `score_query`, `group_by_path` or `matches`
 # can move a stored number. A reference written before the field existed
 # carries no version, reads as None, and correctly refuses to gate.
+#
+# Policy (PR #42 review round 5, finding 7): bumping this turns the DEFAULT
+# suite red on every pull request until someone spends the ~15 GPU-minutes to
+# re-baseline (test_the_stored_provenance_could_gate_a_run), which is the
+# same incentive ADR-69 explicitly refused to build for labels. Kept anyway,
+# deliberately: a label edit is frequent and cheap and must not be
+# discouraged (issue #38's own failure mode), while a scorer change is rare
+# and inherently invalidates the measurement it touches — silently comparing
+# across it is exactly the mistake this field exists to prevent. The rule
+# this implies: a scorer change and its re-baseline land in the same commit.
 #   1  grouped scoring, credit assigned by first fit (ADR-67)
 #   2  credit assigned by maximum bipartite matching (ADR-68)
-SCORER_VERSION = 2
+#   3  NDCG's ideal counts unique FILES, not items — matching what DCG can
+#      actually fill (PR #42 review round 5, finding 1)
+SCORER_VERSION = 3
 
 
 # --- ADR-65: provenance, comparability, regression ------------------------
@@ -649,15 +723,20 @@ def reference_mismatches(reference: dict[str, Any], run: dict[str, Any]) -> list
     reference — it is a different experiment, and comparing against it is the
     provenance-blind mistake lesson 8 was recorded for.
     """
+    # `or {}` at every section, not `.get(section, {})` alone: a section
+    # present but explicitly `null` (a malformed or hand-edited provenance
+    # block) must refuse the same way a MISSING section does, not raise
+    # AttributeError out of the next `.get()` (PR #42 review round 5, finding
+    # 12). `.get(section, {})` only covers absence; `null` is present.
     reasons: list[str] = []
-    ref_models, run_models = reference.get("models", {}), run.get("models", {})
+    ref_models, run_models = reference.get("models") or {}, run.get("models") or {}
     for key in ("embedding_model", "reranker_model"):
         if ref_models.get(key) != run_models.get(key):
             reasons.append(
                 f"{key}: reference {ref_models.get(key)!r} != run {run_models.get(key)!r}"
             )
-    ref_scorer = reference.get("scoring", {}).get("version")
-    run_scorer = run.get("scoring", {}).get("version")
+    ref_scorer = (reference.get("scoring") or {}).get("version")
+    run_scorer = (run.get("scoring") or {}).get("version")
     if ref_scorer != run_scorer:
         reasons.append(
             f"scorer version: reference {ref_scorer!r} != run {run_scorer!r} — "
@@ -665,7 +744,7 @@ def reference_mismatches(reference: dict[str, Any], run: dict[str, Any]) -> list
             f"(ADR-70), so a difference between them measures the scorer, not "
             f"retrieval"
         )
-    ref_store, run_store = reference.get("store", {}), run.get("store", {})
+    ref_store, run_store = reference.get("store") or {}, run.get("store") or {}
     if ref_store.get("kind") != run_store.get("kind"):
         reasons.append(
             f"store kind: reference {ref_store.get('kind')!r} != "
@@ -676,7 +755,7 @@ def reference_mismatches(reference: dict[str, Any], run: dict[str, Any]) -> list
             f"server version: reference {ref_store.get('server_version')!r} != "
             f"run {run_store.get('server_version')!r}"
         )
-    ref_labels, run_labels = reference.get("labels", {}), run.get("labels", {})
+    ref_labels, run_labels = reference.get("labels") or {}, run.get("labels") or {}
     if ref_labels.get("golden_sha256") != run_labels.get("golden_sha256"):
         reasons.append("golden.yaml changed since the reference was recorded")
     if ref_labels.get("n_queries") != run_labels.get("n_queries"):
@@ -684,7 +763,7 @@ def reference_mismatches(reference: dict[str, Any], run: dict[str, Any]) -> list
             f"query count: reference {ref_labels.get('n_queries')} != "
             f"run {run_labels.get('n_queries')}"
         )
-    ref_corpus, run_corpus = reference.get("corpus", {}), run.get("corpus", {})
+    ref_corpus, run_corpus = reference.get("corpus") or {}, run.get("corpus") or {}
     ref_chunks, run_chunks = ref_corpus.get("chunks"), run_corpus.get("chunks")
     if not ref_chunks:
         reasons.append("reference records no chunk count")
@@ -831,10 +910,14 @@ def rerank_query_deltas(
 
     The gate already asserts the reranker's *aggregate* win (ADR-35, layer 1),
     and the aggregate is what the docs quote. What no artifact recorded was the
-    per-query cost underneath it: on the 2026-08-09 reference the reranker is
-    better on 5 queries and worse on 3, netting +0.05 on Recall@10 — a real win
-    paid for by demoting three answers it had already retrieved (PR #42 round-2
-    review, which found this by hand after a per-query claim went out wrong).
+    per-query cost underneath it: against the CURRENT reference — the one that
+    stores the per-query rows this claim is re-derivable from, not the
+    2026-08-09 one, which stored none (PR #42 review round 5, finding 18) — the
+    reranker gains 5 queries (nl-11, symbol-04, symbol-06, structural-02,
+    structural-04) and loses 3 (nl-01, structural-08, structural-10), netting
+    +0.05 on Recall@10 — a real win paid for by demoting three answers it had
+    already retrieved (PR #42 round-2 review, which found this by hand after a
+    per-query claim went out wrong).
 
     Reported, never gated. A cross-encoder re-ordering some queries downward
     while winning overall is expected behaviour, not a regression; the reason to
@@ -880,6 +963,13 @@ def reference_query_deltas(
     Reported, never gated — the same standing as :func:`rerank_query_deltas`.
     Per-query retrieval is noisy, the cost of a false red here is a 15-minute
     re-run, and the gate already has a layer that fires on the aggregate.
+
+    Includes DIAGNOSTIC_CHANNELS deliberately, unlike layer 2's
+    :func:`regression_failures` — this view is reported, not gated, so there
+    is no double-counting risk to avoid, and a crossing on the python-only
+    channel is still useful evidence of what changed (same reasoning
+    :func:`zero_recall_queries` states for its own choice to include it; PR
+    #42 review round 5, finding 20).
     """
     crossings: list[tuple[str, str, float, float]] = []
     for channel in sorted(reports):
@@ -935,14 +1025,18 @@ def render_report(
     for failure in relational:
         lines.append(f"    - {failure}")
     if regression is None:
-        lines.append(
-            "- L2 regression vs reference: **NOT RUN** — "
-            + (
-                "this run re-baselined"
-                if rebaseline
-                else "no comparable reference"
-            )
-        )
+        # Keyed off OUTCOME (wrote_reference), not REQUEST (rebaseline): a
+        # re-baseline that was asked for but never written — because L1 failed
+        # or because the write itself was refused — must not read as "this run
+        # re-baselined" one line above the L3 stamp that says otherwise (PR #42
+        # review round 5, finding 3; round 4's own fix left this sibling line).
+        if rebaseline and wrote_reference:
+            l2_reason = "this run re-baselined"
+        elif rebaseline:
+            l2_reason = "a re-baseline was requested, so nothing was gated"
+        else:
+            l2_reason = "no comparable reference"
+        lines.append("- L2 regression vs reference: **NOT RUN** — " + l2_reason)
         # Label them. Under a re-baseline the line above already gave a reason,
         # so bare bullets read as if they explained it; they are a second,
         # independent fact (PR #42 review round 4).
@@ -972,12 +1066,25 @@ def render_report(
             "- L3 re-baseline: **REQUESTED BUT NOT WRITTEN** "
             "(`NOESIS_EVAL_REBASELINE=1`)"
         )
-        lines.append(
-            "    - a gate layer above failed, so `tests/eval/baselines/"
-            "reference.json` was NOT touched and still holds the previous "
-            "numbers. A run that fails its own exit criterion is not a "
-            "measurement standard (lesson 8)."
-        )
+        # "a gate layer above failed" was true only for the L1 case. When L1
+        # PASSES and the write still didn't happen, the only remaining cause
+        # is save_reference itself refusing (e.g. ADR-69's rows-less guard) —
+        # `relational` is empty precisely then, since the assertion above this
+        # branch already stopped the run before reaching `if rebaseline:` on
+        # any L1 failure (PR #42 review round 5, finding 3b).
+        if relational:
+            lines.append(
+                "    - the relational gate (L1) failed above, so "
+                "`tests/eval/baselines/reference.json` was NOT touched and "
+                "still holds the previous numbers. A run that fails its own "
+                "exit criterion is not a measurement standard (lesson 8)."
+            )
+        else:
+            lines.append(
+                "    - the write itself was refused (see the error above) — "
+                "`tests/eval/baselines/reference.json` was NOT touched and "
+                "still holds the previous numbers."
+            )
     zero = zero_recall_queries(reports)
     lines.append(
         "- Zero-recall on every channel: "
@@ -1049,8 +1156,15 @@ def format_table(reports: dict[str, dict[str, Any]]) -> str:
     pre-M4 baselines may not)."""
     channels = list(reports)
     columns = list(_METRICS)
-    sample = next(iter(reports.values()))["overall"]
-    if all(key in sample for key in LATENCY_KEYS):
+    # ALL channels, not just the first: sampling one channel to decide whether
+    # latency columns exist, then indexing every channel with them, KeyErrors
+    # the moment a later channel is the one without them — the exact mixed
+    # case this function's own docstring describes (PR #42 review round 5,
+    # finding 28).
+    if all(
+        all(key in report["overall"] for key in LATENCY_KEYS)
+        for report in reports.values()
+    ):
         columns += list(LATENCY_KEYS)
     lines = [
         "| category | n | channel | " + " | ".join(columns) + " |",
