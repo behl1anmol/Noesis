@@ -86,13 +86,22 @@ MIGRATION_COMMIT = "3307997"
 # verified individually and is called out in the PR body for sign-off, per
 # golden.yaml's own rule that the stakeholder's labels are authoritative.
 #
-#   nl-10, symbol-12: config.py was 58 lines at LABEL_COMMIT and load_settings
-#     sat at line 38, but the labels claim [63,107] and [72,107]. Those ranges
-#     never matched anything — the labels were invalid the day they were
-#     written, so both queries have scored 0 since M2, inside the stored M2
-#     baseline itself. Re-pointed at load_settings, which is what both the
-#     query text ("where are runtime settings loaded from the toml config
-#     file") and the query id ("load_settings") ask for.
+#   nl-10, symbol-12: the pre-migration golden.yaml claims [63,107] and
+#     [72,107] for config.py, which this script cannot resolve against
+#     LABEL_COMMIT — config.py was only 58 lines there. That is NOT because
+#     the ranges were ever invalid: they were refreshed the same day, at
+#     ce3fc64 (a descendant of LABEL_COMMIT), against a config.py that was by
+#     then exactly 107 lines — valid, to EOF. The mismatch is this script's
+#     own: LABEL_COMMIT fixes which commit the FILE CONTENT is read at, while
+#     `lines` here is read from whatever the pre-migration golden.yaml held,
+#     which reflects that later refresh. Corrected in the PR #42 round-5
+#     review, which also retracted the "past EOF the day it was written"
+#     count this comment used to carry — see ADR-64 in decisions.md for the
+#     measured version. What the two ranges genuinely never survived is a
+#     MONTH of drift against HEAD, which is issue #38's actual finding.
+#     Re-pointed at load_settings, which is what both the query text ("where
+#     are runtime settings loaded from the toml config file") and the query
+#     id ("load_settings") ask for.
 #   symbol-13: `class AppContext` moved from app.py to runtime.py in 34f2408
 #     (2026-07-06), so this label's PATH has been wrong for a month, not just
 #     its lines. Re-pointed at the definition's new home.
