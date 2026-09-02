@@ -35,3 +35,8 @@ reads this file too, and restores each row with the status recorded below.
 **Mistake:** uv init --package --python 3.12 silently wrote requires-python >=3.12, contradicting the doc-pinned 3.11 floor (tech stack table)
 **Lesson:** After any scaffolding-tool run (uv init/add), diff the generated config against doc-pinned constraints before building on it
 **Rationale:** Generator defaults silently override documented pins; catching drift at scaffold time costs seconds, catching it after downstream code depends on it costs a migration
+
+## [5] process (occurrences: 1, status: retired)
+**Mistake:** M8: ran 'uv add jinja2 watchdog' before recording their rule-3 decision rows — the rows landed minutes later in the same session, but the hard rule's order (decision row, then dep) was inverted. Caught immediately after the uv output and corrected before any code used the deps.
+**Lesson:** Before running any dependency-adding command (uv add / pip install into the project), record the decision row first — treat the /adr write as the gate that unlocks the install, not as paperwork to backfill, even when the dependency is pre-decided in the architecture doc.
+**Rationale:** Rule 3's value is the forcing function: writing the rationale BEFORE the install is what catches a wrong version, a license problem, or a rejected alternative while reversal is still free (lesson 2's tree-sitter incident was exactly a consequence of install-first thinking). Backfilling inverts the check into a rubber stamp; the same-session correction was cheap this time only because the deps were genuinely pre-decided in Overview §4.9/§4.12.

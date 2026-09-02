@@ -304,7 +304,7 @@ def test_recorded_detail_states_the_errno_at_most_once(exc):
     holds however the branches are later rearranged.
     """
     bucket: list[tuple[str, str]] = []
-    _record_degraded(bucket, "pkg", "/abs/pkg/.gitignore", exc, "summary")
+    _record_degraded(bucket, "pkg", "/abs/pkg/.gitignore", exc, "summary", seen=set())
 
     (_, message) = bucket[0]
     assert message.count("[Errno") <= 1
