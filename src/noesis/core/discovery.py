@@ -184,34 +184,24 @@ def _dir_key(dir_rel: str) -> str:
     return dir_rel or "<root>"
 
 
-def _record_degraded(
-    bucket: list[tuple[str, str]] | None,
-    key: str,
-    path: str | Path,
-    exc: OSError,
-    summary: str,
-) -> None:
-    """Report a screening fault: always logged, recorded when asked (ADR-58).
+def _error_detail(exc: OSError) -> str:
+    """Rebuild a persistable message for *exc* without its ``filename``.
 
-    The DEBUG log fires unconditionally, including for the ``errors=None``
-    callers (structural search, the registration preview) that keep the
-    historical silent-skip contract — "silent" was never meant to include
-    "leaves no trace at all".
+    Shared by every discovery fault channel that persists to
+    `run_file_errors` and the dashboard (`_record_degraded`'s ``unscreened``/
+    ``unidentified`` buckets, `_walk_error`'s ``errors.dirs``, and the
+    file-screening loop's ``errors.files``) — one rebuild, so the redaction
+    cannot drift between sites the way it did before issue #32 (ADR-73).
 
-    Only *summary* and the errno reach the collector, never *path*: the
-    recorded pairs are persisted to `run_file_errors` and rendered on the
-    dashboard, and the key is already the directory rel, so an absolute
-    filesystem path in the message adds nothing but the machine-specific root
-    prefix (ADR-25). The log line, which stays local and is at DEBUG for that
-    reason, carries the full path an operator needs to go fix it.
-
-    That is why the detail is rebuilt from ``errno``/``strerror`` rather than
-    taken from ``str(exc)``. `OSError.__str__` interpolates ``filename`` when
-    it is set — the normal shape here, since these faults come from `stat` and
-    `read_text` on a real path — so the obvious one-liner silently persists the
-    absolute path and makes the paragraph above a lie (PR #31 review).
-    ``str(exc)`` is used only when there is no ``strerror`` to rebuild from,
-    and then only when ``filename`` is unset, so it cannot reintroduce a path.
+    `OSError.__str__` interpolates ``filename`` when it is set, which is the
+    normal shape for every fault in this module: they all come from `stat`,
+    `read_text` or `scandir` on a real path. A caller's key is already the
+    project-relative path, so ``str(exc)`` would add nothing but the
+    machine-specific root prefix (ADR-25) to a message that is persisted and
+    rendered. The detail is rebuilt from ``errno``/``strerror`` instead;
+    ``str(exc)`` is used only when there is no ``strerror`` to rebuild from
+    and ``filename`` is unset, so it can never reintroduce a path (PR #31
+    review, PR #31 round-2 review).
     """
     if exc.strerror:
         detail = exc.strerror
@@ -232,6 +222,28 @@ def _record_degraded(
         # a filename but no strerror dropped it — losing the actionable half to
         # protect the path, when both are available (PR #31 review).
         detail = f"[Errno {exc.errno}] {detail}"
+    return detail
+
+
+def _record_degraded(
+    bucket: list[tuple[str, str]] | None,
+    key: str,
+    path: str | Path,
+    exc: OSError,
+    summary: str,
+) -> None:
+    """Report a screening fault: always logged, recorded when asked (ADR-58).
+
+    The DEBUG log fires unconditionally, including for the ``errors=None``
+    callers (structural search, the registration preview) that keep the
+    historical silent-skip contract — "silent" was never meant to include
+    "leaves no trace at all".
+
+    Only *summary* and the errno reach the collector, never *path* — see
+    `_error_detail`. The log line, which stays local and is at DEBUG for that
+    reason, carries the full path an operator needs to go fix it.
+    """
+    detail = _error_detail(exc)
     # The log keeps the full path; only the persisted pair is trimmed.
     logger.debug("discovery: %s — %s (%s)", summary, path, exc)
     if bucket is None:
@@ -382,7 +394,11 @@ def discover_files(
                 rel = str(exc.filename)
             if rel == ".":
                 rel = "<root>"
-        errors.dirs.append((rel, str(exc) or type(exc).__name__))
+        # Message only — never the key. `_walk_error`'s unattributable branch
+        # above deliberately keeps `rel = str(exc.filename)` as an absolute
+        # path when it IS the key (`indexer.is_attributable_prefix` reads it),
+        # which `_error_detail` does not touch (issue #32, ADR-73).
+        errors.dirs.append((rel, _error_detail(exc)))
 
     # `errors=None` keeps the historical silent-skip contract for the callers
     # that do no change detection (structural search, the ADR-42 registration
@@ -554,9 +570,11 @@ def discover_files(
             except OSError as exc:
                 # Still present but unscreened (EACCES, EIO, ESTALE): never
                 # index it on unverified data, but record the failure so
-                # callers don't mistake its absence for a deletion.
+                # callers don't mistake its absence for a deletion. The
+                # message is rebuilt without `filename` — see `_error_detail`
+                # (issue #32, ADR-73).
                 if errors is not None:
-                    errors.files.append((rel, str(exc) or type(exc).__name__))
+                    errors.files.append((rel, _error_detail(exc)))
                 continue
             results.append(rel)
 
