@@ -16,6 +16,7 @@ embedder/reranker workers, which must not queue behind a scan (§3.5).
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from pathlib import Path
@@ -29,6 +30,8 @@ from noesis.core.config import StructuralSettings
 from noesis.core.discovery import DiscoveryConfig, discover_files
 from noesis.core.indexer import discovery_config_for_project
 from noesis.core.languages import LANGUAGE_MAP, detect_language
+
+logger = logging.getLogger(__name__)
 
 # Metavariable names are extracted from the pattern text because ast-grep-py
 # exposes captures only by name (get_match / get_multiple_matches), not as a
@@ -122,14 +125,34 @@ def _scan_sync(
 ) -> StructuralResult:
     mapping = LANGUAGE_MAP[language]
     single_vars, multi_vars = _meta_var_names(pattern)
-    deadline = time.monotonic() + timeout_s
 
+    discovery_start = time.monotonic()
     candidates = [
         rel
         for rel in discover_files(root_path, discovery_config)
         if detect_language(rel) == language
         and (paths is None or any(rel == p or rel.startswith(p + "/") for p in paths))
     ]
+    discovery_s = time.monotonic() - discovery_start
+    logger.info(
+        "structural scan: discovery took=%.3fs candidates=%d",
+        discovery_s,
+        len(candidates),
+    )
+
+    # Deadline starts AFTER discovery (issue #43): timeout_s is documented as
+    # the scan's own wall-clock budget, but starting the clock before
+    # discover_files() ran charged discovery time against it too. On a slow
+    # filesystem or large tree, discovery alone could exceed timeout_s and the
+    # scan would return scanned_files: 0 having read nothing — indistinguishable
+    # from "this pattern does not occur". Discovery is already bounded by its
+    # own filters (.gitignore, skip-list, size caps) and is not the runaway
+    # case this budget exists to guard against. Logged rather than added to
+    # StructuralResult: no other core surface puts wall-clock timing in its
+    # response body (search latency is telemetry-only, indexer discovery
+    # timing is log-only), and doing so here would make the REST/MCP
+    # byte-identity contract flap between two calls of the same query.
+    deadline = time.monotonic() + timeout_s
 
     matches: list[StructuralMatch] = []
     scanned = 0
@@ -173,6 +196,19 @@ def _scan_sync(
             # (or nodes) never examined, so this is always reported truncated.
             truncated = True
             break
+
+    if timed_out and scanned == 0 and candidates:
+        # Still possible (e.g. timeout_s set at or below zero, or the very
+        # first file's own parse+match time exceeds the whole budget) — an
+        # empty match list here means "the scan never ran", not "no matches
+        # exist", so say so loudly rather than let it pass as a normal result.
+        logger.warning(
+            "structural scan timed out before reading any file: "
+            "%d candidate(s), discovery took %.3fs, scan budget was %.3fs",
+            len(candidates),
+            discovery_s,
+            timeout_s,
+        )
 
     return StructuralResult(
         matches=matches, scanned_files=scanned, truncated=truncated, timed_out=timed_out
