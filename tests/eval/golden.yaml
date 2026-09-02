@@ -440,7 +440,9 @@ structural_patterns:
     pattern: "time.monotonic()"
     language: python
     expected:
-      src/noesis/core/structural.py: 2
+      # issue #43: +2 for discovery_s's own start/elapsed monotonic() calls,
+      # separate from the scan deadline's set+check pair.
+      src/noesis/core/structural.py: 4
       # M8: live progress clock (jobs) + debounce/quiet clocks (watcher).
       src/noesis/core/jobs.py: 2
       # H3 added the re-arm clock in _launch_scoped, bringing watcher to 3.

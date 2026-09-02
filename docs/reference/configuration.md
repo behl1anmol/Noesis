@@ -62,7 +62,7 @@ If no file is found, all defaults apply.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `max_results` | int > 0 | `100` | Cap on matches per structural query. A request may lower it, never raise it. |
-| `timeout_s` | float > 0 | `10.0` | Wall-clock scan budget. On expiry the scan stops and returns partial results with `timed_out: true` — partial matches are still actionable to an iterating agent. |
+| `timeout_s` | float > 0 | `10.0` | Wall-clock scan budget, counted from *after* file discovery completes (issue #43) — discovery is bounded separately by `.gitignore`/skip-list/size filters, not by this timer. On expiry the scan stops and returns partial results with `timed_out: true` — partial matches are still actionable to an iterating agent. |
 
 ## `[git]`
 

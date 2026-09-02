@@ -6,6 +6,7 @@ the live filesystem, so a registry row is all the state it needs.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from qdrant_client import QdrantClient
 
 from noesis.app import AppContext, create_app
 from noesis.core import state
+from noesis.core import structural as structural_mod
 from noesis.core.config import StructuralSettings
 from noesis.core.embedder import FakeEmbedder
 from noesis.core.structural import StructuralSearchError, structural_search
@@ -244,13 +246,64 @@ async def test_paths_restriction(conn, project_id):
     assert {m["file_path"] for m in result["matches"]} == {"app/views.py"}
 
 
-async def test_timeout_returns_partial_with_flag(conn, project_id):
-    settings = StructuralSettings(timeout_s=0.0)
-    result = await structural_search(
-        conn, project_id, "print($X)", "python", settings=settings
-    )
+async def test_timeout_returns_partial_with_flag(conn, project_id, caplog):
+    # -1.0 rather than 0.0: the deadline (set after discovery, issue #43) must
+    # be deterministically in the past *before* the scan loop's first check,
+    # not merely equal to "now" — a bare 0.0 would depend on whether any
+    # wall-clock time happens to elapse between setting the deadline and the
+    # first `time.monotonic()` check a few lines later, which is float slack
+    # (hard rule 9), not a guaranteed timeout.
+    settings = StructuralSettings(timeout_s=-1.0)
+    with caplog.at_level("WARNING", logger="noesis.core.structural"):
+        result = await structural_search(
+            conn, project_id, "print($X)", "python", settings=settings
+        )
     assert result["timed_out"] is True
     assert result["matches"] == []  # budget expired before any file was read
+    # issue #43 suggestion 3: scanned_files: 0 alongside timed_out: True means
+    # "the scan never ran", not "no matches exist" — that must be loud, not a
+    # silent-looking empty result.
+    assert any("timed out before reading any file" in r.message for r in caplog.records)
+
+
+async def test_discovery_time_is_not_charged_to_scan_budget(
+    conn, project_id, monkeypatch, caplog
+):
+    """issue #43: the wall-clock deadline used to start *before*
+    ``discover_files``, so a slow discovery phase (a large tree, a slow
+    filesystem) ate the scan's own ``timeout_s`` budget and could leave the
+    scan returning ``scanned_files: 0`` having read nothing — indistinguishable
+    from "this pattern does not occur". Simulate slow discovery directly
+    rather than growing the fixture tree, so the test is fast and
+    deterministic regardless of machine speed.
+    """
+    real_discover_files = structural_mod.discover_files
+    discovery_delay_s = 0.2
+
+    def slow_discover_files(*args, **kwargs):
+        time.sleep(discovery_delay_s)
+        return real_discover_files(*args, **kwargs)
+
+    monkeypatch.setattr(structural_mod, "discover_files", slow_discover_files)
+    # Budget shorter than the discovery delay but ample for the scan itself:
+    # on the pre-fix code this alone would exhaust the deadline before the
+    # scan loop's first iteration, producing timed_out=True, matches=[].
+    settings = StructuralSettings(timeout_s=discovery_delay_s / 2)
+    with caplog.at_level("INFO", logger="noesis.core.structural"):
+        result = await structural_search(
+            conn, project_id, "db.Exec($$$ARGS)", "python", settings=settings
+        )
+    assert result["timed_out"] is False
+    assert result["scanned_files"] > 0
+    got = {(m["file_path"], m["start_line"]) for m in result["matches"]}
+    assert got == {("app/db.py", 4), ("app/db.py", 7)}
+    # discovery_s is reported via logging, not the response body — a
+    # wall-clock value in the response would make the REST/MCP
+    # byte-identity contract flap between two calls of the same query.
+    # A genuinely slow tree is still visible: pin that it was actually
+    # measured and logged, not merely absorbed into the scan budget.
+    [discovery_record] = [r for r in caplog.records if "discovery took" in r.message]
+    assert discovery_record.args[0] >= discovery_delay_s
 
 
 # --- REST mirror -------------------------------------------------------------
