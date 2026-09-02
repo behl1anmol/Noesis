@@ -225,6 +225,61 @@ def test_persisted_screening_detail_carries_no_absolute_path(tmp_path, monkeypat
     assert "13" in message
 
 
+def test_persisted_dir_scan_detail_carries_no_absolute_path(tmp_path, monkeypatch):
+    """Issue #32. `unscreened` got the redaction in the PR #31 round-2 review;
+    `errors.dirs` (`_walk_error`) did not, because it was out of scope for
+    that PR — it built its message the same way pre-fix `unscreened` did,
+    `str(exc)` directly, so a `scandir` fault under a real path persisted the
+    absolute directory into `run_file_errors`, live on `main` independent of
+    that branch. Same invariant as
+    `test_persisted_screening_detail_carries_no_absolute_path`, same site
+    class: the key is already the directory rel path (`pkg`), so the absolute
+    form in the message adds only the machine-specific root prefix (ADR-25).
+    """
+    root = _tree(tmp_path)
+    sub = root / "pkg"
+    real_scandir = os.scandir
+
+    def flaky(path=".", *args, **kwargs):
+        if Path(path) == sub:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", flaky)
+    errors = DiscoveryErrors()
+    discover_files(root, DiscoveryConfig(), errors=errors)
+
+    assert [key for key, _ in errors.dirs] == ["pkg"]
+    _, message = errors.dirs[0]
+    assert str(root) not in message
+    assert str(sub) not in message
+    # The actionable half is still there.
+    assert "Permission denied" in message
+    assert "13" in message
+
+
+def test_persisted_file_screening_detail_carries_no_absolute_path(
+    tmp_path, monkeypatch
+):
+    """Same invariant as the dir-scan case above, for `errors.files`: a file
+    that fails mid-screening (here, `stat()`) persisted an absolute path via
+    the same bare `str(exc)`. The key is already the file's rel path
+    (`top.py`).
+    """
+    root = _tree(tmp_path)
+    _fail_method_on(monkeypatch, "stat", root / "top.py")
+
+    errors = DiscoveryErrors()
+    discover_files(root, DiscoveryConfig(), errors=errors)
+
+    assert [p for p, _ in errors.files] == ["top.py"]
+    _, message = errors.files[0]
+    assert str(root) not in message
+    assert str(root / "top.py") not in message
+    assert "Permission denied" in message
+    assert "13" in message
+
+
 @pytest.mark.parametrize(
     "exc",
     [
