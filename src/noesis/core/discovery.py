@@ -231,6 +231,8 @@ def _record_degraded(
     path: str | Path,
     exc: OSError,
     summary: str,
+    *,
+    seen: set[str],
 ) -> None:
     """Report a screening fault: always logged, recorded when asked (ADR-58).
 
@@ -256,8 +258,16 @@ def _record_degraded(
     # `discovery_degraded`, making an operator-facing count disagree with the
     # rows behind it (PR #31 review). The key IS the unit of report here: a
     # second fault on the same directory tells an operator nothing new.
-    if any(existing == key for existing, _ in bucket):
+    #
+    # *seen* is *bucket*'s O(1) companion, not a convenience: the original
+    # ``any(existing == key for existing, _ in bucket)`` rescanned the whole
+    # list on every call, so recording N distinct degraded directories in one
+    # walk cost O(N^2) — measured at 1.31s for 10,000 dirs (issue #33). The
+    # caller must pass the *same* set across every call that shares this
+    # bucket for the life of one walk, or a duplicate can reappear silently.
+    if key in seen:
         return
+    seen.add(key)
     bucket.append((key, f"{summary} ({detail})"))
 
 
@@ -311,6 +321,7 @@ def _cycle_guard_identity(
     *,
     bucket: list[tuple[str, str]] | None = None,
     key: str = "<root>",
+    seen: set[str],
 ) -> tuple[int, int] | None:
     """``(st_dev, st_ino)`` for the ``follow_symlinks`` cycle guard, or None.
 
@@ -342,6 +353,7 @@ def _cycle_guard_identity(
             "cycle-guard stat failed, so symlink duplicate-detection is "
             "degraded for this directory — it may be walked twice under two "
             "rel paths, never omitted",
+            seen=seen,
         )
         return None
     return (st.st_dev, st.st_ino)
@@ -406,6 +418,12 @@ def discover_files(
     # buckets, not the reporting switch.
     unscreened = None if errors is None else errors.unscreened
     unidentified = None if errors is None else errors.unidentified
+    # O(1)-dedupe companions for the two buckets above, scoped to this single
+    # walk — see `_record_degraded` (issue #33). Built unconditionally, even
+    # when the corresponding bucket is None, so every call site can pass one
+    # without a branch.
+    unscreened_seen: set[str] = set()
+    unidentified_seen: set[str] = set()
 
     ignores = _IgnoreStack()
     extra_spec = (
@@ -431,7 +449,9 @@ def discover_files(
         dir_key = _dir_key(dir_rel)
 
         if cfg.follow_symlinks:
-            ident = _cycle_guard_identity(dirpath, bucket=unidentified, key=dir_key)
+            ident = _cycle_guard_identity(
+                dirpath, bucket=unidentified, key=dir_key, seen=unidentified_seen
+            )
             if ident is not None:
                 visited.add(ident)
 
@@ -460,6 +480,7 @@ def discover_files(
                 exc,
                 "could not test whether this directory holds a .gitignore, so "
                 "any rules it holds were not applied",
+                seen=unscreened_seen,
             )
         if has_gitignore:
             try:
@@ -472,6 +493,7 @@ def discover_files(
                     exc,
                     "this directory's .gitignore exists but could not be read, "
                     "so its rules were not applied",
+                    seen=unscreened_seen,
                 )
 
         kept_dirs = []
@@ -506,12 +528,16 @@ def discover_files(
                         exc,
                         "could not determine whether this child directory is a "
                         "symlink, so it is walked unguarded",
+                        seen=unidentified_seen,
                     )
                 if is_link:
                     continue
             if cfg.follow_symlinks:
                 child_ident = _cycle_guard_identity(
-                    Path(dirpath) / d, bucket=unidentified, key=child_rel
+                    Path(dirpath) / d,
+                    bucket=unidentified,
+                    key=child_rel,
+                    seen=unidentified_seen,
                 )
                 if child_ident is None:
                     # Keep walking it. Skipping an unstattable directory would
