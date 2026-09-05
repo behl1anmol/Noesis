@@ -241,3 +241,6 @@ issue #43).
 # a per-run artifact with device-specific latency, so committing it would just
 # invite stale numbers into review. The durable record is baselines/reference.json.
 tests/eval/report_latest.*
+
+# Cold-start harness workspace (tests/perf/cold_start_harness.py) — regenerated per run.
+dev/perf/
