@@ -2,7 +2,8 @@
 
 These run in the default suite: no model, no network, no Qdrant. They pin the
 two things that would silently make the harness lie — byte accounting and the
-delete guard — plus the scenario-ordering rule that gives 'warm' its meaning.
+delete guard — plus the scenario-ordering rule that gives 'warm' its meaning,
+and the --model/--dim/--qdrant-url plumbing PR #49 review found broken.
 """
 
 from __future__ import annotations
@@ -13,7 +14,10 @@ import pytest
 
 from .cold_start_harness import (
     Meter,
+    _prefetch_command,
+    _remote_collection_name,
     _wipe,
+    _worker_settings,
     dir_bytes,
     format_verdict,
     scenario_complaint,
@@ -187,3 +191,65 @@ def test_verdict_makes_no_seconds_claim_from_a_single_warm_run() -> None:
     )
     assert "no floor" in verdict
     assert "not separable" not in verdict and "beyond the spread" not in verdict
+
+
+def test_prefetch_command_carries_the_selected_model() -> None:
+    """PR #49 review (r3942607710): the 'prefetched' scenario invoked
+    `noesis.prefetch` with no --model, so it always downloaded prefetch's
+    own default (CodeRankEmbed) regardless of --model. A run with a
+    non-default --model then reported the SELECTED model's full cold-start
+    cost as first_search time, reading as 'prefetch did not help' when
+    prefetch was never asked to fetch that model."""
+    cmd = _prefetch_command("some-org/some-model")
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "some-org/some-model"
+    assert "--skip-reranker" in cmd
+
+
+def test_worker_settings_passes_through_model_and_dim() -> None:
+    """PR #49 review (r3942607711): --dim had no effect at all — the worker
+    always built EmbedderSettings with its 768 default, so a --model with a
+    different vector size created a 768-dim collection and then failed on
+    its first real vector, deep inside the workload rather than at the
+    --dim/--model mismatch that caused it."""
+    settings = _worker_settings({
+        "db_path": "/tmp/does-not-need-to-exist.sqlite",
+        "model": "some-org/some-model",
+        "dim": 1024,
+        "device": "",
+        "qdrant_url": "",
+        "collection": "irrelevant-here",
+    })
+    assert settings.embedder.model == "some-org/some-model"
+    assert settings.embedder.dim == 1024
+
+
+def test_worker_settings_uses_the_namespaced_collection() -> None:
+    settings = _worker_settings({
+        "db_path": "/tmp/does-not-need-to-exist.sqlite",
+        "model": "m",
+        "dim": 768,
+        "device": "",
+        "qdrant_url": "http://127.0.0.1:6333",
+        "collection": "noesis_perf_cold_start_warm_2",
+    })
+    assert settings.qdrant.collection == "noesis_perf_cold_start_warm_2"
+    assert settings.qdrant.url == "http://127.0.0.1:6333"
+
+
+def test_remote_collection_name_is_namespaced_per_label() -> None:
+    """PR #49 review (r3942607713): every scenario shared one fixed
+    collection name against a real --qdrant-url server, with nothing
+    deleting its points afterward — so cold/warm repeats permanently
+    appended to the same corpus and no run was isolated from the last."""
+    cold = _remote_collection_name("cold")
+    warm2 = _remote_collection_name("warm-2")
+    assert cold != warm2
+    assert cold == _remote_collection_name("cold")
+
+
+def test_remote_collection_name_has_no_bare_hyphens() -> None:
+    """Labels like 'warm-2' must not produce a hyphenated collection name
+    verbatim — kept boring/portable rather than relying on Qdrant accepting
+    hyphens in every deployment."""
+    assert "-" not in _remote_collection_name("warm-2")

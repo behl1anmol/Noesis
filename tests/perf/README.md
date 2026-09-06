@@ -29,6 +29,19 @@ did not.
 Reports land in `dev/perf/cold-start/report_latest.{json,md}` (gitignored, along
 with the whole workspace). Each run rewrites them.
 
+**Using `--model` with a non-default embedder?** Pass `--dim` too — the
+collection is created at that vector size before the model ever runs, so a
+mismatch fails deep inside the workload (on the first real vector) rather than
+at startup. `--model` alone is enough for `prefetched`: prefetch is invoked
+with the selected model, not its own default.
+
+**Using `--qdrant-url` against a real server?** Each scenario gets its own
+collection, namespaced by label (`noesis_perf_cold_start_<label>`), deleted
+before the scenario runs and again after — so `cold`, `warm`, `warm-2`, ...
+never share state and never accumulate on the server between invocations. A
+crash mid-run can still leave one behind under that scenario's name; the next
+run of the same label deletes it before starting.
+
 Expect a full `cold,warm,prefetched` run to download the model **twice** (once
 for `cold`, once for `prefetched`) — the scenarios are deliberately independent.
 

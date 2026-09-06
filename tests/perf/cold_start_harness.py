@@ -63,6 +63,14 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+# Config is plain dataclasses over stdlib only (no torch, no qdrant_client),
+# so importing it here does not defeat the "import" phase below, whose job
+# is to isolate the heavy model/store imports the workload actually pays
+# for. Kept at module level (rather than lazily, like those) so the
+# --model/--dim/--qdrant-url plumbing in _worker_settings is testable
+# without a subprocess.
+from noesis.core.config import EmbedderSettings, QdrantSettings, Settings
+
 # Bump when a change makes new numbers incomparable to stored ones.
 HARNESS_VERSION = 1
 
@@ -162,6 +170,24 @@ class Meter:
 # --------------------------------------------------------------------------
 
 
+def _worker_settings(config: dict) -> Settings:
+    """The Settings this worker's AppContext is built from.
+
+    Pulled out of _worker so the --model/--dim/--qdrant-url plumbing is
+    testable directly — without a subprocess, a model, or a server.
+    """
+    return Settings(
+        db_path=Path(config["db_path"]),
+        embedder=EmbedderSettings(
+            model=config["model"], dim=config["dim"], device=config["device"] or None
+        ),
+        qdrant=QdrantSettings(
+            url=config["qdrant_url"] or QdrantSettings.url,
+            collection=config["collection"],
+        ),
+    )
+
+
 def _worker(config_path: Path) -> int:
     config = json.loads(config_path.read_text())
     caches = {name: Path(p) for name, p in config["caches"].items()}
@@ -182,7 +208,6 @@ def _worker(config_path: Path) -> int:
         from qdrant_client import QdrantClient
 
         from noesis.core import jobs, retriever, state
-        from noesis.core.config import EmbedderSettings, QdrantSettings, Settings
         from noesis.core.embedder import LocalSTEmbedder
         from noesis.core.vectorstore import VectorStore
         from noesis.runtime import (
@@ -191,16 +216,7 @@ def _worker(config_path: Path) -> int:
             close_runtime_context,
         )
 
-    cfg = Settings(
-        db_path=Path(config["db_path"]),
-        embedder=EmbedderSettings(
-            model=config["model"], device=config["device"] or None
-        ),
-        qdrant=QdrantSettings(
-            url=config["qdrant_url"] or QdrantSettings.url,
-            collection="noesis_perf_cold_start",
-        ),
-    )
+    cfg = _worker_settings(config)
 
     client = None
 
@@ -387,11 +403,56 @@ def _provenance(args: argparse.Namespace) -> dict:
         "torch": torch_version,
         "cuda_available": cuda,
         "model": args.model,
+        "dim": args.dim,
         "corpus": args.corpus,
         "query": args.query,
         "sequence": args.sequence,
         "store": args.qdrant_url or "embedded",
     }
+
+
+def _prefetch_command(model: str) -> list[str]:
+    """The ``noesis.prefetch`` invocation for the 'prefetched' scenario.
+
+    Must carry ``--model``: the worker embeds with ``config["model"]``
+    (``args.model``), so a prefetch that silently fetched prefetch's own
+    default instead would report the SELECTED model's full cold-start cost
+    as `first_search` time and blame it on prefetch not helping, when
+    prefetch was never asked to fetch that model at all.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "noesis.prefetch",
+        "--skip-reranker",
+        "--model",
+        model,
+    ]
+
+
+def _remote_collection_name(label: str) -> str:
+    """Namespace a --qdrant-url collection to this scenario's label, so
+    'cold' and 'warm-2' each get their own and repeats never share state."""
+    return f"noesis_perf_cold_start_{label.replace('-', '_')}"
+
+
+def _reset_remote_collection(qdrant_url: str, collection: str) -> None:
+    """Delete *collection* on a real Qdrant server if it exists.
+
+    Called both before a scenario runs (so a crashed prior attempt under the
+    same label starts clean, mirroring the local-cache _wipe-then-create
+    pattern) and after it finishes (so the harness never leaves scratch data
+    behind on an operator's server). Namespacing by label (above) is what
+    makes this safe to call without disturbing any other collection.
+    """
+    from qdrant_client import QdrantClient
+
+    client = QdrantClient(url=qdrant_url)
+    try:
+        if client.collection_exists(collection):
+            client.delete_collection(collection)
+    finally:
+        client.close()
 
 
 def run_scenario(
@@ -400,6 +461,7 @@ def run_scenario(
     caches = {key: workspace / "cache" / key for key, _ in CACHE_SPECS}
     run_dir = workspace / "run" / label
     prefetch_phase: dict | None = None
+    collection = _remote_collection_name(label)
 
     if name in ("cold", "prefetched"):
         for path in caches.values():
@@ -408,15 +470,20 @@ def run_scenario(
     for path in caches.values():
         path.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
+    if args.qdrant_url:
+        _reset_remote_collection(args.qdrant_url, collection)
 
     env = _env_for(caches)
 
     if name == "prefetched":
         before = {key: dir_bytes(path) for key, path in caches.items()}
         started = time.perf_counter()
-        cmd = [sys.executable, "-m", "noesis.prefetch", "--skip-reranker"]
         proc = subprocess.run(
-            cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True
+            _prefetch_command(args.model),
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
         )
         elapsed = round(time.perf_counter() - started, 3)
         if proc.returncode != 0:
@@ -439,7 +506,9 @@ def run_scenario(
         "caches": {key: str(path) for key, path in caches.items()},
         "db_path": str(run_dir / "state.sqlite"),
         "qdrant_url": args.qdrant_url,
+        "collection": collection,
         "model": args.model,
+        "dim": args.dim,
         "device": args.device,
         "corpus": str((REPO_ROOT / args.corpus).resolve()),
         "query": args.query,
@@ -468,6 +537,8 @@ def run_scenario(
     if prefetch_phase is not None:
         result["phases"] = [prefetch_phase, *result["phases"]]
     result["worker_log"] = str(log_path)
+    if args.qdrant_url:
+        _reset_remote_collection(args.qdrant_url, collection)
     return result
 
 
@@ -537,7 +608,14 @@ def format_verdict(results: list[dict]) -> str:
     else:
         lines.append(f"> Noise floor from {len(warms)} warm repeats.\n")
 
-    for name in ("import", "startup", "first_search", "reindex_call", "index_drain", "second_search"):
+    for name in (
+        "import",
+        "startup",
+        "first_search",
+        "reindex_call",
+        "index_drain",
+        "second_search",
+    ):
         cold_phase = phase(cold, name)
         warm_phases = [p for p in (phase(w, name) for w in warms) if p is not None]
         if cold_phase is None or not warm_phases:
@@ -565,12 +643,12 @@ def format_verdict(results: list[dict]) -> str:
         byte_claim = (
             f"**{fetched / 1_000_000:.0f} MB fetched**" if fetched else "0 MB fetched"
         )
-        lines.append(f"- `{name}`: cold {cold_phase['seconds']:.2f}s, {byte_claim} — {time_claim}")
+        lines.append(
+            f"- `{name}`: cold {cold_phase['seconds']:.2f}s, {byte_claim} — {time_claim}"
+        )
 
     total_cold = sum(p["fetched_bytes_total"] for p in cold["phases"])
-    paying = [
-        p["phase"] for p in cold["phases"] if p["fetched_bytes_total"] > 0
-    ]
+    paying = [p["phase"] for p in cold["phases"] if p["fetched_bytes_total"] > 0]
     lines.append("")
     lines.append(
         f"**{total_cold / 1_000_000:.0f} MB** is fetched on a cold install, "
@@ -625,6 +703,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--query", default=DEFAULT_QUERY)
     parser.add_argument("--model", default="nomic-ai/CodeRankEmbed")
+    parser.add_argument(
+        "--dim",
+        type=int,
+        default=768,
+        help="the --model's output vector size (default: 768, CodeRankEmbed's "
+        "dimension). Get this wrong and the run fails inside the workload, "
+        "after the download: the Qdrant collection is created at this size "
+        "before the model ever runs, so a different --model with an "
+        "unmatched --dim fails on its first real vector, not at startup",
+    )
     parser.add_argument(
         "--device", default="", help="force a device (cpu/cuda/mps); default auto"
     )
