@@ -64,6 +64,12 @@ class AppContext:
     # set_compute_device would silently override it (PR #10 review).
     config_device_pin: str | None = None
     config_reranker_device_pin: str | None = None
+    # ADR-77 (issue #47): background embedder warm-up, kicked off after this
+    # context is built. Tracked here (not ctx.jobs — that dict's keys are
+    # index run_ids and its consumers, e.g. status/progress endpoints, treat
+    # every entry as one) so close_runtime_context can cancel/await it like
+    # any other in-flight work before tearing down the embedder.
+    embedder_warmup: asyncio.Task | None = None
 
 
 async def build_runtime_context(cfg: Settings) -> AppContext:
@@ -112,9 +118,11 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
     log = logging.getLogger(__name__)
     # A silent hang here (Qdrant down/unreachable) is a common false "bug"
     # report — name what we're waiting on before the blocking round-trips.
-    log.info("connecting to Qdrant at %s", cfg.qdrant.url)
+    log.info("connecting to Qdrant at %s (query + index clients, ADR-76)", cfg.qdrant.url)
     store = VectorStore(
-        QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
+        QdrantClient(url=cfg.qdrant.url),
+        collection_name=cfg.qdrant.collection,
+        index_client=QdrantClient(url=cfg.qdrant.url),
     )
     created = store.ensure_collection(embedder)
     if created:
@@ -157,8 +165,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
             # loads log their own start/ready lines (core.embedder/reranker).
             log.info("preloading reranker model (may take a while)")
             await reranker.preload()
-    log.info("runtime ready")
-    return AppContext(
+    ctx = AppContext(
         conn=conn,
         store=store,
         embedder=embedder,
@@ -172,6 +179,26 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         config_reranker_device_pin=cfg.reranker.device,
     )
 
+    async def _warm_up_embedder() -> None:
+        # ADR-77 (issue #47): not awaited here — this coroutine runs as a
+        # background task instead, so a multi-minute cold download overlaps
+        # the agent's own setup time rather than delaying the
+        # FastMCP/FastAPI lifespan, which must finish before the server
+        # answers `initialize` (blocking it here would look like a server
+        # that failed to start). Both transports share this function, since
+        # both share build_runtime_context.
+        try:
+            await ctx.embedder.preload()
+            log.info("embedder warm-up complete")
+        except Exception:
+            log.exception(
+                "embedder warm-up failed — will load lazily on first use instead"
+            )
+
+    ctx.embedder_warmup = asyncio.create_task(_warm_up_embedder())
+    log.info("runtime ready")
+    return ctx
+
 
 async def close_runtime_context(ctx: AppContext) -> None:
     """Tear down what build_runtime_context created.
@@ -182,13 +209,18 @@ async def close_runtime_context(ctx: AppContext) -> None:
     must AWAIT the tasks' unwind before closing anything they touch — closing
     ``conn`` first would make that final write raise ``ProgrammingError`` and
     leave the run row stuck ``running`` (H5). Order: cancel → await → stop
-    model workers → stop the telemetry writer → close SQLite."""
+    model workers → close the Qdrant client(s) → stop the telemetry writer →
+    close SQLite. ``ctx.store.close()`` (ADR-76) closes a pre-existing gap:
+    the QdrantClient(s) were never explicitly closed before, single or
+    split."""
     tasks = [t for t in ctx.jobs.values() if not t.done()]
+    if ctx.embedder_warmup is not None and not ctx.embedder_warmup.done():
+        tasks.append(ctx.embedder_warmup)
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    for resource in (ctx.embedder, ctx.reranker):
+    for resource in (ctx.embedder, ctx.reranker, ctx.store):
         close = getattr(resource, "close", None)
         if close is not None:
             # Each close() joins a worker thread with a 5s bound. Bounded is

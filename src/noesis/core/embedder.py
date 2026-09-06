@@ -249,6 +249,16 @@ class LocalSTEmbedder:
 
         return await asyncio.wrap_future(self._submit(_HIGH, job))
 
+    async def preload(self) -> None:
+        """Load the model now instead of on the first real job (issue #47
+        finding 1 — mirrors ``reranker.preload``, ADR-77). LOW priority: a
+        real ``embed_query`` racing this at startup should preempt it in the
+        queue, though in practice nothing else is queued yet — the worker
+        processes one job at a time regardless of priority once it starts
+        loading, so a racing query simply waits for whichever job triggered
+        the load, with no added cost either way."""
+        await asyncio.wrap_future(self._submit(_LOW, lambda model: None))
+
     def set_device(self, device: str | None) -> None:
         """Retarget the model's device (dashboard setting, ADR-40); None
         re-enables auto-detect. Takes effect on the worker's next job via a

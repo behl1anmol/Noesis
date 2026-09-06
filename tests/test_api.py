@@ -78,7 +78,15 @@ async def _wait_done(client: TestClient, run_id: str, timeout: float = 5.0) -> d
 
 
 def test_healthz(client):
-    assert client.get("/healthz").json() == {"status": "ok"}
+    # ADR-77/78 (issue #47 finding 4): assets/embedder_ready ride alongside
+    # status. FakeEmbedder has no model on the HF hub and no resolved_device
+    # attribute at all, so both read their "not applicable to this embedder"
+    # values rather than a real ready/missing verdict — a real LocalSTEmbedder
+    # is covered by the opt-in -m integration test instead.
+    body = client.get("/healthz").json()
+    assert body["status"] == "ok"
+    assert body["assets"] == "missing"
+    assert body["embedder_ready"] == "n/a"
 
 
 def test_register_index_search_roundtrip(client, project_dir):

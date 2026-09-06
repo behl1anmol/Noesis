@@ -36,6 +36,7 @@ decides which.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections import Counter
 from typing import Any, Iterable, Literal, Protocol
@@ -85,13 +86,53 @@ def chunk_point_id(
 
 class VectorStore:
     """Dense-only Qdrant collection wrapper. One shared collection,
-    ``project_id`` payload filter at query time (Overview §6)."""
+    ``project_id`` payload filter at query time (Overview §6).
+
+    ``index_client`` (ADR-76, issue #48): qdrant-client 1.18's client-side
+    BM25 inference (``models.Document``) keeps unsynchronized accumulate/
+    drain state per ``QdrantClient`` instance, keyed only by model name —
+    two threads sharing one client can receive each other's embeddings.
+    Only ``upsert_chunks`` (write) and ``search`` (read, sparse/hybrid
+    channels) ever build a ``models.Document``; every other method here
+    (deletes, counts, scroll, retrieve, collection setup) is immune to this
+    regardless of concurrency, so they are deliberately left on ``client``
+    rather than also routed — there is nothing there to protect. Defaults
+    to ``client`` when omitted so every existing single-client caller
+    (~25 tests using ``QdrantClient(":memory:")``) is unaffected; production
+    wiring (``runtime.py``) passes a second real connection.
+
+    ``_index_lock`` guards ``index_client`` against ITSELF: the launch guard
+    in ``jobs.launch_index_run`` (``state.try_start_run``) is scoped per
+    ``project_id``, not global — two *different* registered projects can
+    run ``execute_run`` at the same time (multi-project dashboard, M8;
+    opt-in ``auto_reindex`` on 2+ projects makes this a routine occurrence,
+    not an edge case). Both would call ``upsert_chunks`` on this same
+    ``index_client``, reproducing writer-vs-writer corruption one level
+    down from the query-vs-index race this class already fixes. The lock
+    never touches ``client``/``search`` — the query path stays fully
+    concurrent, preserving ADR-20's intent — it only serializes the rare
+    case of two index runs' upserts landing in the same instant."""
 
     def __init__(
-        self, client: QdrantClient, collection_name: str = "noesis_chunks"
+        self,
+        client: QdrantClient,
+        collection_name: str = "noesis_chunks",
+        index_client: QdrantClient | None = None,
     ) -> None:
         self._client = client
+        self._index_client = index_client if index_client is not None else client
         self._collection = collection_name
+        self._index_lock = threading.Lock()
+
+    def close(self) -> None:
+        """Close the underlying client connection(s) (issue #48 teardown
+        gap: this was never called at all before ADR-76). Closes
+        ``index_client`` too only when it is a distinct object, so the
+        single-client default (tests, and any caller that never passed
+        ``index_client``) closes exactly once."""
+        self._client.close()
+        if self._index_client is not self._client:
+            self._index_client.close()
 
     @property
     def collection_name(self) -> str:
@@ -212,7 +253,17 @@ class VectorStore:
             )
             for chunk, vector in zip(chunks, vectors)
         ]
-        self._client.upsert(collection_name=self._collection, points=points, wait=True)
+        # index_client, not client (ADR-76): this is the only write-path
+        # call that builds a models.Document, so it must not share a
+        # ModelEmbedder with a concurrent search()'s sparse/hybrid query.
+        # _index_lock, not because upsert itself is unsafe, but because two
+        # DIFFERENT projects' index runs can be in flight at once (the
+        # launch guard is per-project_id, not global) and would otherwise
+        # share this same index_client's ModelEmbedder with each other.
+        with self._index_lock:
+            self._index_client.upsert(
+                collection_name=self._collection, points=points, wait=True
+            )
 
     def delete_file_chunks(
         self,

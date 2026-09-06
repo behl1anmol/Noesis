@@ -62,8 +62,22 @@ class StructuralSearchRequest(BaseModel):
 
 
 @router.get("/healthz")
-async def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+async def healthz(request: Request) -> dict[str, Any]:
+    """``status`` is unconditional (process is up); ``assets`` and
+    ``embedder_ready`` are the ADR-77/78 fail-loud surface (issue #47
+    finding 4) — previously a caller saw green here and then paid a
+    multi-minute silent stall on the next search. ``ctx`` can be absent
+    (e.g. a bare app without the lifespan wired), in which case both stay
+    ``"unknown"`` rather than raising on a healthcheck."""
+    ctx = getattr(request.app.state, "ctx", None)
+    if ctx is None:
+        return {"status": "ok", "assets": "unknown", "embedder_ready": "unknown"}
+    from noesis.prefetch import embedder_assets_ready
+
+    assets = "ready" if embedder_assets_ready(ctx.embedder.model_id) else "missing"
+    resolved_device = getattr(ctx.embedder, "resolved_device", "n/a")
+    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
+    return {"status": "ok", "assets": assets, "embedder_ready": embedder_ready}
 
 
 @router.post("/projects", status_code=202)

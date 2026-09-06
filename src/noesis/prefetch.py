@@ -39,6 +39,20 @@ def default_fastembed_cache() -> str:
     return str(Path(base).expanduser() / "noesis" / "fastembed")
 
 
+def embedder_assets_ready(model_id: str) -> bool:
+    """Best-effort, no-network check: is ``model_id`` already in the local
+    HF cache (ADR-78, issue #47 finding 4)? Checks for ``config.json``,
+    present in every HF model repo's first-downloaded files, in the
+    default HF cache location (``HF_HOME`` / ``~/.cache/huggingface/hub`` —
+    the same resolution ``sentence_transformers`` itself uses, so this asks
+    exactly what the real load will find). A miss here does not guarantee a
+    download is needed (the repo's exact files aren't enumerated), but a hit
+    reliably means the model has been fetched before."""
+    from huggingface_hub import try_to_load_from_cache
+
+    return try_to_load_from_cache(model_id, "config.json") is not None
+
+
 def prefetch_grammars() -> list[str]:
     from tree_sitter_language_pack import get_parser
 
