@@ -257,6 +257,36 @@ Indexing runs in a **background job** and reports progress live. Register a proj
 kick a reindex and you get a `run_id` back immediately; poll `GET /runs/{run_id}` (or
 watch the dashboard) for status, percent complete, and ETA.
 
+### Concurrent search + indexing
+
+`search_code` and an index run can genuinely overlap — the watcher launches index
+runs on its own whenever a file changes, which is the normal working state of this
+tool, not an edge case. qdrant-client's client-side BM25 inference has no locking of
+its own, so `VectorStore` keeps write and read traffic on two separate `QdrantClient`
+connections rather than sharing one (ADR-76):
+
+```
+ search_code (retriever.py)              index run (indexer.py / jobs.py)
+        │                                          │
+        ▼                                          ▼
+ ┌───────────────┐                        ┌────────────────────┐
+ │ query_client  │                        │   index_client       │
+ │ (read path)   │                        │   (write path, one    │
+ │               │                        │   writer at a time    │
+ │               │                        │   via a narrow lock)  │
+ └──────┬────────┘                        └──────────┬───────────┘
+        │                                             │
+        └──────────────► same Qdrant server, ─────────┘
+                          same collection
+```
+
+Both connections talk to the same server and the same collection — the server has no
+problem serving concurrent connections, that's normal database usage. The unsafe
+state lived entirely client-side, in-process, so splitting the connection splits it
+too. Every other `VectorStore` operation (deletes, counts, collection setup) is
+unaffected by any of this and stays on one connection, since none of them touch the
+mechanism that needed separating.
+
 ---
 
 ## The models
@@ -325,7 +355,7 @@ fast_path = true       # false → every run does a full hash-walk
 ```
 
 **Environment:** `FASTEMBED_CACHE_PATH` controls where BM25 assets are cached
-(default `data/fastembed_cache`); it's set automatically to keep runtime offline.
+(default `$XDG_CACHE_HOME/noesis/fastembed`); it's set automatically to keep runtime offline.
 
 ---
 

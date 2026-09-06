@@ -55,5 +55,6 @@ A real end-to-end example (the M6 exit-criterion task, including a Python `fastm
 | 404 or client hangs on connect | Missing trailing slash — use `http://127.0.0.1:8000/mcp/` |
 | Connection refused | Service not running, or agent configured for HTTP while only stdio was set up |
 | `unknown project_id` from every tool | stdio server resolving a different state DB than the one you registered in — set `NOESIS_CONFIG` or use the anchored default; see the tip above |
-| First `search_code` very slow | Embedding model loading lazily on first use — expected, especially on CPU |
+| First `search_code` very slow (minutes) | Embedding model assets (~550 MB) weren't fetched before startup — run `uv run python -m noesis.prefetch` once, or check `assets` on `/healthz`. The service also warms the model in the background at startup (ADR-77), so this should only bite if prefetch was skipped |
+| First `search_code` slightly slow (seconds, on CPU) | Normal model-load cost even with assets cached — the background warm-up (above) usually absorbs this before the agent's first call arrives |
 | `reindex` returns a ToolError about the embedding model | Mixed-model guard: the stored index was built with a different embedder — a full re-index with the current model is required |

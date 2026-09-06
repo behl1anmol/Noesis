@@ -30,8 +30,23 @@ The MCP server didn't connect. In order of likelihood:
 
 Verify the endpoint by hand:
 ```bash
-curl -sS http://127.0.0.1:8000/healthz          # → {"status":"ok"}
+curl -sS http://127.0.0.1:8000/healthz          # → {"status":"ok","assets":"ready","embedder_ready":true}
 ```
+
+## First `search_code` call blocks for minutes
+
+The embedding model's assets (~550 MB) weren't fetched before the service started, so
+the download landed inside this tool call instead of install time (issue #47). Check:
+
+```bash
+curl -sS http://127.0.0.1:8000/healthz
+```
+
+`"assets":"missing"` confirms it — run `uv run python -m noesis.prefetch` (from the
+noesis repo) and restart the service. `"embedder_ready":false` with `"assets":"ready"`
+means the assets are cached but the service's background warm-up hasn't finished
+loading them into memory yet (seconds, not minutes) — the call will complete, just not
+instantly. This is a one-time cost per service start, not per query.
 
 ## `list_projects` is empty
 
