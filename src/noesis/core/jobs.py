@@ -319,7 +319,13 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     subset that has failed long enough for their contents to stop being
     re-queued. Both zero is the healthy state. Non-zero does not mean anything
     was deleted — nothing under an unwalked directory is ever purged — it means
-    what is indexed there cannot be proven current."""
+    what is indexed there cannot be proven current.
+
+    ``embedder_assets``/``embedder_ready`` mirror ``/healthz``'s ADR-77/78
+    fields (issue #47 finding 4, PR #50 round-4 review) — this is the shared
+    REST/MCP status shape, so an MCP-only (stdio) caller with no HTTP surface
+    to poll can now see the same cold-start warm-up signal a REST caller gets
+    from ``/healthz``."""
     # Index health: what the state DB expects vs what Qdrant actually holds.
     # A mismatch is drift — a vector store that lost data (external collection
     # wipe) while state still reports the files indexed. Surfaced so agents
@@ -346,6 +352,12 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     # trusting an answer, which is why this rides the shared REST/MCP shape and
     # not just the dashboard.
     unwalkable, quarantined = state.count_unwalkable_dirs(ctx.conn, project_id)
+    from noesis.prefetch import embedder_assets_ready
+
+    ready = await asyncio.to_thread(embedder_assets_ready, ctx.embedder.model_id)
+    embedder_assets = "ready" if ready else "missing"
+    resolved_device = getattr(ctx.embedder, "resolved_device", "n/a")
+    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {
@@ -363,6 +375,8 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
             "drift": drift,
             "unwalkable_dirs": unwalkable,
             "quarantined_dirs": quarantined,
+            "embedder_assets": embedder_assets,
+            "embedder_ready": embedder_ready,
         }
     return {
         "project_id": project_id,
@@ -379,4 +393,6 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
         "drift": drift,
         "unwalkable_dirs": unwalkable,
         "quarantined_dirs": quarantined,
+        "embedder_assets": embedder_assets,
+        "embedder_ready": embedder_ready,
     }

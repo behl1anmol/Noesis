@@ -257,6 +257,47 @@ async def test_index_status_exposes_drift(ctx, repo):
     assert status["expected_chunks"] > 0
 
 
+# --- 8b. index_status surfaces embedder warm-up state (PR #50 round-4 review) --
+#
+# ADR row 77 claimed the background warm-up task was "complemented by an
+# assets_ready/warming_up field on the existing status/drift tool" — no such
+# field existed anywhere. index_status is that tool's shared REST/MCP shape
+# (GET /projects/{id}/status and the get_index_status MCP tool both call it),
+# so adding the fields here closes the gap for both surfaces at once, mirroring
+# the assets/embedder_ready fields already on /healthz (ADR rows 78/79).
+
+
+async def test_index_status_reports_embedder_assets_and_readiness(ctx, repo):
+    from unittest.mock import patch
+
+    project_id, _ = await _index(ctx, repo)
+
+    with patch("noesis.prefetch.embedder_assets_ready", return_value=False):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["embedder_assets"] == "missing"
+    # FakeEmbedder has no resolved_device attribute at all — same "not
+    # applicable to this embedder" contract /healthz already uses.
+    assert status["embedder_ready"] == "n/a"
+
+    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["embedder_assets"] == "ready"
+
+
+async def test_index_status_reports_embedder_state_when_never_indexed(ctx, repo):
+    # The never_indexed branch is a separate return statement in
+    # jobs.index_status — must carry the same fields, not just the run branch.
+    from unittest.mock import patch
+
+    project_id = state.register_project(ctx.conn, str(repo), ctx.embedder.model_id)
+
+    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["status"] == "never_indexed"
+    assert status["embedder_assets"] == "ready"
+    assert status["embedder_ready"] == "n/a"
+
+
 # --- 9. Drift heal under a live git fast path (PR #20 review finding #1) ------
 
 

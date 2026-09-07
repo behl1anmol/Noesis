@@ -101,7 +101,9 @@ Status of the most recent index run, shaped identically for REST and MCP:
   "vector_count": 333,
   "drift": false,
   "unwalkable_dirs": 0,
-  "quarantined_dirs": 0
+  "quarantined_dirs": 0,
+  "embedder_assets": "ready",
+  "embedder_ready": true
 }
 ```
 
@@ -114,6 +116,8 @@ The cost of that rule is worth knowing: while a run is actively committing, `dri
 `unwalkable_dirs` and `quarantined_dirs` are the **coverage** half of the same health picture, where `drift` is the storage half. `drift` says the store lost content it should be holding; these say part of the *tree* was never read, so what is indexed for it may be stale and cannot be proven otherwise. `quarantined_dirs` is a subset: those have failed long enough that the paths they hide are no longer being re-queued for retry ([ADR-56](../project/decisions.md)).
 
 Both zero is the healthy state. Non-zero does **not** mean anything was deleted — nothing under an unwalked directory is ever purged, because "I could not look" is not evidence of absence. It means results from that part of the tree may reflect older content than what is on disk. Worth checking before treating a search result as authoritative, and worth reporting to the human if a search over that project is coming back thin. Recovery is automatic: the first run that walks the directory again re-hashes its contents. There is no tool to clear this — it is a filesystem problem (a permissions change, an unmounted disk) or a deliberate scope decision, and both are resolved outside Noesis.
+
+`embedder_assets`/`embedder_ready` mirror `/healthz`'s cold-start warm-up signal (issue #47) for callers with no HTTP surface to poll — an MCP stdio server has no `/healthz` at all. `embedder_assets` is `"ready"` or `"missing"` (are the model's weights cached locally, checked without touching the network); `embedder_ready` is `true`/`false` once the embedder reports which device it loaded on, or the string `"n/a"` for an embedder implementation that doesn't expose one (e.g. a test double). A `search_code` call arriving while `embedder_ready` is still `false` will block until the background warm-up finishes loading the model — this pair of fields is why, not a hang.
 
 ## `get_chunk`
 
