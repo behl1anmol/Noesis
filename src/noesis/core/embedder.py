@@ -168,8 +168,13 @@ class LocalSTEmbedder:
 
         # Resolve the device explicitly rather than passing None and trusting
         # ST's auto-detect, which was seen returning CPU on a cuda box
-        # (lesson 4). The resolved value is recorded for benchmark provenance.
-        self._resolved_device = resolve_device(self._device)
+        # (lesson 4). Kept in a local until the model actually loads (below)
+        # — self._resolved_device (read by /healthz's embedder_ready, PR #50
+        # review finding 1) must not go truthy while SentenceTransformer(...)
+        # is still downloading/constructing, and must not stay truthy if it
+        # raises; a caller polling health during either window would wrongly
+        # see "ready".
+        resolved = resolve_device(self._device)
         # Frame the load: on a cold cache this blocks for minutes downloading
         # weights with no other output (the single silent stall M-users read as
         # a hang). model_id + device only — no code or query text (ADR-25).
@@ -177,12 +182,13 @@ class LocalSTEmbedder:
             "loading embedding model %s on %s "
             "(first run may download weights; can take minutes)",
             self._model_id,
-            self._resolved_device,
+            resolved,
         )
         started = time.perf_counter()
         model = SentenceTransformer(
-            self._model_id, trust_remote_code=True, device=self._resolved_device
+            self._model_id, trust_remote_code=True, device=resolved
         )
+        self._resolved_device = resolved
         logger.info(
             "embedding model %s ready on %s took=%.1fs",
             self._model_id,

@@ -129,10 +129,15 @@ class VectorStore:
         gap: this was never called at all before ADR-76). Closes
         ``index_client`` too only when it is a distinct object, so the
         single-client default (tests, and any caller that never passed
-        ``index_client``) closes exactly once."""
-        self._client.close()
-        if self._index_client is not self._client:
-            self._index_client.close()
+        ``index_client``) closes exactly once. ``try/finally`` (PR #50
+        review finding 3): if ``self._client.close()`` raises, the second
+        connection must still be closed rather than leaked — the original
+        exception still propagates once both are attempted."""
+        try:
+            self._client.close()
+        finally:
+            if self._index_client is not self._client:
+                self._index_client.close()
 
     @property
     def collection_name(self) -> str:

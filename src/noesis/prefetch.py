@@ -40,17 +40,43 @@ def default_fastembed_cache() -> str:
 
 
 def embedder_assets_ready(model_id: str) -> bool:
-    """Best-effort, no-network check: is ``model_id`` already in the local
-    HF cache (ADR-78, issue #47 finding 4)? Checks for ``config.json``,
-    present in every HF model repo's first-downloaded files, in the
-    default HF cache location (``HF_HOME`` / ``~/.cache/huggingface/hub`` —
-    the same resolution ``sentence_transformers`` itself uses, so this asks
-    exactly what the real load will find). A miss here does not guarantee a
-    download is needed (the repo's exact files aren't enumerated), but a hit
-    reliably means the model has been fetched before."""
+    """Best-effort, no-network check: is ``model_id`` fully cached in the
+    local HF cache (ADR-78 addendum, issue #47 finding 4, PR #50 review)?
+
+    Requires ``config.json`` AND at least one weight file: a single-file
+    checkpoint (``model.safetensors`` / ``pytorch_model.bin``) or a sharded
+    one's index manifest (``*.index.json``). Checking ``config.json`` alone
+    reported ``ready`` after a download interrupted between metadata and
+    weights — exactly the silent cold-start stall this check exists to
+    surface. Only the pytorch-backend filenames are checked, not the whole
+    repo tree: ``LocalSTEmbedder`` never requests ``backend="onnx"``, so an
+    onnx/openvino variant shipped alongside pytorch weights in the same repo
+    must not cause a false "missing".
+
+    ``try_to_load_from_cache`` returns a sentinel object — not ``None`` — for
+    a filename HF has already probed and confirmed absent from the repo
+    (e.g. a single-file checkpoint's sharded-index name, probed once by a
+    prior load's fallback logic and cached negative; verified against a live
+    cache). ``isinstance(result, str)`` treats that sentinel as absent, same
+    as a filename that was never probed at all — ``is not None`` would not.
+
+    All lookups happen in the default HF cache location (``HF_HOME`` /
+    ``~/.cache/huggingface/hub``), the same resolution ``sentence_transformers``
+    itself uses, so this asks exactly what the real load will find."""
     from huggingface_hub import try_to_load_from_cache
 
-    return try_to_load_from_cache(model_id, "config.json") is not None
+    def cached(filename: str) -> bool:
+        return isinstance(try_to_load_from_cache(model_id, filename), str)
+
+    if not cached("config.json"):
+        return False
+    weight_files = (
+        "model.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    )
+    return any(cached(f) for f in weight_files)
 
 
 def prefetch_grammars() -> list[str]:
