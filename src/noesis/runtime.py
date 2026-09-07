@@ -212,7 +212,12 @@ async def close_runtime_context(ctx: AppContext) -> None:
     model workers → close the Qdrant client(s) → stop the telemetry writer →
     close SQLite. ``ctx.store.close()`` (ADR-76) closes a pre-existing gap:
     the QdrantClient(s) were never explicitly closed before, single or
-    split."""
+    split. Each resource's close() is isolated (PR #50 round-3 review): one
+    raising is logged and must not skip the rest, or the telemetry/conn
+    cleanup after them."""
+    import logging
+
+    log = logging.getLogger(__name__)
     tasks = [t for t in ctx.jobs.values() if not t.done()]
     if ctx.embedder_warmup is not None and not ctx.embedder_warmup.done():
         tasks.append(ctx.embedder_warmup)
@@ -227,7 +232,10 @@ async def close_runtime_context(ctx: AppContext) -> None:
             # not the same as free: run it off the loop, or teardown blocks
             # every other task (including the MCP session manager's own
             # shutdown in the combined lifespan) for up to 5s per resource.
-            await asyncio.to_thread(close)
+            try:
+                await asyncio.to_thread(close)
+            except Exception:
+                log.exception("error closing %r during teardown", resource)
     # Same reason, and it must happen here rather than at process exit: the
     # writer holds its own handle to the state DB, which would otherwise
     # outlive ctx.conn and survive a DB-file removal. Scoped to this context's

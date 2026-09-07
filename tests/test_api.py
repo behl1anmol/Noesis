@@ -8,6 +8,7 @@ model is covered by the opt-in ``-m integration`` test.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -87,6 +88,36 @@ def test_healthz(client):
     assert body["status"] == "ok"
     assert body["assets"] == "missing"
     assert body["embedder_ready"] == "n/a"
+
+
+async def test_healthz_checks_assets_off_the_event_loop_thread():
+    """PR #50 round-3 review: embedder_assets_ready() does blocking
+    filesystem stat calls and must run via asyncio.to_thread — same
+    convention runtime.py already uses for delete_orphan_points — instead
+    of synchronously inside the event loop, which would stall every other
+    concurrent request for however long the stat calls take."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from noesis.api.routes import healthz
+
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def fake_ready(model_id: str) -> bool:
+        seen["thread"] = threading.get_ident()
+        return True
+
+    ctx = SimpleNamespace(embedder=FakeEmbedder(dim=8))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+
+    with patch("noesis.prefetch.embedder_assets_ready", fake_ready):
+        await healthz(request)
+
+    assert seen["thread"] != loop_thread, (
+        "embedder_assets_ready ran on the event-loop thread, not a worker "
+        "thread — asyncio.to_thread isn't wrapping it"
+    )
 
 
 def test_register_index_search_roundtrip(client, project_dir):
