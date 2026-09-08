@@ -11,7 +11,6 @@ tests assert the two surfaces return identical bodies.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -69,20 +68,19 @@ async def healthz(request: Request) -> dict[str, Any]:
     finding 4) — previously a caller saw green here and then paid a
     multi-minute silent stall on the next search. ``ctx`` can be absent
     (e.g. a bare app without the lifespan wired), in which case both stay
-    ``"unknown"`` rather than raising on a healthcheck. ``embedder_assets_ready``
-    does blocking filesystem stat calls (PR #50 round-3 review), so it runs
-    via ``asyncio.to_thread`` — the same convention ``runtime.py`` already
-    uses for ``delete_orphan_points`` — rather than stalling the event loop
-    for every other concurrent request."""
+    ``"unknown"`` rather than raising on a healthcheck. The readiness check
+    itself (blocking filesystem stat calls, PR #50 round-3 review) lives in
+    ``prefetch.embedder_readiness``, shared with ``jobs.index_status`` (PR
+    #50 round-5 review) rather than computed twice — it already runs via
+    ``asyncio.to_thread``, the same convention ``runtime.py`` uses for
+    ``delete_orphan_points``, so this stays off the event loop without
+    repeating that plumbing here."""
     ctx = getattr(request.app.state, "ctx", None)
     if ctx is None:
         return {"status": "ok", "assets": "unknown", "embedder_ready": "unknown"}
-    from noesis.prefetch import embedder_assets_ready
+    from noesis.prefetch import embedder_readiness
 
-    ready = await asyncio.to_thread(embedder_assets_ready, ctx.embedder.model_id)
-    assets = "ready" if ready else "missing"
-    resolved_device = getattr(ctx.embedder, "resolved_device", "n/a")
-    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
+    assets, embedder_ready = await embedder_readiness(ctx.embedder)
     return {"status": "ok", "assets": assets, "embedder_ready": embedder_ready}
 
 

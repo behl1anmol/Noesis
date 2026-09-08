@@ -16,6 +16,7 @@ downloads.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -77,6 +78,24 @@ def embedder_assets_ready(model_id: str) -> bool:
         "pytorch_model.bin.index.json",
     )
     return any(cached(f) for f in weight_files)
+
+
+async def embedder_readiness(embedder: object) -> tuple[str, bool | str]:
+    """Shared ``(assets, embedder_ready)`` computation behind both
+    ``/healthz`` (ADR rows 78/79) and ``jobs.index_status`` (ADR row 81) —
+    PR #50 round-5 review. Previously pasted verbatim in both call sites:
+    they agreed only because the text was identical and one test compared
+    the two endpoints' output, not because there was one implementation: a
+    future edit to either copy (e.g. a "warming" state, a different ``n/a``
+    rule) had nothing stopping it from landing on one side only. ``embedder``
+    is duck-typed — ``model_id`` required, ``resolved_device`` optional — so
+    this has no dependency on a specific Embedder implementation and stays
+    outside ``core/`` like the rest of this module (module docstring)."""
+    ready = await asyncio.to_thread(embedder_assets_ready, embedder.model_id)
+    assets = "ready" if ready else "missing"
+    resolved_device = getattr(embedder, "resolved_device", "n/a")
+    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
+    return assets, embedder_ready
 
 
 def prefetch_grammars() -> list[str]:

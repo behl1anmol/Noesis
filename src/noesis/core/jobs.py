@@ -325,7 +325,9 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     fields (issue #47 finding 4, PR #50 round-4 review) — this is the shared
     REST/MCP status shape, so an MCP-only (stdio) caller with no HTTP surface
     to poll can now see the same cold-start warm-up signal a REST caller gets
-    from ``/healthz``."""
+    from ``/healthz``. Computed via ``prefetch.embedder_readiness``, the same
+    function ``/healthz`` calls (PR #50 round-5 review) — not a second copy
+    of the readiness logic kept in sync by hand."""
     # Index health: what the state DB expects vs what Qdrant actually holds.
     # A mismatch is drift — a vector store that lost data (external collection
     # wipe) while state still reports the files indexed. Surfaced so agents
@@ -352,12 +354,9 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     # trusting an answer, which is why this rides the shared REST/MCP shape and
     # not just the dashboard.
     unwalkable, quarantined = state.count_unwalkable_dirs(ctx.conn, project_id)
-    from noesis.prefetch import embedder_assets_ready
+    from noesis.prefetch import embedder_readiness
 
-    ready = await asyncio.to_thread(embedder_assets_ready, ctx.embedder.model_id)
-    embedder_assets = "ready" if ready else "missing"
-    resolved_device = getattr(ctx.embedder, "resolved_device", "n/a")
-    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
+    embedder_assets, embedder_ready = await embedder_readiness(ctx.embedder)
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {
