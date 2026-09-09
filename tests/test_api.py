@@ -266,3 +266,48 @@ def test_search_with_reranker_defaults_on_and_opts_out(
     )
     assert resp.json()["reranked"] is False
     assert all("rerank_score" not in h for h in resp.json()["hits"])
+
+
+def test_register_at_index_capacity_still_reports_the_registered_project(
+    client, project_dir, tmp_path
+):
+    """POST /projects registers BEFORE it launches, so a capacity refusal
+    must not be reported as a bare 429.
+
+    Every other capacity refusal answers 429 (ADR-84/85), and that is right
+    where nothing happened. Here the registration has already committed by
+    the time the cap is hit, so a 429 would tell the caller nothing happened
+    while leaving behind a project whose id it never learned — findable only
+    by listing every project. The registration is real, so it is reported
+    (202, which is what actually occurred) with the refusal in the body,
+    exactly as ``already_running`` already does, and the same way
+    ``core.dashboard.register_project`` resolves the same conflict.
+
+    Watched failing against the 429 version: ``assert 429 == 202``, and the
+    response body carried no ``project_id`` at all.
+    """
+    from noesis.core.config import IndexingSettings
+
+    ctx = client.app.state.ctx
+    ctx.indexing = IndexingSettings(max_concurrent_index_runs=1)
+
+    # Occupy the single slot with a DIFFERENT project's run, so the cap - not
+    # the per-project guard - is what refuses the registration below.
+    other = tmp_path / "other_project"
+    other.mkdir()
+    other_id = state.register_project(ctx.conn, other, "fake-embedder-v1")
+    state.try_start_run(ctx.conn, other_id)
+
+    resp = client.post("/projects", json={"root_path": str(project_dir)})
+
+    assert resp.status_code == 202, (
+        f"registration committed, so it must be reported; got {resp.status_code}"
+    )
+    body = resp.json()
+    assert body["status"] == "capacity_reached"
+    assert body["project_id"], "the caller must learn the id of what was registered"
+    assert not body["run_id"], "no run started, so no run id"
+
+    # And the project really is registered, not a phantom id.
+    listed = {p["id"] for p in client.get("/projects").json()}
+    assert body["project_id"] in listed

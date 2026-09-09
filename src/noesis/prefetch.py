@@ -65,12 +65,26 @@ def embedder_assets_ready(model_id: str) -> bool:
     ``~/.cache/huggingface/hub``), the same resolution ``sentence_transformers``
     itself uses, so this asks exactly what the real load will find."""
     from huggingface_hub import try_to_load_from_cache
+    from huggingface_hub.errors import HFValidationError
 
     def cached(filename: str) -> bool:
         return isinstance(try_to_load_from_cache(model_id, filename), str)
 
-    if not cached("config.json"):
-        return False
+    # ``[embedder] model`` is free text and sentence-transformers accepts a
+    # local directory, which is not a hub repo id — the hub call raises
+    # HFValidationError for it. Unguarded, that propagated out of /healthz,
+    # GET /projects/{id}/status and the get_index_status MCP tool, so a
+    # locally-pinned model took down the very surface ADR-78 added to keep
+    # the health check honest. For a real directory the answer is knowable
+    # without the hub at all: the assets ARE that directory. Anything else
+    # malformed falls through to "missing", the fail-safe direction ADR-79
+    # already chose (a false "missing" costs a redundant prefetch; a false
+    # "ready" is the bug).
+    try:
+        if not cached("config.json"):
+            return False
+    except HFValidationError:
+        return Path(model_id).expanduser().is_dir()
     weight_files = (
         "model.safetensors",
         "pytorch_model.bin",

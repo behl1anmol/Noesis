@@ -634,9 +634,13 @@ class IndexCapacityReached(Exception):
     is loud; a silently mishandled status is the bug this whole change is
     about."""
 
-    def __init__(self, running: int, limit: int) -> None:
+    def __init__(self, running: int, limit: int, project_id: str | None = None) -> None:
         self.running = running
         self.limit = limit
+        # Carried so a caller that already committed a side effect (notably
+        # POST /projects, which registers before it launches) can report that
+        # side effect rather than only the refusal.
+        self.project_id = project_id
         self.retry_after_seconds = 30
         super().__init__(
             f"index capacity reached: {running} runs already in flight, "
@@ -729,7 +733,7 @@ def try_start_run(
                 # "already running", not a refusal.
                 return mine[0]["id"], False
             at_capacity = IndexCapacityReached(
-                running=len(alive), limit=max_concurrent
+                running=len(alive), limit=max_concurrent, project_id=project_id
             )
         else:
             run_id = uuid.uuid4().hex

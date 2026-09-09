@@ -155,3 +155,26 @@ async def test_embedder_readiness_reports_false_once_device_resolved():
     with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
         _, embedder_ready = await embedder_readiness(embedder)
     assert embedder_ready is False
+
+
+def test_a_local_model_directory_does_not_take_the_health_surface_down(tmp_path):
+    """``[embedder] model`` is free text and sentence-transformers accepts a
+    local directory, which is not a hub repo id.
+
+    ``try_to_load_from_cache`` raises ``HFValidationError`` for one, and that
+    propagated out of ``/healthz``, ``GET /projects/{id}/status`` and the
+    ``get_index_status`` MCP tool — so pinning a local model took down the
+    very surface ADR-78 added to keep the health check honest. Watched
+    failing against the unguarded call: ``HFValidationError: Repo id must be
+    in the form 'repo_name' or 'namespace/repo_name'``.
+
+    For a directory that exists the answer needs no hub lookup at all: the
+    assets ARE that directory. Anything else malformed reports missing, the
+    fail-safe direction ADR-79 already chose.
+    """
+    local_model = tmp_path / "coderank"
+    local_model.mkdir()
+    assert embedder_assets_ready(str(local_model)) is True
+
+    # A path that is not there is "missing", not a crash and not a false ready.
+    assert embedder_assets_ready(str(tmp_path / "absent")) is False

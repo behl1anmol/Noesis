@@ -12,9 +12,9 @@ Two middleware layers guard every request: `TrustedHostMiddleware` (accepts only
 | `POST` | `/projects` | register a folder and start indexing | 202 |
 | `GET` | `/projects` | list registered projects | 200 |
 | `GET` | `/projects/{id}/status` | latest run status (+ drift and coverage fields) | 200 / 404 |
-| `POST` | `/projects/{id}/reindex` | incremental reindex (`?force=true` accepts an empty root as deletion, [ADR-55](../project/decisions.md)) | 202 / 404 / 409 |
+| `POST` | `/projects/{id}/reindex` | incremental reindex (`?force=true` accepts an empty root as deletion, [ADR-55](../project/decisions.md)) | 202 / 404 / 409 / 429 |
 | `GET` | `/runs/{run_id}` | run row, + live `progress` while running | 200 / 404 |
-| `POST` | `/search` | hybrid / dense / sparse search | 200 / 404 |
+| `POST` | `/search` | hybrid / dense / sparse search | 200 / 404 / 429 |
 | `POST` | `/structural-search` | AST-pattern search over live files | 200 / 400 / 404 |
 
 ### `POST /projects`
@@ -30,6 +30,8 @@ curl -X POST http://127.0.0.1:8000/projects \
 ```
 
 Errors are typed: a missing or non-directory `root_path` → **400**; the mixed-model guard (existing index built with a different embedding model) → **409 Conflict** with a "re-index required" detail. If a run is already in flight, the response carries `"status": "already_running"` with the live run's id.
+
+At the machine-wide index-run cap ([ADR-85](../project/decisions.md)) this route answers **202** with `"status": "capacity_reached"` and a `project_id`, *not* 429 — registration commits before the run is launched, so a bare 429 would report that nothing happened while leaving a project whose id the caller never learned. `POST /projects/{id}/reindex` has no such side effect and does answer **429**.
 
 ### `GET /runs/{run_id}`
 
@@ -74,7 +76,7 @@ Server-rendered pages (excluded from the OpenAPI schema) and the JSON they poll 
 | Method | Path | Purpose | Status |
 |---|---|---|---|
 | `POST` | `/api/projects/{id}/flags` | toggle `watch_enabled` / `auto_reindex` | 200 / 404 |
-| `POST` | `/api/projects/{id}/reindex-pending` | index only the watcher's pending changes | 202 / 400 / 404 / 409 |
+| `POST` | `/api/projects/{id}/reindex-pending` | index only the watcher's pending changes | 202 / 400 / 404 / 409 / 429 |
 | `POST` | `/api/settings/device` | set compute device (`auto`/`cuda`/`mps`/`cpu`), hot-reloads models | 200 / 400 |
 | `DELETE` | `/api/projects/{id}` | delete a project's index entirely (chunks, runs, pending) — source files untouched | 200 / 404 |
 
@@ -95,3 +97,4 @@ Server-rendered pages (excluded from the OpenAPI schema) and the JSON they poll 
 | 404 | unknown `project_id` / `run_id` / `chunk_id` |
 | 409 | mixed-model conflict — index was built with a different embedding model; full re-index required |
 | 422 | request-body validation failure (FastAPI/pydantic), e.g. blank query, `top_k` out of range |
+| 429 | at capacity, with `Retry-After`: the search gate is saturated ([ADR-84](../project/decisions.md)) or the machine-wide index-run cap is reached ([ADR-85](../project/decisions.md)). Nothing failed and nothing was queued — retry. **Not 503**, deliberately: 503 is also what a dead or unreachable server returns, and a client that cannot tell "busy" from "down" retries the wrong way. Connection-refused and a failing `/healthz` already mean down |

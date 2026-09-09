@@ -431,8 +431,11 @@ structural_patterns:
     expected:
       # 7 since M6: status/reindex endpoints added 404 + 404/409 raises.
       # 8 since ADR-84: /search raises 429 when the search gate is saturated.
-      # 10 since ADR-85: both launch endpoints raise 429 at index capacity.
-      src/noesis/api/routes.py: 10
+      # 10 since ADR-85: both launch endpoints raise 429 at index capacity,
+      # then 9 once POST /projects moved to an in-band 202 instead — it
+      # registers before it launches, so a bare 429 would hide the id of a
+      # project that really was created.
+      src/noesis/api/routes.py: 9
       # M8 dashboard adapter + ADR-42 register/browse/preview + ADR-43 delete.
       # 11 since ADR-85: reindex-pending raises 429 at index capacity.
       src/noesis/api/dashboard.py: 11
@@ -467,9 +470,11 @@ structural_patterns:
       src/noesis/core/structural.py: 1
       # ADR-42: preview runs discovery in an executor to keep the loop free.
       src/noesis/core/dashboard.py: 1
-      # ADR-84: the search gate dispatches onto its own bounded executor
-      # rather than the process-wide default one.
-      src/noesis/core/search_gate.py: 1
+      # The search gate dispatches onto its own bounded executor rather
+      # than the process-wide default one, but via executor.submit() +
+      # asyncio.wrap_future rather than run_in_executor: it has to release
+      # its admission slot on the JOB's completion, and run_in_executor
+      # gives no handle to hang that callback on.
 
   - id: sp-09
     pattern: "uuid.uuid4()"

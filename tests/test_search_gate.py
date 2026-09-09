@@ -238,27 +238,55 @@ async def test_a_slot_is_released_when_the_submitted_callable_raises():
         gate.close()
 
 
-async def test_a_slot_is_released_when_the_awaiting_coroutine_is_cancelled():
-    """A cancelled await (client disconnect, ``asyncio.wait_for`` timeout)
-    frees its slot even though the worker thread keeps running — otherwise
-    every abandoned request would cost the gate a permanent slot."""
-    gate = SearchGate(connections=1, queue_depth=0)  # capacity 1
-    blocker = _Blocker()
-    task = asyncio.create_task(gate.run(blocker))
-    try:
-        await _wait_for_admitted(gate, 1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert _admitted(gate) == 0, "cancellation must give the slot back"
+async def test_a_cancelled_await_frees_its_slot_only_once_the_job_is_done():
+    """Cancellation frees the slot when the WORK stops, not when the await
+    returns.
 
-        # And the freed slot is really usable, not just decremented. Release
-        # first: the orphaned callable still holds the one worker thread.
-        blocker.release()
+    An earlier version of this test asserted the slot came back the instant
+    the await was cancelled, which is what the pre-fix code did and is wrong:
+    ``run_in_executor`` cannot cancel a job the executor has already started,
+    so that slot was freed while the call — and the pooled Qdrant connection
+    it holds — was still running. The two cases differ and both matter:
+
+    * a job still QUEUED is genuinely cancelled, and must free its slot at once;
+    * a job already RUNNING keeps its slot until it finishes, or the gate
+      over-admits and the bound stops meaning anything.
+    """
+    gate = SearchGate(connections=1, queue_depth=1)  # capacity 2
+    running = _Blocker()
+    queued = _Blocker()
+    running_task = asyncio.create_task(gate.run(running))
+    await _wait_for_admitted(gate, 1)
+    queued_task = asyncio.create_task(gate.run(queued))
+    await _wait_for_admitted(gate, 2)
+    try:
+        # The queued one never started: cancelling it must free its slot now.
+        queued_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued_task
+        await _wait_for_admitted(gate, 1)
+        assert _admitted(gate) == 1, (
+            "a job that never started must release immediately, and the "
+            "still-running one must keep its slot"
+        )
+
+        # The running one keeps its slot through cancellation ...
+        running_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running_task
+        assert _admitted(gate) == 1, (
+            "a cancelled await must NOT release a slot whose job is still "
+            "running — the work still holds a pooled connection"
+        )
+
+        # ... and gives it back when the work actually stops.
+        running.release()
+        await _wait_for_admitted(gate, 0)
         result = await asyncio.wait_for(gate.run(lambda: "after-cancel"), timeout=5)
         assert result == "after-cancel"
     finally:
-        blocker.release()
+        running.release()
+        queued.release()
         gate.close()
 
 
@@ -314,6 +342,60 @@ async def test_only_connections_callables_run_concurrently_and_the_rest_queue():
         assert peak == gate.connections, (
             f"observed {peak} concurrent callables against connections="
             f"{gate.connections} (capacity {gate.capacity})"
+        )
+    finally:
+        gate.close()
+
+
+async def test_cancelling_awaits_cannot_over_admit_work_to_the_executor():
+    """A cancelled await must not free a slot whose job is still running.
+
+    ``run_in_executor`` cannot cancel a job the executor has already started,
+    so releasing admission in a ``finally`` around the await frees the slot
+    while the call — and the pooled Qdrant connection it holds — is still in
+    flight. That is not an exotic case: a REST client disconnecting mid
+    ``/search`` makes Starlette cancel the handler, and an MCP client can
+    cancel ``search_code``, so ordinary client behaviour rather than load
+    would have defeated the bound.
+
+    Watched failing against the pre-fix ``finally``-release: the gate reported
+    ``in_flight=0, queued=0`` immediately after two cancellations while three
+    jobs were still queued in the executor, and this test's peak reached 4
+    against ``connections=2``.
+
+    The oracle is the executor's real concurrency, not the gate's own
+    counters, precisely because the counters are what was wrong.
+    """
+    def job() -> None:
+        time.sleep(1.0)
+
+    gate = SearchGate(connections=2, queue_depth=2)  # capacity 4
+    try:
+        cancelled = [asyncio.create_task(gate.run(job)) for _ in range(4)]
+        await _wait_for_admitted(gate, 4)
+        for task in cancelled:
+            task.cancel()
+        await asyncio.gather(*cancelled, return_exceptions=True)
+
+        # Exactly two of those four had started (connections=2) and are still
+        # running, so two slots are legitimately still held; the two that were
+        # merely queued were really cancelled and really freed. A client that
+        # gave up retries at once, so fire all six together — sequentially
+        # they would drain and prove nothing.
+        #
+        # The count admitted is the oracle, not the count refused: BOTH builds
+        # refuse something here (capacity is 4 against 6 retries), so refusals
+        # alone cannot tell them apart. Post-fix at most 2 get in, because 2
+        # slots are still held by running work. Pre-fix all four slots read as
+        # free, so 4 get in. The margin between 2 and 4 is the whole defect.
+        retried = [asyncio.create_task(gate.run(job)) for _ in range(6)]
+        results = await asyncio.gather(*retried, return_exceptions=True)
+        admitted = sum(not isinstance(r, SearchOverloaded) for r in results)
+        assert admitted <= 2, (
+            f"{admitted} of 6 retries were admitted against a capacity of 4 "
+            f"with 2 slots still held by running work — cancelling the awaits "
+            f"freed slots whose jobs had already started, so the gate is "
+            f"over-admitting and its bound no longer means anything"
         )
     finally:
         gate.close()

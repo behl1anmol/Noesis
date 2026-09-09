@@ -144,16 +144,30 @@ class SearchGate:
     async def run(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
         """Run *fn* on the bounded executor, or raise ``SearchOverloaded``.
 
-        Admission is taken before the submit and released after the call
-        settles, so a cancelled await still frees its slot."""
+        The slot is released when the JOB finishes, not when this await
+        returns. Those are not the same moment: cancelling an await cannot
+        cancel work the executor has already started, so releasing in a
+        ``finally`` here would free the slot while the call — and the pooled
+        Qdrant connection it holds — is still running. Measured before the
+        fix: cancelling two awaits on a capacity-2 gate left it reporting
+        ``in_flight=0, queued=0`` with three jobs still queued in the
+        executor. A REST client disconnecting mid-``/search`` (Starlette
+        cancels the handler) or an MCP client cancelling ``search_code``
+        does exactly that, so the bound this module exists for would have
+        been defeated by ordinary client behaviour rather than by load.
+
+        A future cancelled before it starts running still fires its done
+        callback, so the queued case releases correctly too."""
         self._enter()
         try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                self._executor, lambda: fn(*args, **kwargs)
-            )
-        finally:
+            future = self._executor.submit(lambda: fn(*args, **kwargs))
+        except BaseException:
+            # Nothing was submitted, so nothing will release it for us.
             self._leave()
+            raise
+        # Fires on the executor's thread; _leave takes the lock.
+        future.add_done_callback(lambda _: self._leave())
+        return await asyncio.wrap_future(future)
 
     def close(self) -> None:
         """Stop accepting work and release the threads. Idempotent, and safe

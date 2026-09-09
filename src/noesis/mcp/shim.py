@@ -76,7 +76,7 @@ _BACKOFF_MAX_S = 1.0
 
 
 def default_runtime_dir() -> Path:
-    """Where the endpoint file and election lock live.
+    """Where the election lock and the spawned server's log live.
 
     ``XDG_RUNTIME_DIR`` first — it is the standard home for per-user runtime
     state and is cleaned up on logout, which is exactly the lifetime of a

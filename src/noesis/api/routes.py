@@ -93,14 +93,20 @@ async def register_and_index(
     try:
         return jobs.launch_index_run(ctx, req.root_path)
     except state.IndexCapacityReached as exc:
-        # 429 for the same reason /search uses it (ADR-84/85): the machine is
-        # busy, nothing failed, and 503 would be indistinguishable from the
-        # server being down.
-        raise HTTPException(
-            status_code=429,
-            detail=str(exc),
-            headers={"Retry-After": str(exc.retry_after_seconds)},
-        ) from exc
+        # NOT 429 here, unlike every other capacity refusal: this endpoint
+        # registers the project before it launches the run, so by the time
+        # the cap is hit the registration has already committed. Answering
+        # 429 would tell the caller nothing happened while leaving a project
+        # it never learned the id of, findable only via GET /projects. So
+        # report the registration (202, which is what actually happened) and
+        # put the refusal in the body, exactly as `already_running` does.
+        # core/dashboard.register_project resolves the same conflict the same
+        # way by returning run: null.
+        return {
+            "project_id": exc.project_id or "",
+            "run_id": "",
+            "status": "capacity_reached",
+        }
     except ValueError as exc:
         # Typed, not text-matched (M3): the mixed-model guard is a real 409
         # Conflict ("re-index required"), but a missing/non-directory path is

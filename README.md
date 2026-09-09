@@ -261,31 +261,82 @@ watch the dashboard) for status, percent complete, and ETA.
 
 `search_code` and an index run can genuinely overlap — the watcher launches index
 runs on its own whenever a file changes, which is the normal working state of this
-tool, not an edge case. qdrant-client's client-side BM25 inference has no locking of
-its own, so `VectorStore` keeps write and read traffic on two separate `QdrantClient`
-connections rather than sharing one (ADR-76):
+tool, not an edge case. So can two agents searching at the same moment, and that
+turns out to be the harder case.
+
+qdrant-client keeps its client-side BM25 inference bookkeeping on the `QdrantClient`
+**object**, unsynchronized. Two threads that build a query on one client can receive
+each other's embeddings — and the damage latches: the drain step recomputes only
+when its FIFO is empty and otherwise pops from the front, so one race leaves that
+client permanently offset and every later query silently returns another query's
+results until the process restarts. Measured against a live server, one shared
+client under 16 concurrent readers returned the wrong document for up to 15,864 of
+16,000 queries, raising only 4–7 exceptions. No indexing has to be in flight for
+that; readers alone are enough.
+
+Connections are therefore owned by role, and the read path gets a *pool* rather than
+a single connection (ADR-83). The production wiring is **K query connections +
+1 index + 1 admin = K + 2**:
 
 ```
- search_code (retriever.py)              index run (indexer.py / jobs.py)
-        │                                          │
-        ▼                                          ▼
- ┌───────────────┐                        ┌────────────────────┐
- │ query_client  │                        │   index_client       │
- │ (read path)   │                        │   (write path, one    │
- │               │                        │   writer at a time    │
- │               │                        │   via a narrow lock)  │
- └──────┬────────┘                        └──────────┬───────────┘
-        │                                             │
-        └──────────────► same Qdrant server, ─────────┘
-                          same collection
+  search_code (agents)         index run (jobs.py)          everything else
+              │                            │                            │
+              ▼                            ▼                            ▼
+ ┌──────────────────────────┐ ┌──────────────────────────┐ ┌──────────────────────────┐
+ │ SearchGate (ADR-84)      │ │ index_client             │ │ admin client             │
+ │ K threads run, K+Q may   │ │ upserts only, so an      │ │ deletes, counts, scroll, │
+ │ be admitted; the rest    │ │ index run never takes a  │ │ retrieve, setup — it     │
+ │ get a 429 / ToolError    │ │ query connection         │ │ builds no Document, so   │
+ └──────────────────────────┘ └──────────────────────────┘ │ it needs no slot         │
+              │                            │               └──────────────────────────┘
+              │ 1 thread ⇄                 │                            │
+              │ 1 connection               │                            │
+              ▼                            │                            │
+ ┌──────────────────────────┐              │                            │
+ │ query_clients: K         │              │                            │
+ │ connections, one held    │              │                            │
+ │ per sparse or hybrid     │              │                            │
+ │ query (a dense-only      │              │                            │
+ │ query takes none)        │              │                            │
+ └──────────────────────────┘              │                            │
+              │                            │                            │
+              └────────────────────────────┴────────────────────────────┘
+                                           │
+                                           ▼
+                           one Qdrant server, one collection
 ```
 
-Both connections talk to the same server and the same collection — the server has no
-problem serving concurrent connections, that's normal database usage. The unsafe
-state lived entirely client-side, in-process, so splitting the connection splits it
-too. Every other `VectorStore` operation (deletes, counts, collection setup) is
-unaffected by any of this and stays on one connection, since none of them touch the
-mechanism that needed separating.
+- **K is sized to the machine.** `clamp(available CPUs, 2, 8)`, read through
+  `sched_getaffinity` so a cgroup-limited container sizes for its own allowance
+  rather than for the host's cores. On a 4-CPU box (16 concurrent searches, 5,000
+  points, hybrid, prefetch 50, against a live Qdrant 1.18.3) throughput saturates
+  *exactly* at the CPU count — 384 q/s at K=4 — then stays flat out to K=12 while
+  p95 climbs from 16.0 ms to 48.4 ms, because Qdrant is co-resident and competing
+  for the same cores. The floor of 2 is measured (K=1 gives up about a third of
+  throughput, 258 q/s). The ceiling of 8 is a **judgment call, not a measurement** —
+  no larger box was available to test on — which is exactly why
+  `[qdrant] query_connections` can override it.
+- **Search runs on its own bounded executor**, sized 1:1 with the pool (ADR-84), so
+  a thread is free exactly when a connection is. It admits `K + query_queue_depth`
+  calls and refuses the rest: REST `/search` answers **429 with `Retry-After`**, MCP
+  `search_code` raises a `ToolError` naming the live counts and the knob. 429 and
+  not 503, because 503 is also what a dead server returns, and a client has to be
+  able to tell "busy" from "down". A fast, legible refusal beats a request that sits
+  for an unbounded time.
+- **Index runs are capped machine-wide** by `[indexing] max_concurrent_index_runs`
+  (default 4, ADR-85), enforced inside the same `BEGIN IMMEDIATE` transaction that
+  claims a run — so the cap holds *across processes*, which an in-process semaphore
+  could not: the documented deployment runs an HTTP server and a stdio MCP process
+  against one state DB. At the cap, REST answers 429, MCP `reindex` raises a
+  `ToolError` saying nothing was started, and the watcher defers and re-arms.
+- **Dense-only search takes no slot at all.** It builds no `models.Document`, so
+  there is no inference state on that path to protect and no reason to make it
+  contend for one.
+
+Underneath the pool there is still one lock per distinct client *object* — the
+correctness floor for embedded callers, where a single in-memory client necessarily
+fills all three roles at once. In the production wiring the objects are distinct, so
+those locks are uncontended.
 
 ---
 
@@ -337,6 +388,11 @@ batch_size = 32
 [qdrant]
 url = "http://127.0.0.1:6333"
 collection = "noesis_chunks"
+# Search concurrency. Omit both for auto: clamp(available CPUs, 2, 8)
+# connections, and 4x that many searches allowed to wait for one.
+# Past connections + queue_depth in flight, /search answers 429.
+# query_connections = 4
+# query_queue_depth = 16
 
 [reranker]
 model = "BAAI/bge-reranker-v2-m3"
@@ -352,6 +408,16 @@ timeout_s = 10.0       # wall-clock scan budget; partial results returned on exp
 
 [git]
 fast_path = true       # false → every run does a full hash-walk
+
+[indexing]
+max_concurrent_index_runs = 4   # machine-wide cap on index runs, across
+                                # processes; at the cap, REST answers 429
+                                # and nothing is silently queued
+
+[server]
+port = 8000            # HTTP port, and where `python -m noesis.mcp --shared`
+                       # looks for (or starts) the shared server. There is no
+                       # host key: the bind is fixed at 127.0.0.1.
 ```
 
 **Environment:** `FASTEMBED_CACHE_PATH` controls where BM25 assets are cached
@@ -381,6 +447,25 @@ The stdio server builds its own core resources from `config.toml` in the working
 directory. Full walkthrough (including a Python client example) is in
 [`architecture-docs/m6-agent-connection-guide.md`](architecture-docs/m6-agent-connection-guide.md).
 
+**Option C — stdio shim onto a shared server** (what you want with more than one
+agent):
+
+```bash
+claude mcp add noesis -- uv run --project /absolute/path/to/noesis python -m noesis.mcp --shared
+```
+
+Each agent gets a thin stdio-to-HTTP proxy that holds no model, no Qdrant pool and
+no state handle; the first one to start elects a single shared server and the rest
+attach to it. The reason is memory, and it is not the one people expect: a Noesis
+process that has loaded the embedding model measures **1342 MB RSS, and 1140 MB PSS
+with two of them running — `Shared_File` is 0 MB**, because the weights land in
+private tensors, so agents do *not* share them. The on-disk model cache is already
+shared (523 MB, one copy; a warm second process loads in 11.7 s and downloads
+nothing), so re-downloading was never the problem. The shim measures 165 MB RSS /
+133 MB PSS against a 1427 MB server, which makes ten agents **~3.1 GB instead of
+~13.4 GB**. Default stays standalone, so existing setups are unaffected
+(ADR-86).
+
 **Typical agent loop:** `list_projects` → `search_code` (get ranked spans with
 `chunk_id`s) → read the live file, or `get_chunk(chunk_id)` for the exact indexed
 span → `structural_search` for precise AST matches. Search hits are *candidates* —
@@ -402,6 +487,11 @@ Secondary interface, for the dashboard and scripting. Interactive docs at `/docs
 | `GET` | `/runs/{run_id}` | run row (+ live `progress` while running) |
 | `POST` | `/search` | hybrid / dense / sparse search |
 | `POST` | `/structural-search` | AST-pattern search over live files |
+
+`/search`, `/projects` and `/projects/{id}/reindex` also answer **429 with
+`Retry-After`** when the machine is at search or index-run capacity — busy, not
+down, and nothing was queued. See
+[Concurrent search + indexing](#concurrent-search--indexing).
 
 Register and search (or use the dashboard's **Add project** modal for the same thing
 with a folder picker, per-language scope, and a pre-flight preview):

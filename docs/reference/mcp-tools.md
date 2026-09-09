@@ -1,6 +1,8 @@
 # MCP tools reference
 
-Noesis serves six tools over both MCP transports (streamable HTTP at `/mcp/`, stdio via `python -m noesis.mcp`). Every tool body is the same core call as its REST twin, and success payloads are identical dicts — tests assert byte-equality so the two surfaces cannot drift (`src/noesis/mcp/server.py`). Failures raise `ToolError` with the same detail REST puts in its HTTP error body.
+Noesis serves six tools over both MCP transports (streamable HTTP at `/mcp/`, stdio via `python -m noesis.mcp`). Every tool body is the same core call as its REST twin, and success payloads are identical dicts — tests assert byte-equality so the two surfaces cannot drift (`src/noesis/mcp/server.py`). Failures raise `ToolError` with the same detail REST puts in its HTTP error body, with one deliberate exception: the capacity refusals below carry agent-facing text rather than the REST detail string, because an agent needs to be told that nothing failed, that nothing was queued, and which knob changes the limit.
+
+**Capacity refusals ([ADR-84](../project/decisions.md)/[ADR-85](../project/decisions.md)).** `search_code` raises `ToolError` when the search gate is saturated, and `reindex` when the machine-wide index-run cap is reached. Both are the MCP equivalent of REST's 429 — MCP has no status codes — and both mean *retry shortly*, not *something is broken*. The messages name the live counts and the config key to raise (`[qdrant] query_connections`, `[indexing] max_concurrent_index_runs`).
 
 ## `search_code`
 
