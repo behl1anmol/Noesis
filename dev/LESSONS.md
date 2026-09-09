@@ -12,7 +12,7 @@ a lesson may never weaken those. See `architecture-docs/code-indexer-expanded-ar
 §5.6 for the full lifecycle (capture → reinforce → inject → promote → retire,
 15-lesson cap).
 
-## [20] verification (occurrences: 2)
+## [20] verification (occurrences: 3)
 **Mistake:** Wrote a fuzz probe to check score_query against a brute-force maximum matching and reported '0 mismatches over 3000 cases'. The probe built result dicts with a 'path' key where the harness reads 'file_path', so matches() returned False for every input: both sides scored 0.0 everywhere and agreed perfectly. The replacement brute force was then wrong in the opposite direction — it only ever assigned chunks to the first len(chunks) labels — and disagreed with a correct scorer 252 times. Neither verdict meant anything, and the first one was quoted to the user before it was caught.
 **Lesson:** A probe or oracle written to verify something must itself be shown non-vacuous before its verdict is trusted: print an aggregate that MUST be non-zero if the probe is really exercising the code (mean score, match count, number of differing cells), and check that a deliberately wrong input makes it disagree. Two implementations agreeing is evidence only when at least one of them is known to be producing real values.
 **Rationale:** Hard rule 9 covers tests that were never watched fail. A verification script has the same failure mode with none of the scaffolding: nothing collects it, nothing reports it as skipped, and 'agreement' is exactly what a pair of silently-empty computations produces. The cost is asymmetric — a vacuous probe does not merely fail to catch a bug, it actively certifies the code as checked, and the certification is what gets quoted.
