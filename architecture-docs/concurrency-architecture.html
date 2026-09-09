@@ -229,7 +229,7 @@
             <rect x="10" y="166" width="96" height="30" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
             <text x="58" y="185" text-anchor="middle" font-size="11" fill="currentColor">agent N</text>
           </g>
-          <text x="58" y="216" text-anchor="middle" font-size="10" fill="var(--accent)">~30 MB each</text>
+          <text x="58" y="216" text-anchor="middle" font-size="10" fill="var(--accent)">165 MB each</text>
           <text x="58" y="229" text-anchor="middle" font-size="10" fill="var(--muted)">(thin, no model)</text>
 
           <!-- transport -->
@@ -301,7 +301,7 @@
           <!-- Qdrant -->
           <rect x="784" y="128" width="176" height="56" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
           <text x="872" y="150" text-anchor="middle" font-size="11.5" fill="currentColor">Qdrant 1.18.3</text>
-          <text x="872" y="166" text-anchor="middle" font-size="10.5" fill="var(--muted)">K + 1 connections total</text>
+          <text x="872" y="166" text-anchor="middle" font-size="10.5" fill="var(--muted)">K + 2 connections total</text>
           <line x1="544" y1="156" x2="780" y2="156" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a1t)"/>
 
           <rect x="784" y="238" width="176" height="56" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
@@ -648,13 +648,13 @@
           <g>
             <rect x="432" y="40" width="120" height="34" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
             <text x="492" y="55" text-anchor="middle" font-size="10.5" fill="currentColor">agent 1 shim</text>
-            <text x="492" y="68" text-anchor="middle" font-size="9.5" fill="var(--accent)">~30 MB, no model</text>
+            <text x="492" y="68" text-anchor="middle" font-size="9.5" fill="var(--accent)">165 MB, no model</text>
             <rect x="432" y="86" width="120" height="34" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
             <text x="492" y="101" text-anchor="middle" font-size="10.5" fill="currentColor">agent 2 shim</text>
-            <text x="492" y="114" text-anchor="middle" font-size="9.5" fill="var(--accent)">~30 MB, no model</text>
+            <text x="492" y="114" text-anchor="middle" font-size="9.5" fill="var(--accent)">165 MB, no model</text>
             <rect x="432" y="132" width="120" height="34" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
             <text x="492" y="147" text-anchor="middle" font-size="10.5" fill="currentColor">agent N shim</text>
-            <text x="492" y="160" text-anchor="middle" font-size="9.5" fill="var(--accent)">~30 MB, no model</text>
+            <text x="492" y="160" text-anchor="middle" font-size="9.5" fill="var(--accent)">165 MB, no model</text>
           </g>
           <g stroke="var(--accent)" stroke-width="1.3" fill="none">
             <line x1="552" y1="57" x2="596" y2="96" marker-end="url(#a4t)"/>
@@ -673,10 +673,10 @@
 
           <rect x="806" y="86" width="124" height="52" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
           <text x="868" y="108" text-anchor="middle" font-size="10.5" fill="currentColor">Qdrant + state.db</text>
-          <text x="868" y="124" text-anchor="middle" font-size="10" fill="var(--muted)">K + 1 connections</text>
+          <text x="868" y="124" text-anchor="middle" font-size="10" fill="var(--muted)">K + 2 connections</text>
           <line x1="776" y1="112" x2="802" y2="112" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a4t)"/>
 
-          <text x="688" y="212" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">10 agents ≈ 1.4 GB RAM, K + 1 connections</text>
+          <text x="688" y="212" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">10 agents ≈ 3.1 GB RAM, K + 2 connections</text>
           <text x="688" y="230" text-anchor="middle" font-size="10.5" fill="var(--muted)">and this is precisely why the search lane had to be fixed first:</text>
           <text x="688" y="246" text-anchor="middle" font-size="10.5" fill="var(--muted)">one shared process means every agent&rsquo;s query meets every other&rsquo;s</text>
           <text x="688" y="268" text-anchor="middle" font-size="10.5" fill="var(--warn)">trade-off: the server is now a single point of failure</text>
@@ -704,10 +704,20 @@
   <div class="callout">
     <span class="label">Kept honest</span>
     <p>
-      The <code>~30 MB</code> shim figure is an estimate from a bare Python + MCP client
-      process, not a measurement of a shim that does not exist yet. Everything else in this
-      section was measured. The reranker is excluded throughout because it defaults to off;
-      with <code>reranker.enabled = true</code> the per-process figure grows by roughly its
+The <code>~30 MB</code> shim figure this section originally carried was an
+      estimate, and it was wrong by about 5&times;. The shim now exists and measures
+      <b>165 MB RSS / 133 MB PSS</b> — fastmcp, httpx and pydantic are not free. The
+      comparison still holds and is still the point (1427 MB per agent becomes 165 MB,
+      so ten agents is roughly 3.1 GB rather than 13.4 GB), but it is a 4&times; saving,
+      not the 8&times; the estimate implied.
+      <br><br>
+      Connection count corrected likewise: the wiring is <b>K + 2</b>, not K + 1 — a pool
+      of K for queries, one for indexing, and one admin connection for the deletes,
+      counts and scrolls that build no <code>models.Document</code> and must never take a
+      query's slot.
+      <br><br>
+      The reranker is excluded throughout because it defaults to off; with
+      <code>reranker.enabled = true</code> the per-process figure grows by roughly its
       2.3 GB of weights, which I did not load.
     </p>
   </div>

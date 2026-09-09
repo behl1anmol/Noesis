@@ -453,6 +453,9 @@ structural_patterns:
       # trigger when a launch is refused for capacity, as it already did for
       # a launch refused because a run was in flight.
       src/noesis/core/watcher.py: 4
+      # ADR-86: the shim's readiness wait is deadline-based, so it reads the
+      # clock once to set the deadline and once per backoff step.
+      src/noesis/mcp/shim.py: 2
       # flush()'s deadline: one to set it, two to read what is left of it
       # while it retries a barrier into a full queue (PR #24 round-6 review).
       src/noesis/core/telemetry.py: 3

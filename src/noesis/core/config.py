@@ -138,6 +138,17 @@ class WatcherSettings:
 
 
 @dataclass(frozen=True)
+class ServerSettings:
+    """§3.8 ``[server]``. Only the port is configurable: the host is fixed at
+    127.0.0.1 by CLAUDE.md rule 2, and exposing it as a knob would make a
+    wildcard bind one config edit away. The shim (ADR-86) reads this to know
+    where to find — or start — the shared server, so the port has to live
+    somewhere both it and the operator agree on."""
+
+    port: int = 8000
+
+
+@dataclass(frozen=True)
 class QdrantSettings:
     """§3.3 ``[qdrant]``.
 
@@ -233,6 +244,7 @@ class Settings:
     watcher: WatcherSettings = field(default_factory=WatcherSettings)
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
+    server: ServerSettings = field(default_factory=ServerSettings)
 
 
 def _require_bool(value: object, key: str) -> bool:
@@ -311,6 +323,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     wat = raw.get("watcher", {})
     idx = raw.get("indexing", {})
     qdr = raw.get("qdrant", {})
+    srv = raw.get("server", {})
     raw_db = raw.get("db_path")
     if raw_db is None:
         db_path = default_db_path()
@@ -408,6 +421,11 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             ),
             query_queue_depth=_optional_positive_int(
                 qdr.get("query_queue_depth"), "qdrant.query_queue_depth"
+            ),
+        ),
+        server=ServerSettings(
+            port=_require_positive_int(
+                srv.get("port", ServerSettings.port), "server.port"
             ),
         ),
     )
