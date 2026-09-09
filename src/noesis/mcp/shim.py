@@ -167,9 +167,20 @@ def _wait_ready(
         # instant after it served a good /healthz still counts as ready.
         returncode = process.poll()
         if returncode is not None:
+            # Our child died — but that does not mean the port is unserved.
+            # The commonest way to get here is losing a race we never saw:
+            # another shim (one that resolved a different runtime_dir, so it
+            # elected independently) already has a healthy server up, and our
+            # duplicate died on EADDRINUSE. Probing once more distinguishes
+            # "nothing is there" from "someone beat us to it", and only the
+            # first is an error. Without this the second case fails a shim
+            # that had a perfectly good server to talk to.
+            if probe(port):
+                return True
             raise RuntimeError(
                 f"the Noesis server started for port {port} exited with code "
-                f"{returncode} before becoming ready; the reason is in "
+                f"{returncode} before becoming ready, and nothing else is "
+                f"serving that port; the reason is in "
                 f"{server_log_path(runtime_dir)}"
             )
         time.sleep(delay)
@@ -201,7 +212,19 @@ def _terminate_spawned(process: subprocess.Popen[bytes]) -> None:
                 "spawned server ignored SIGTERM; killing pid %d", process.pid
             )
             process.kill()
-    process.wait()
+    try:
+        # Bounded, because this runs while holding the election lock: a child
+        # that will not die must not wedge every other shim on the machine.
+        # Reaping is worth a moment, never worth the lock — the docstring
+        # above promises a total bounded at 2 x ready_timeout and an
+        # unbounded wait() here would have quietly made that false.
+        process.wait(timeout=_TERMINATE_GRACE_S)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "spawned server pid %d did not exit after SIGKILL; abandoning it "
+            "rather than holding the election lock",
+            process.pid,
+        )
 
 
 def _spawn_server(port: int, runtime_dir: Path) -> subprocess.Popen[bytes]:
@@ -282,12 +305,27 @@ def ensure_server(
             process = _spawn_server(port, runtime_dir)
             try:
                 ready = _wait_ready(process, port, deadline, runtime_dir)
-            except BaseException:
+            except Exception:
                 # Includes the child-died error from _wait_ready: whatever
-                # went wrong, this shim owns the process it started.
+                # went wrong with the SERVER, this shim owns the process it
+                # started. Deliberately Exception and not BaseException: a
+                # KeyboardInterrupt or SystemExit means the host is stopping
+                # THIS shim, which is no evidence at all that the server is
+                # bad. Killing it there would undo the start_new_session that
+                # exists precisely so the server outlives the shim, and a host
+                # that interrupts during cold start would loop forever, never
+                # leaving a server behind for the next attempt.
                 _terminate_spawned(process)
                 raise
             if not ready:
+                # Same distinction the child-died branch makes: our server
+                # never came up, but someone else's may have during the wait.
+                # Probe before concluding the port is unserved — then stop our
+                # useless child either way, since it is ours and it is not the
+                # one answering.
+                if probe(port):
+                    _terminate_spawned(process)
+                    return port
                 # Never leave a detached server the operator did not start and
                 # cannot see. It holds the port, so the alternative is every
                 # later shim inheriting this one's half-started process.

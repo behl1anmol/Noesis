@@ -554,3 +554,78 @@ def test_a_server_that_ignores_sigterm_is_killed(tmp_path, monkeypatch):
         "a spawned server that ignores SIGTERM must be killed, or the "
         "failure path still leaks the process it meant to clean up"
     )
+
+
+# --------------------------------------------------------------------------
+# A dead child is not the same as an unserved port (round-8 review)
+# --------------------------------------------------------------------------
+
+
+def test_a_dead_child_does_not_fail_a_shim_that_has_a_server_to_talk_to(
+    tmp_path, monkeypatch
+):
+    """Losing a race we never saw must not read as "no server".
+
+    Two shims can elect independently when they resolve different runtime
+    dirs (``XDG_RUNTIME_DIR`` set for one and not the other), and the loser's
+    duplicate dies on ``EADDRINUSE`` — while a perfectly healthy server holds
+    the port. Watched failing against the fix that introduced this: the
+    child-exit branch raised ``RuntimeError(...exited with code 1)`` without
+    ever re-probing, failing a shim that had a working server in front of it.
+    """
+    with _stub_health(json.dumps({"status": "ok"}).encode()) as port:
+        # Our own spawn dies immediately, exactly as a duplicate bind does.
+        recorder = _SpawnRecorder(lambda: _FakeProcess(exit_code=1))
+        monkeypatch.setattr(shim, "_spawn_server", recorder)
+        # Force the election: pretend nothing is there until we are inside it.
+        real_probe = shim.probe
+        seen: list[int] = []
+
+        def probe_once_blind(p: int, timeout: float = 1.0) -> bool:
+            seen.append(p)
+            # Blind for the fast path, the re-check under the lock, AND the
+            # first probe inside _wait_ready. That third one matters: if the
+            # wait loop's own probe succeeds, it returns before ever looking
+            # at the child, the re-probe branch is never reached, and this
+            # test passes against the broken code — which is exactly what it
+            # did on the first attempt.
+            if len(seen) <= 3:
+                return False
+            return real_probe(p, timeout)
+
+        monkeypatch.setattr(shim, "probe", probe_once_blind)
+        resolved = shim.ensure_server(port, runtime_dir=tmp_path, ready_timeout=10)
+
+    assert resolved == port
+    assert recorder.count == 1, "it should have tried once, then found the incumbent"
+
+
+def test_an_interrupt_does_not_kill_the_server_the_shim_just_started(
+    tmp_path, monkeypatch
+):
+    """``start_new_session=True`` exists so the server outlives the shim.
+
+    Catching ``BaseException`` around the readiness wait undid that: a host
+    that SIGINTs during a cold start killed the server that was coming up, so
+    the next attempt started from nothing and could loop forever without ever
+    leaving one behind. An interrupt stops THIS shim; it is no evidence at all
+    that the server is bad. Watched failing against ``except BaseException``:
+    ``terminated`` was True.
+    """
+    process = _FakeProcess()  # still running
+    monkeypatch.setattr(shim, "_spawn_server", _SpawnRecorder(lambda: process))
+    monkeypatch.setattr(shim, "probe", lambda p, timeout=1.0: False)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(shim, "_wait_ready", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        shim.ensure_server(_free_port(), runtime_dir=tmp_path, ready_timeout=5)
+
+    assert not process.terminated, (
+        "an interrupt aimed at the shim must leave the server it started "
+        "running — that is what start_new_session is for"
+    )
+    assert not process.killed
