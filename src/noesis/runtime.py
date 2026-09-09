@@ -17,7 +17,14 @@ from sqlite3 import Connection
 from qdrant_client import QdrantClient
 
 from noesis.core import state
-from noesis.core.config import IndexingSettings, Settings, StructuralSettings
+from noesis.core.config import (
+    IndexingSettings,
+    Settings,
+    StructuralSettings,
+    available_cpus,
+    derive_query_connections,
+    derive_query_queue_depth,
+)
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
 from noesis.core.telemetry import QueryTelemetry
@@ -116,13 +123,45 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         device=embedder_device,
     )
     log = logging.getLogger(__name__)
+    # Resolved here, not at the use site, so one log line tells an operator
+    # what the machine actually got — a derived value nobody can see is a
+    # value nobody can debug (ADR-83/84).
+    query_connections = derive_query_connections(cfg.qdrant.query_connections)
+    query_queue_depth = derive_query_queue_depth(
+        query_connections, cfg.qdrant.query_queue_depth
+    )
+    log.info(
+        "search concurrency: %d query connections, queue depth %d "
+        "(cpus=%d, %s)",
+        query_connections,
+        query_queue_depth,
+        available_cpus(),
+        "configured"
+        if cfg.qdrant.query_connections is not None
+        else "derived — set [qdrant] query_connections to override",
+    )
     # A silent hang here (Qdrant down/unreachable) is a common false "bug"
     # report — name what we're waiting on before the blocking round-trips.
-    log.info("connecting to Qdrant at %s (query + index clients, ADR-76)", cfg.qdrant.url)
+    log.info(
+        "connecting to Qdrant at %s (%d query + 1 index + 1 admin connections, "
+        "ADR-83)",
+        cfg.qdrant.url,
+        query_connections,
+    )
+    # Three roles, deliberately distinct objects (ADR-83):
+    #   admin  — deletes, counts, scroll, retrieve, collection setup. None of
+    #            these build a models.Document, so they need no pool slot and
+    #            must never take one from a query.
+    #   index  — upsert_chunks only, so an index run cannot consume a query
+    #            connection however long its batch runs.
+    #   query  — the pool, one checked out per sparse/hybrid search.
     store = VectorStore(
         QdrantClient(url=cfg.qdrant.url),
         collection_name=cfg.qdrant.collection,
         index_client=QdrantClient(url=cfg.qdrant.url),
+        query_clients=[
+            QdrantClient(url=cfg.qdrant.url) for _ in range(query_connections)
+        ],
     )
     created = store.ensure_collection(embedder)
     if created:
