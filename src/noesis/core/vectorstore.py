@@ -36,9 +36,12 @@ decides which.
 
 from __future__ import annotations
 
+import contextlib
+import queue
+import threading
 import uuid
 from collections import Counter
-from typing import Any, Iterable, Literal, Protocol
+from typing import Any, Iterable, Iterator, Literal, Protocol, Sequence
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -85,13 +88,134 @@ def chunk_point_id(
 
 class VectorStore:
     """Dense-only Qdrant collection wrapper. One shared collection,
-    ``project_id`` payload filter at query time (Overview §6)."""
+    ``project_id`` payload filter at query time (Overview §6).
+
+    **The hazard this class exists to contain (ADR-83, issue #48).**
+    qdrant-client keeps its client-side inference bookkeeping — a
+    ``_batch_accumulator`` dict and an ``_embed_storage`` FIFO — on the
+    ``QdrantClient`` *object*, unsynchronized and keyed only by model name.
+    Any two threads that build a ``models.Document`` on one client can
+    receive each other's embeddings. Worse, the drain step recomputes only
+    when the FIFO is empty and otherwise ``pop(0)``s, so a single race that
+    leaves one residual entry offsets that client permanently: every later
+    query silently returns another query's results, with no exception, until
+    the process restarts. Reproduced 5/5 through this class's own methods,
+    and measured at up to 15,864 wrong results in 16,000 queries against a
+    live server. Independent of transport — REST and gRPC latch at the same
+    rate — and unfixed upstream as of qdrant-client 1.19.
+
+    **Which methods are exposed.** Only ``upsert_chunks`` (write) and
+    ``search``'s sparse and hybrid channels (read) build a
+    ``models.Document``. Dense-only search and every other method here
+    (deletes, counts, scroll, retrieve, collection setup) touch no inference
+    state at all — verified by instrumenting ``ModelEmbedder._accumulate``
+    and ``_drain_accumulator``: zero calls for a dense query, one each for
+    sparse and hybrid. Those paths are deliberately left unpooled and
+    unlocked on ``client``, because there is nothing there to protect.
+
+    **How it is contained, in two layers.**
+
+    ``query_clients`` is the primary mechanism: a pool of connections, one
+    checked out for the duration of each sparse/hybrid query, so no two
+    threads ever meet on one client's inference state. Structural, not
+    defensive — there is no shared object left to corrupt. Sized by
+    ``[qdrant] query_connections`` and paired 1:1 with the search
+    executor's slots (ADR-84), so a checkout finds a free connection
+    whenever a thread is free. Checkout *blocks* when all are busy: that is
+    the correct back-pressure primitive at this layer, and admission
+    control — a bounded queue that rejects rather than queues without limit
+    — belongs one layer up in the executor.
+
+    ``_locks`` is the correctness floor, one lock per distinct client
+    *object*. It matters because ``query_clients`` cannot always be a pool:
+    two ``QdrantClient(":memory:")`` instances are two different databases,
+    not two connections to one, so the ~25 in-memory tests and any embedded
+    caller necessarily share a single client. Keying the locks to the object
+    rather than to the role is what makes that configuration correct: when
+    ``client``, ``index_client`` and the pool are all the same object, every
+    path takes the *same* mutex. Keying by role instead would have search
+    and upsert holding two different locks over one ``ModelEmbedder`` —
+    issue #48's original race, reopened. In the production wiring the
+    objects are distinct, so each lock is uncontended and costs an atomic.
+
+    ``index_client`` stays separate from the pool so an index run never
+    consumes a query connection, and its lock also guards it against
+    itself: ``jobs.launch_index_run``'s guard (``state.try_start_run``) is
+    per ``project_id``, so two *different* projects can reach
+    ``upsert_chunks`` at once (routine under opt-in ``auto_reindex`` on 2+
+    projects). ``max_concurrent_index_runs`` (ADR-85) bounds how many such
+    runs exist at all, but that cap is machine-wide and this lock is what
+    makes the overlap safe within a process."""
 
     def __init__(
-        self, client: QdrantClient, collection_name: str = "noesis_chunks"
+        self,
+        client: QdrantClient,
+        collection_name: str = "noesis_chunks",
+        index_client: QdrantClient | None = None,
+        query_clients: Sequence[QdrantClient] | None = None,
     ) -> None:
         self._client = client
+        self._index_client = index_client if index_client is not None else client
         self._collection = collection_name
+        # Falling back to ``[client]`` keeps the single-connection shape every
+        # existing caller has: correct (the shared lock below serializes it),
+        # just not concurrent. Only ``runtime.py`` passes a real pool.
+        self._query_clients: tuple[QdrantClient, ...] = tuple(
+            query_clients if query_clients else (client,)
+        )
+        self._query_pool: queue.Queue[QdrantClient] = queue.Queue()
+        for qc in self._query_clients:
+            self._query_pool.put(qc)
+        # One lock per distinct client OBJECT, not per role — see the class
+        # docstring. Built once here from the complete, fixed set of clients,
+        # and every one of them is retained for this object's lifetime, so
+        # keying on ``id()`` cannot collide with a recycled address.
+        self._locks: dict[int, threading.Lock] = {}
+        for c in (self._client, self._index_client, *self._query_clients):
+            self._locks.setdefault(id(c), threading.Lock())
+
+    def _lock_for(self, client: QdrantClient) -> threading.Lock:
+        return self._locks[id(client)]
+
+    @contextlib.contextmanager
+    def _checked_out_query_client(self) -> Iterator[QdrantClient]:
+        """Borrow a query connection and hold its lock for the whole call.
+
+        Blocks until one is free; see the class docstring for why blocking
+        rather than rejecting is right at this layer. The connection is
+        returned to the pool even if the query raises, or a single failed
+        search would shrink the pool permanently."""
+        client = self._query_pool.get()
+        try:
+            with self._lock_for(client):
+                yield client
+        finally:
+            self._query_pool.put(client)
+
+    def close(self) -> None:
+        """Close every distinct connection this store holds (issue #48
+        teardown gap: the client was never closed at all before ADR-76).
+
+        De-duplicated by object identity, so the single-client default
+        closes exactly once however many roles that one object fills. Each
+        close is attempted even if an earlier one raised — one failure must
+        never leak the remaining connections (PR #50 review finding 3,
+        generalized from two connections to the pool) — and the first
+        exception is re-raised once all of them have been tried, which is
+        the contract the two-connection version already had."""
+        seen: set[int] = set()
+        first: BaseException | None = None
+        for client in (self._client, self._index_client, *self._query_clients):
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            try:
+                client.close()
+            except BaseException as exc:  # noqa: BLE001 — re-raised below
+                if first is None:
+                    first = exc
+        if first is not None:
+            raise first
 
     @property
     def collection_name(self) -> str:
@@ -212,7 +336,19 @@ class VectorStore:
             )
             for chunk, vector in zip(chunks, vectors)
         ]
-        self._client.upsert(collection_name=self._collection, points=points, wait=True)
+        # index_client, never a pooled query connection (ADR-83): this is
+        # the only write-path call that builds a models.Document, so it must
+        # not share inference state with a concurrent search, and keeping it
+        # off the pool means an index run can never consume a query slot.
+        # Its lock guards it against ITSELF too — two different projects'
+        # runs can reach here at once, since the launch guard is per
+        # project_id — and, in the single-client configuration, it is the
+        # very same lock the query path takes, which is what keeps that
+        # configuration correct.
+        with self._lock_for(self._index_client):
+            self._index_client.upsert(
+                collection_name=self._collection, points=points, wait=True
+            )
 
     def delete_file_chunks(
         self,
@@ -420,6 +556,17 @@ class VectorStore:
             raise ValueError(f"channel {channel!r} requires query_text")
 
         if channel == "dense":
+            # No models.Document anywhere on this path, so it touches no
+            # per-client inference state and needs neither a pooled
+            # connection nor a lock (ADR-83; verified by instrumenting
+            # ModelEmbedder — zero accumulate/drain calls for dense).
+            # Deliberately left on ``client`` so a dense-only caller (the
+            # eval harness's baseline channels) never contends for a
+            # CONNECTION. It does still take an executor slot: the gate wraps
+            # every channel, and that is correct — a dense query is a real
+            # round trip to a co-resident Qdrant and belongs inside the bound.
+            # An earlier wording here said "slot" and seeded a false claim in
+            # the architecture doc (PR #50 round-7 review).
             response = self._client.query_points(
                 collection_name=self._collection,
                 query=dense_vector,
@@ -429,36 +576,40 @@ class VectorStore:
                 with_payload=True,
             )
         elif channel == "sparse":
-            response = self._client.query_points(
-                collection_name=self._collection,
-                query=models.Document(text=query_text, model=BM25_MODEL_ID),
-                using=SPARSE_VECTOR_NAME,
-                query_filter=query_filter,
-                limit=top_k,
-                with_payload=True,
-            )
+            with self._checked_out_query_client() as qc:
+                response = qc.query_points(
+                    collection_name=self._collection,
+                    query=models.Document(text=query_text, model=BM25_MODEL_ID),
+                    using=SPARSE_VECTOR_NAME,
+                    query_filter=query_filter,
+                    limit=top_k,
+                    with_payload=True,
+                )
         else:
             effective_prefetch = max(prefetch_limit, top_k)
-            response = self._client.query_points(
-                collection_name=self._collection,
-                prefetch=[
-                    models.Prefetch(
-                        query=dense_vector,
-                        using=DENSE_VECTOR_NAME,
-                        filter=query_filter,
-                        limit=effective_prefetch,
-                    ),
-                    models.Prefetch(
-                        query=models.Document(text=query_text, model=BM25_MODEL_ID),
-                        using=SPARSE_VECTOR_NAME,
-                        filter=query_filter,
-                        limit=effective_prefetch,
-                    ),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.RRF),
-                limit=top_k,
-                with_payload=True,
-            )
+            with self._checked_out_query_client() as qc:
+                response = qc.query_points(
+                    collection_name=self._collection,
+                    prefetch=[
+                        models.Prefetch(
+                            query=dense_vector,
+                            using=DENSE_VECTOR_NAME,
+                            filter=query_filter,
+                            limit=effective_prefetch,
+                        ),
+                        models.Prefetch(
+                            query=models.Document(
+                                text=query_text, model=BM25_MODEL_ID
+                            ),
+                            using=SPARSE_VECTOR_NAME,
+                            filter=query_filter,
+                            limit=effective_prefetch,
+                        ),
+                    ],
+                    query=models.FusionQuery(fusion=models.Fusion.RRF),
+                    limit=top_k,
+                    with_payload=True,
+                )
         results: list[dict[str, Any]] = []
         for point in response.points:
             payload = point.payload or {}

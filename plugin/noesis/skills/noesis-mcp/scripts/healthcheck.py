@@ -8,7 +8,10 @@ this when the ``noesis:`` MCP tools are missing or misbehaving — it separates
 
 Standard library only: runs under any ``python3`` without the Noesis venv.
 
-Exit codes: 0 healthy; 1 unhealthy (service unreachable or /healthz not ok).
+Exit codes: 0 healthy; 1 unhealthy (service unreachable, /healthz not ok, or
+the embedding model's assets are missing from the local cache — ADR-78,
+issue #47 finding 4: green here previously meant nothing about whether the
+next search pays a multi-minute silent download).
 """
 
 from __future__ import annotations
@@ -73,6 +76,18 @@ def main() -> None:
         sys.exit(1)
     print("  [ OK ] service is up (/healthz ok)")
     print(f"         MCP endpoint: {base_url}/mcp/")
+
+    assets = payload.get("assets")
+    if assets == "missing":
+        print(
+            "  [FAIL] embedding model assets not found in the local cache — "
+            "the next search_code call will block for minutes downloading them.\n"
+            "         Fetch them now: uv run python -m noesis.prefetch"
+        )
+        sys.exit(1)
+    elif assets == "ready":
+        print("  [ OK ] embedding model assets are cached")
+    # "unknown" (bare app, no lifespan wired): not actionable, say nothing.
 
     # 2. /projects
     try:

@@ -186,7 +186,8 @@ def test_retriever_prefetch_depth_without_reranker():
 
     async def scenario():
         return await search_code(
-            SpyStore(), FakeEmbedder(dim=8), "query", "proj", top_k=10
+            SpyStore(), FakeEmbedder(dim=8), "query", "proj", top_k=10,
+            gate=None,
         )
 
     result = asyncio.run(scenario())

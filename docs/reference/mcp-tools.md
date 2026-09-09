@@ -1,6 +1,8 @@
 # MCP tools reference
 
-Noesis serves six tools over both MCP transports (streamable HTTP at `/mcp/`, stdio via `python -m noesis.mcp`). Every tool body is the same core call as its REST twin, and success payloads are identical dicts — tests assert byte-equality so the two surfaces cannot drift (`src/noesis/mcp/server.py`). Failures raise `ToolError` with the same detail REST puts in its HTTP error body.
+Noesis serves six tools over both MCP transports (streamable HTTP at `/mcp/`, stdio via `python -m noesis.mcp`). Every tool body is the same core call as its REST twin, and success payloads are identical dicts — tests assert byte-equality so the two surfaces cannot drift (`src/noesis/mcp/server.py`). Failures raise `ToolError` with the same detail REST puts in its HTTP error body, with one deliberate exception: the capacity refusals below carry agent-facing text rather than the REST detail string, because an agent needs to be told that nothing failed, that nothing was queued, and which knob changes the limit.
+
+**Capacity refusals ([ADR-84](../project/decisions.md)/[ADR-85](../project/decisions.md)).** `search_code` raises `ToolError` when the search gate is saturated, and `reindex` when the machine-wide index-run cap is reached. Both are the MCP equivalent of REST's 429 — MCP has no status codes — and both mean *retry shortly*, not *something is broken*. The messages name the live counts and the config key to raise (`[qdrant] query_connections`, `[indexing] max_concurrent_index_runs`).
 
 ## `search_code`
 
@@ -101,7 +103,9 @@ Status of the most recent index run, shaped identically for REST and MCP:
   "vector_count": 333,
   "drift": false,
   "unwalkable_dirs": 0,
-  "quarantined_dirs": 0
+  "quarantined_dirs": 0,
+  "embedder_assets": "ready",
+  "embedder_ready": true
 }
 ```
 
@@ -114,6 +118,8 @@ The cost of that rule is worth knowing: while a run is actively committing, `dri
 `unwalkable_dirs` and `quarantined_dirs` are the **coverage** half of the same health picture, where `drift` is the storage half. `drift` says the store lost content it should be holding; these say part of the *tree* was never read, so what is indexed for it may be stale and cannot be proven otherwise. `quarantined_dirs` is a subset: those have failed long enough that the paths they hide are no longer being re-queued for retry ([ADR-56](../project/decisions.md)).
 
 Both zero is the healthy state. Non-zero does **not** mean anything was deleted — nothing under an unwalked directory is ever purged, because "I could not look" is not evidence of absence. It means results from that part of the tree may reflect older content than what is on disk. Worth checking before treating a search result as authoritative, and worth reporting to the human if a search over that project is coming back thin. Recovery is automatic: the first run that walks the directory again re-hashes its contents. There is no tool to clear this — it is a filesystem problem (a permissions change, an unmounted disk) or a deliberate scope decision, and both are resolved outside Noesis.
+
+`embedder_assets`/`embedder_ready` mirror `/healthz`'s cold-start warm-up signal (issue #47) for callers with no HTTP surface to poll — an MCP stdio server has no `/healthz` at all. `embedder_assets` is `"ready"` or `"missing"` (are the model's weights cached locally, checked without touching the network); `embedder_ready` is `true`/`false` once the embedder reports which device it loaded on, or the string `"n/a"` for an embedder implementation that doesn't expose one (e.g. a test double). A `search_code` call arriving while `embedder_ready` is still `false` will block until the background warm-up finishes loading the model — this pair of fields is why, not a hang.
 
 ## `get_chunk`
 

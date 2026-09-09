@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from unittest.mock import Mock
 
 import pytest
 from qdrant_client import QdrantClient
@@ -415,3 +416,17 @@ async def test_ensure_collection_returns_true_only_on_create(store: VectorStore)
     assert store.ensure_collection(embedder) is True
     # Already exists with a matching shape → not created by this call.
     assert store.ensure_collection(embedder) is False
+
+
+def test_close_still_closes_index_client_when_query_client_close_raises():
+    """PR #50 review finding 3: if ``self._client.close()`` raises, the
+    distinct ``index_client`` must still be closed rather than leaked."""
+    query_client = Mock()
+    query_client.close.side_effect = RuntimeError("query client close boom")
+    index_client = Mock()
+    store = VectorStore(query_client, index_client=index_client)
+
+    with pytest.raises(RuntimeError, match="query client close boom"):
+        store.close()
+
+    index_client.close.assert_called_once()

@@ -32,6 +32,38 @@ If no file is found, all defaults apply.
 |---|---|---|---|
 | `url` | str | `http://127.0.0.1:6333` | Qdrant server URL (localhost only by design). |
 | `collection` | str | `noesis_chunks` | Collection name — one shared collection, filtered per project. |
+| `query_connections` | int > 0 | unset | Size of the search connection pool, and 1:1 the number of searches that may run at once ([ADR-83](../project/decisions.md), [ADR-84](../project/decisions.md)). Unset → derive from the machine: `clamp(available CPUs, 2, 8)`, the same "unset means auto" convention `embedder.device` uses. The CPU count is read through `sched_getaffinity`, so a cgroup-limited container sizes for its own allowance rather than for the host's cores. Set too high, the cost is **latency for no throughput** — past the knee, queries queue inside Qdrant instead of in the pool; set to `1`, it gives up about a third of the throughput. Each connection costs one Qdrant connection and one thread. See the note below on what the validator can and cannot enforce. |
+| `query_queue_depth` | int > 0 | unset | How many searches may **wait** for a free connection before the service refuses instead of queueing without limit. Unset → `4 × query_connections`. Beyond `query_connections + query_queue_depth` admitted, REST `/search` answers **429** with `Retry-After` and MCP `search_code` raises a `ToolError` naming the counts and this knob. That rejection is the point: under many agents the honest failure is a fast, legible refusal, not a request that sits for an unbounded time. Raising it does not make the service faster — it only lengthens the wait a caller can be made to sit through before being told no. |
+
+!!! note "What the `query_connections > 0` check does and does not enforce"
+    Load rejects anything that is not a positive integer, and nothing more. It
+    cannot reject a *wrong* value, because "wrong" is a property of the host:
+    the right number is the one that saturates this machine's cores, and
+    nothing at load time knows how many agents will search at once or how much
+    CPU the co-resident Qdrant is taking.
+
+    The derived rule comes from a measured curve — 4-CPU box, 16 concurrent
+    searches, 5,000 points, hybrid, prefetch 50, against a live Qdrant 1.18.3:
+
+    | Connections | Throughput | p95 |
+    |---|---|---|
+    | 1 | 258 q/s | 4.7 ms |
+    | 2 | 353 q/s | 8.1 ms |
+    | 4 | **384 q/s** | 16.0 ms |
+    | 6 | 375 q/s | 23.7 ms |
+    | 8 | 375 q/s | 33.3 ms |
+    | 12 | 379 q/s | 48.4 ms |
+
+    Throughput saturates *exactly* at the CPU count and then stays flat while
+    p95 climbs threefold, because Qdrant is co-resident and competing for the
+    same cores. So the rule clamps to the CPU count, and the floor of `2` is
+    measured: one connection cannot overlap a query with the next one's round
+    trip and gives up ~33% of throughput for it.
+
+    The **ceiling of 8 is a judgment call, not a measurement** — no larger box
+    was available to test on — which is precisely why this knob exists. On a
+    many-core machine serving many agents, raising it is a reasonable thing to
+    do; the derivation just refuses to guess that far on your behalf.
 
 ## `[reranker]`
 
@@ -89,11 +121,15 @@ record its position — and what it carries forward if it could not read
 everything — is not configurable and is decided per run
 ([ADR-60](../project/decisions.md)).
 
+One key here is not recovery policy at all: `max_concurrent_index_runs` bounds
+how much indexing the *machine* does at once, whatever triggered it.
+
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `promote_after_scoped_runs` | int ≥ 0 | `20` | Promote a scoped run to a full walk once this many scoped runs have started since the last **completed** full one. A failed full run does not reset the counter — it did not drain anything. `0` disables. |
 | `promote_candidate_fraction` | float 0–1 | `0.25` | Promote when the effective candidate set reaches this fraction of the indexed file count. Past that point a scoped run costs about what the full walk costs while delivering none of its drains, since discovery stats and binary-sniffs every file either way. `0` disables. The set is `pending`, plus the working-tree-dirty set **only when the last full walk completed without failures** — see below. |
 | `unwalkable_quarantine_runs` | int ≥ 0 | `5` | Consecutive runs a directory must fail to be walked before the indexed paths it hides stop being re-queued for retry. `0` disables, restoring a permanently non-draining backlog. |
+| `max_concurrent_index_runs` | int > 0 | `4` | Cap on index runs **across the whole machine**, not per project ([ADR-85](../project/decisions.md)) — one run per project was already guaranteed; this bounds how many *projects* may run at once. Enforced inside the same `BEGIN IMMEDIATE` transaction that claims a run, so it holds **across processes**: the documented deployment runs an HTTP server and a stdio MCP process against one state DB, and an in-process counter would bound one of them while the other proceeded unaware. At the cap nothing is silently queued — REST `/projects/{id}/reindex` and the dashboard's `reindex-pending` answer **429** with `Retry-After`, MCP `reindex` raises a `ToolError` saying nothing was started, and the watcher defers and re-arms its quiet-period trigger. `POST /projects` is the exception: it registers the project *before* it launches, so it answers **202** with `"status": "capacity_reached"` and the `project_id` — a bare 429 there would report that nothing happened while leaving behind a project whose id the caller never learned. A project's own live run still reads as `already_running`, which is a truthful answer about work already happening. |
 
 !!! info "Why the dirty set is conditional"
     A full walk that reported any failure — an unreadable directory, but
@@ -133,6 +169,28 @@ everything — is not configurable and is decided per run
     while it was unreadable is picked up automatically. See
     [the dashboard reference](dashboard.md#unreadable-directories).
 
+!!! note "`max_concurrent_index_runs = 4` is a judgment call, not a measurement"
+    Concurrent runs serialize on the single embedder worker
+    ([ADR-20](../project/decisions.md)) whichever way this is set, so a larger
+    number buys no indexing throughput — it only multiplies simultaneous file
+    walks, open descriptors and executor pressure. `1` would be a visible
+    behaviour change in the other direction, since today a second project need
+    not wait behind a long run. Four sits between those two, and no measurement
+    picked it; raise it if your machine says otherwise.
+
+## `[server]`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `port` | int > 0 | `8000` | Port the HTTP service listens on, **and** the port `python -m noesis.mcp --shared` looks for a shared server on ([ADR-86](../project/decisions.md)). Both sides read this one value, so the shim never has to discover an endpoint — an earlier draft published one and promptly proxied an operator who asked for port 8199 to a live server on 8123. The port is configured; liveness is probed. `--port` on the shim overrides it for that process. |
+
+!!! note "There is no `host` key, deliberately"
+    The bind address is fixed at `127.0.0.1` and is not configurable. A host
+    knob would put a wildcard bind one config edit away, and nothing else in
+    the design survives that: the service has no authentication because it is
+    not reachable from off the machine
+    ([ADR-25](../project/decisions.md)).
+
 ## Environment variables
 
 | Variable | Effect |
@@ -154,6 +212,10 @@ batch_size = 32
 [qdrant]
 url = "http://127.0.0.1:6333"
 collection = "noesis_chunks"
+# query_connections / query_queue_depth: omit for auto —
+# clamp(available CPUs, 2, 8) connections, and 4x that many waiters.
+# query_connections = 4
+# query_queue_depth = 16
 
 [reranker]
 model = "BAAI/bge-reranker-v2-m3"
@@ -176,4 +238,8 @@ poll_interval_s = 1.0
 promote_after_scoped_runs = 20
 promote_candidate_fraction = 0.25
 unwalkable_quarantine_runs = 5
+max_concurrent_index_runs = 4
+
+[server]
+port = 8000
 ```

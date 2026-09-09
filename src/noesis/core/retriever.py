@@ -21,6 +21,7 @@ candidates, not ground truth — callers read the live file before acting.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import math
 import time
@@ -28,6 +29,7 @@ from typing import Any
 
 from .embedder import Embedder
 from .reranker import Reranker
+from .search_gate import SearchGate
 from .vectorstore import SearchChannel, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,7 @@ async def search_code(
     reranker: Reranker | None = None,
     rerank: bool | None = None,
     candidates: int = 50,
+    gate: SearchGate | None,
 ) -> dict[str, Any]:
     """Search one project's chunks; returns ``{"hits": [...], "reranked":
     bool}`` so adapters state whether reranking was applied (§3.3) without
@@ -64,7 +67,7 @@ async def search_code(
     # a hit ranked just outside one channel's top_k loses that channel's
     # RRF contribution entirely and can drop out of the fused top_k.
     prefetch = max(top_k, candidates)
-    hits = await asyncio.to_thread(
+    run_search = functools.partial(
         store.search,
         project_id,
         dense_vector=dense_vector,
@@ -74,6 +77,24 @@ async def search_code(
         channel=channel,
         prefetch_limit=prefetch,
         with_text=apply_rerank,
+    )
+    # The gate is the real path: it runs this on the bounded search executor
+    # whose slots are paired 1:1 with the store's query connections, and
+    # raises SearchOverloaded rather than letting a backlog grow without
+    # limit (ADR-84).
+    #
+    # ``gate`` is keyword-only with NO default, deliberately (PR #50 round-7
+    # review). It used to default to None, and a reviewer mutation-tested
+    # that: deleting ``gate=ctx.search_gate`` from both adapters left the
+    # entire default suite green while every bound this PR adds silently
+    # ceased to exist. A missing argument is now a TypeError at the call
+    # site. Passing None explicitly is still allowed and still falls back to
+    # the default executor — that is for direct unit-test calls where
+    # boundedness is not what is under test — but it has to be said out
+    # loud, which is the whole point. ``test_adapters_pass_a_real_gate``
+    # covers the remaining hole, someone silently changing it to None.
+    hits = await (
+        gate.run(run_search) if gate is not None else asyncio.to_thread(run_search)
     )
     t_search = time.perf_counter()
     if apply_rerank and hits:

@@ -190,8 +190,16 @@ def launch_index_run(
     # dual-transport deployment (HTTP + stdio MCP sharing this DB), where two
     # near-simultaneous launches could both pass the check and race two index
     # runs onto the same collection.
+    # max_concurrent (ADR-85) is enforced inside that same transaction, the
+    # only place a cap can be atomic across the HTTP + stdio deployment.
+    # It raises IndexCapacityReached rather than returning a status; every
+    # caller of this function handles it explicitly.
     run_id, created = state.try_start_run(
-        ctx.conn, project_id, triggered_by=triggered_by, scoped=paths is not None
+        ctx.conn,
+        project_id,
+        triggered_by=triggered_by,
+        scoped=paths is not None,
+        max_concurrent=ctx.indexing.max_concurrent_index_runs,
     )
     if not created:
         return {
@@ -319,7 +327,15 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     subset that has failed long enough for their contents to stop being
     re-queued. Both zero is the healthy state. Non-zero does not mean anything
     was deleted — nothing under an unwalked directory is ever purged — it means
-    what is indexed there cannot be proven current."""
+    what is indexed there cannot be proven current.
+
+    ``embedder_assets``/``embedder_ready`` mirror ``/healthz``'s ADR-77/78
+    fields (issue #47 finding 4, PR #50 round-4 review) — this is the shared
+    REST/MCP status shape, so an MCP-only (stdio) caller with no HTTP surface
+    to poll can now see the same cold-start warm-up signal a REST caller gets
+    from ``/healthz``. Computed via ``prefetch.embedder_readiness``, the same
+    function ``/healthz`` calls (PR #50 round-5 review) — not a second copy
+    of the readiness logic kept in sync by hand."""
     # Index health: what the state DB expects vs what Qdrant actually holds.
     # A mismatch is drift — a vector store that lost data (external collection
     # wipe) while state still reports the files indexed. Surfaced so agents
@@ -346,6 +362,9 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     # trusting an answer, which is why this rides the shared REST/MCP shape and
     # not just the dashboard.
     unwalkable, quarantined = state.count_unwalkable_dirs(ctx.conn, project_id)
+    from noesis.prefetch import embedder_readiness
+
+    embedder_assets, embedder_ready = await embedder_readiness(ctx.embedder)
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {
@@ -363,6 +382,8 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
             "drift": drift,
             "unwalkable_dirs": unwalkable,
             "quarantined_dirs": quarantined,
+            "embedder_assets": embedder_assets,
+            "embedder_ready": embedder_ready,
         }
     return {
         "project_id": project_id,
@@ -379,4 +400,6 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
         "drift": drift,
         "unwalkable_dirs": unwalkable,
         "quarantined_dirs": quarantined,
+        "embedder_assets": embedder_assets,
+        "embedder_ready": embedder_ready,
     }

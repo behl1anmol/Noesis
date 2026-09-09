@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from noesis.api.security import verify_local_origin
 from noesis.core import jobs, state
 from noesis.core.retriever import search_code
+from noesis.core.search_gate import SearchOverloaded
 from noesis.core.state import MixedModelError
 from noesis.core.structural import StructuralSearchError, structural_search
 from noesis.core.vectorstore import SearchChannel
@@ -62,8 +63,26 @@ class StructuralSearchRequest(BaseModel):
 
 
 @router.get("/healthz")
-async def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+async def healthz(request: Request) -> dict[str, Any]:
+    """``status`` is unconditional (process is up); ``assets`` and
+    ``embedder_ready`` are the ADR-77/78 fail-loud surface (issue #47
+    finding 4) — previously a caller saw green here and then paid a
+    multi-minute silent stall on the next search. ``ctx`` can be absent
+    (e.g. a bare app without the lifespan wired), in which case both stay
+    ``"unknown"`` rather than raising on a healthcheck. The readiness check
+    itself (blocking filesystem stat calls, PR #50 round-3 review) lives in
+    ``prefetch.embedder_readiness``, shared with ``jobs.index_status`` (PR
+    #50 round-5 review) rather than computed twice — it already runs via
+    ``asyncio.to_thread``, the same convention ``runtime.py`` uses for
+    ``delete_orphan_points``, so this stays off the event loop without
+    repeating that plumbing here."""
+    ctx = getattr(request.app.state, "ctx", None)
+    if ctx is None:
+        return {"status": "ok", "assets": "unknown", "embedder_ready": "unknown"}
+    from noesis.prefetch import embedder_readiness
+
+    assets, embedder_ready = await embedder_readiness(ctx.embedder)
+    return {"status": "ok", "assets": assets, "embedder_ready": embedder_ready}
 
 
 @router.post("/projects", status_code=202)
@@ -73,6 +92,21 @@ async def register_and_index(
     ctx = request.app.state.ctx
     try:
         return jobs.launch_index_run(ctx, req.root_path)
+    except state.IndexCapacityReached as exc:
+        # NOT 429 here, unlike every other capacity refusal: this endpoint
+        # registers the project before it launches the run, so by the time
+        # the cap is hit the registration has already committed. Answering
+        # 429 would tell the caller nothing happened while leaving a project
+        # it never learned the id of, findable only via GET /projects. So
+        # report the registration (202, which is what actually happened) and
+        # put the refusal in the body, exactly as `already_running` does.
+        # core/dashboard.register_project resolves the same conflict the same
+        # way by returning run: null.
+        return {
+            "project_id": exc.project_id or "",
+            "run_id": "",
+            "status": "capacity_reached",
+        }
     except ValueError as exc:
         # Typed, not text-matched (M3): the mixed-model guard is a real 409
         # Conflict ("re-index required"), but a missing/non-directory path is
@@ -116,6 +150,15 @@ async def reindex(
         raise HTTPException(status_code=404, detail="unknown project_id")
     try:
         return jobs.launch_index_run(ctx, project["root_path"], force=force)
+    except state.IndexCapacityReached as exc:
+        # 429 for the same reason /search uses it (ADR-84/85): the machine is
+        # busy, nothing failed, and 503 would be indistinguishable from the
+        # server being down.
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     except ValueError as exc:
         # Mixed-model guard → 409; a vanished root_path → 400 (M3).
         status = 409 if isinstance(exc, MixedModelError) else 400
@@ -144,18 +187,30 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
     if state.get_project(ctx.conn, req.project_id) is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
     t0 = time.perf_counter()
-    result = await search_code(
-        ctx.store,
-        ctx.embedder,
-        req.query,
-        req.project_id,
-        top_k=req.top_k,
-        language=req.language,
-        channel=req.channel,
-        reranker=ctx.reranker,
-        rerank=req.rerank,
-        candidates=ctx.rerank_candidates,
-    )
+    try:
+        result = await search_code(
+            ctx.store,
+            ctx.embedder,
+            req.query,
+            req.project_id,
+            top_k=req.top_k,
+            language=req.language,
+            channel=req.channel,
+            reranker=ctx.reranker,
+            rerank=req.rerank,
+            candidates=ctx.rerank_candidates,
+            gate=ctx.search_gate,
+        )
+    except SearchOverloaded as exc:
+        # 429, not 503 (ADR-84): 503 is also what a dead or unreachable
+        # server returns, and a client that cannot tell "busy" from "down"
+        # retries the wrong way. Connection-refused and a failing /healthz
+        # already mean down; this means slow down.
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     await ctx.telemetry.record_query(
         ctx.conn,
         interface="rest",

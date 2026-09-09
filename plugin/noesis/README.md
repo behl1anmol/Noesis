@@ -23,8 +23,15 @@ The plugin talks to a Noesis service you run locally:
 
 ```bash
 docker compose up -d                                          # Qdrant on :6333
+uv sync                                                        # install dependencies
+uv run python -m noesis.prefetch                               # one-time asset download
 uv run uvicorn noesis.app:app --host 127.0.0.1 --port 8000    # the service
 ```
+
+The prefetch step matters: skip it and the embedding model (~550 MB) downloads
+inside your agent's *first* `search_code` call instead of at install time — a
+multi-minute silent stall with no progress indication (issue #47). `healthcheck.py`
+(below) tells you whether it's still needed.
 
 ## Install
 

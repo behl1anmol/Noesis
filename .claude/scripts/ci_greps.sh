@@ -50,6 +50,38 @@ if [ -n "$hits" ]; then
   fail=1
 fi
 
+# ADR-83 (PR #50 review round 6): only runtime.py may construct a QdrantClient,
+# and prefetch.py its own throwaway one. qdrant-client keeps unsynchronized
+# inference state per client OBJECT, so who owns the objects IS the concurrency
+# design: VectorStore receives its admin, index and pooled query connections
+# and must never mint its own, or a search would run on a connection outside
+# the pool and outside its lock -- the exact defect this PR fixes.
+# Prose mentions are excluded by the repo's own inline-code convention
+# (``double backticks``), so a docstring may name the class while code may not
+# call it. A prose mention written without backticks fails the check, which is
+# the fail-safe direction.
+hits=$(grep -rn --include='*.py' 'QdrantClient(' src/ \
+  | grep -v -e '^src/noesis/runtime\.py:' -e '^src/noesis/prefetch\.py:' \
+  | grep -v '``QdrantClient(' || true)
+if [ -n "$hits" ]; then
+  echo "FAIL: QdrantClient constructed outside runtime.py/prefetch.py (ADR-83):"
+  echo "$hits"
+  fail=1
+fi
+
+# ADR-83: building a models.Document is what engages the racy client-side
+# inference path, so it may only happen inside VectorStore (which holds the
+# pool and the per-client locks) and prefetch.py (single-threaded, its own
+# client). Anywhere else would bypass both.
+hits=$(grep -rn --include='*.py' 'models\.Document(' src/ \
+  | grep -v -e '^src/noesis/core/vectorstore\.py:' -e '^src/noesis/prefetch\.py:' \
+  || true)
+if [ -n "$hits" ]; then
+  echo "FAIL: models.Document built outside VectorStore/prefetch.py (ADR-83):"
+  echo "$hits"
+  fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "ci_greps: all guardrail greps clean"
 fi

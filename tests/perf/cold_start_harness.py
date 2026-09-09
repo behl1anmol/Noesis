@@ -251,7 +251,14 @@ def _worker(config_path: Path) -> int:
         async def search(label: str, tolerate_errors: bool = False) -> None:
             with meter.phase(label, tolerate_errors=tolerate_errors) as record:
                 hits = await retriever.search_code(
-                    ctx.store, ctx.embedder, query, project_id, top_k=5
+                    ctx.store, ctx.embedder, query, project_id, top_k=5,
+                    # ctx.search_gate, not None: both transports pass the
+                    # context's gate, so timing an ungated call would measure
+                    # a path production never takes. A mechanical pass that
+                    # made every caller explicit defaulted this one to None
+                    # along with the unit tests, where ungated is correct and
+                    # here it is not (PR #50 round-8 review).
+                    gate=ctx.search_gate,
                 )
                 record["hits"] = len(hits["hits"])
 

@@ -10,8 +10,20 @@ requires-python = ">=3.11"
 dependencies = [
     "ast-grep-py==0.44.0",
     "einops>=0.8.2",
+    # ADR-86: promoted from transitive (huggingface-hub and torch both already
+    # depend on it) to direct, for the shim's server election. Adds no
+    # supply-chain surface, only a direct import boundary and the decision row
+    # hard rule 3 requires - the same promotion ADR-78 made for huggingface_hub.
+    # Floor is the version this project already resolves and that the election
+    # was verified against; a lower bound would be an untested claim.
+    "filelock>=3.29.5",
     "fastapi[standard]>=0.139.0",
     "fastmcp>=3.4.2,<4",
+    # ADR-78 (issue #47): promoted from transitive (sentence-transformers,
+    # fastembed both already depend on it) to direct, for a no-network
+    # local-cache presence check surfaced on /healthz. Adds no new
+    # supply-chain surface, only a direct import boundary.
+    "huggingface-hub>=1.20.0",
     "jinja2>=3.1.6",
     "pathspec>=1.1.1",
     # Upper bound is the coupling to docker-compose.yml's server tag, not a

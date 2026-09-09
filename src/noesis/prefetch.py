@@ -16,6 +16,7 @@ downloads.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -37,6 +38,78 @@ def default_fastembed_cache() -> str:
     process on the machine resolve one path regardless of cwd."""
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return str(Path(base).expanduser() / "noesis" / "fastembed")
+
+
+def embedder_assets_ready(model_id: str) -> bool:
+    """Best-effort, no-network check: is ``model_id`` fully cached in the
+    local HF cache (ADR-78 addendum, issue #47 finding 4, PR #50 review)?
+
+    Requires ``config.json`` AND at least one weight file: a single-file
+    checkpoint (``model.safetensors`` / ``pytorch_model.bin``) or a sharded
+    one's index manifest (``*.index.json``). Checking ``config.json`` alone
+    reported ``ready`` after a download interrupted between metadata and
+    weights — exactly the silent cold-start stall this check exists to
+    surface. Only the pytorch-backend filenames are checked, not the whole
+    repo tree: ``LocalSTEmbedder`` never requests ``backend="onnx"``, so an
+    onnx/openvino variant shipped alongside pytorch weights in the same repo
+    must not cause a false "missing".
+
+    ``try_to_load_from_cache`` returns a sentinel object — not ``None`` — for
+    a filename HF has already probed and confirmed absent from the repo
+    (e.g. a single-file checkpoint's sharded-index name, probed once by a
+    prior load's fallback logic and cached negative; verified against a live
+    cache). ``isinstance(result, str)`` treats that sentinel as absent, same
+    as a filename that was never probed at all — ``is not None`` would not.
+
+    All lookups happen in the default HF cache location (``HF_HOME`` /
+    ``~/.cache/huggingface/hub``), the same resolution ``sentence_transformers``
+    itself uses, so this asks exactly what the real load will find."""
+    from huggingface_hub import try_to_load_from_cache
+    from huggingface_hub.errors import HFValidationError
+
+    def cached(filename: str) -> bool:
+        return isinstance(try_to_load_from_cache(model_id, filename), str)
+
+    # ``[embedder] model`` is free text and sentence-transformers accepts a
+    # local directory, which is not a hub repo id — the hub call raises
+    # HFValidationError for it. Unguarded, that propagated out of /healthz,
+    # GET /projects/{id}/status and the get_index_status MCP tool, so a
+    # locally-pinned model took down the very surface ADR-78 added to keep
+    # the health check honest. For a real directory the answer is knowable
+    # without the hub at all: the assets ARE that directory. Anything else
+    # malformed falls through to "missing", the fail-safe direction ADR-79
+    # already chose (a false "missing" costs a redundant prefetch; a false
+    # "ready" is the bug).
+    try:
+        if not cached("config.json"):
+            return False
+    except HFValidationError:
+        return Path(model_id).expanduser().is_dir()
+    weight_files = (
+        "model.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    )
+    return any(cached(f) for f in weight_files)
+
+
+async def embedder_readiness(embedder: object) -> tuple[str, bool | str]:
+    """Shared ``(assets, embedder_ready)`` computation behind both
+    ``/healthz`` (ADR rows 78/79) and ``jobs.index_status`` (ADR row 81) —
+    PR #50 round-5 review. Previously pasted verbatim in both call sites:
+    they agreed only because the text was identical and one test compared
+    the two endpoints' output, not because there was one implementation: a
+    future edit to either copy (e.g. a "warming" state, a different ``n/a``
+    rule) had nothing stopping it from landing on one side only. ``embedder``
+    is duck-typed — ``model_id`` required, ``resolved_device`` optional — so
+    this has no dependency on a specific Embedder implementation and stays
+    outside ``core/`` like the rest of this module (module docstring)."""
+    ready = await asyncio.to_thread(embedder_assets_ready, embedder.model_id)
+    assets = "ready" if ready else "missing"
+    resolved_device = getattr(embedder, "resolved_device", "n/a")
+    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
+    return assets, embedder_ready
 
 
 def prefetch_grammars() -> list[str]:

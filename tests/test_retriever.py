@@ -49,7 +49,7 @@ def fusion_hits() -> list[dict]:
 
 async def test_no_reranker_returns_fusion_order_without_text():
     store = StubStore(fusion_hits())
-    result = await search_code(store, FakeEmbedder(), "validate token", "p1")
+    result = await search_code(store, FakeEmbedder(), "validate token", "p1", gate=None)
     assert result["reranked"] is False
     assert [h["file_path"] for h in result["hits"]] == ["db.py", "auth.py", "util.py"]
     assert all("text" not in h and "rerank_score" not in h for h in result["hits"])
@@ -61,7 +61,8 @@ async def test_rerank_defaults_on_when_reranker_wired():
     store = StubStore(fusion_hits())
     reranker = FakeReranker()
     result = await search_code(
-        store, FakeEmbedder(), "validate token", "p1", reranker=reranker
+        store, FakeEmbedder(), "validate token", "p1", reranker=reranker,
+        gate=None,
     )
     assert result["reranked"] is True
     # Overlap scores: auth.py=1.0, util.py=0.5, db.py=0.0 — fusion order flipped.
@@ -75,7 +76,8 @@ async def test_rerank_false_opts_out_per_request():
     store = StubStore(fusion_hits())
     reranker = FakeReranker()
     result = await search_code(
-        store, FakeEmbedder(), "validate token", "p1", reranker=reranker, rerank=False
+        store, FakeEmbedder(), "validate token", "p1", reranker=reranker, rerank=False,
+        gate=None,
     )
     assert result["reranked"] is False
     assert reranker.calls == []
@@ -85,7 +87,8 @@ async def test_rerank_false_opts_out_per_request():
 async def test_rerank_true_without_reranker_states_not_applied():
     store = StubStore(fusion_hits())
     result = await search_code(
-        store, FakeEmbedder(), "validate token", "p1", rerank=True
+        store, FakeEmbedder(), "validate token", "p1", rerank=True,
+        gate=None,
     )
     assert result["reranked"] is False
     assert all("rerank_score" not in h for h in result["hits"])
@@ -101,6 +104,7 @@ async def test_rerank_fetches_candidate_depth_then_truncates_to_top_k():
         top_k=2,
         reranker=FakeReranker(),
         candidates=50,
+        gate=None,
     )
     # Store is asked for the rerank candidate depth, response is top_k.
     assert store.calls[0]["top_k"] == 50
@@ -119,6 +123,7 @@ async def test_rerank_candidates_never_shrink_top_k():
         top_k=80,
         reranker=FakeReranker(),
         candidates=50,
+        gate=None,
     )
     assert store.calls[0]["top_k"] == 80
 
@@ -128,7 +133,8 @@ async def test_rerank_ties_keep_fusion_order():
         [hit("a.py", "nothing relevant", 0.9), hit("b.py", "also nothing", 0.8)]
     )
     result = await search_code(
-        store, FakeEmbedder(), "zzz", "p1", reranker=FakeReranker()
+        store, FakeEmbedder(), "zzz", "p1", reranker=FakeReranker(),
+        gate=None,
     )
     # Both score 0.0 — stable sort preserves fusion order.
     assert [h["file_path"] for h in result["hits"]] == ["a.py", "b.py"]
@@ -138,7 +144,8 @@ async def test_rerank_with_no_hits_never_calls_reranker():
     store = StubStore([])
     reranker = FakeReranker()
     result = await search_code(
-        store, FakeEmbedder(), "q", "p1", reranker=reranker, rerank=True
+        store, FakeEmbedder(), "q", "p1", reranker=reranker, rerank=True,
+        gate=None,
     )
     assert result == {"hits": [], "reranked": True}
     assert reranker.calls == []
@@ -154,6 +161,7 @@ async def test_sparse_channel_skips_query_embed_with_rerank():
         "p1",
         channel="sparse",
         reranker=FakeReranker(),
+        gate=None,
     )
     assert embedder.query_calls == []
     assert result["reranked"] is True

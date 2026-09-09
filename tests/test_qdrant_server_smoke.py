@@ -157,13 +157,15 @@ async def test_hybrid_path_round_trips_against_a_real_server(tmp_path, store):
         # Sparse: BM25 over a verbatim identifier. This is the channel that
         # needs models.Document to survive the round trip to the server.
         sparse = await search_code(
-            store, embedder, "validate_jwt_expiry", indexed.project_id, channel="sparse"
+            store, embedder, "validate_jwt_expiry", indexed.project_id, channel="sparse",
+            gate=None,
         )
         assert [hit["file_path"] for hit in sparse["hits"]][:1] == ["auth.py"]
 
         # Hybrid: two prefetches fused server-side with RRF.
         hybrid = await search_code(
-            store, embedder, "validate_jwt_expiry", indexed.project_id, channel="hybrid"
+            store, embedder, "validate_jwt_expiry", indexed.project_id, channel="hybrid",
+            gate=None,
         )
         assert hybrid["hits"], "hybrid fusion returned nothing against a real server"
         for hit in hybrid["hits"]:
@@ -173,7 +175,8 @@ async def test_hybrid_path_round_trips_against_a_real_server(tmp_path, store):
 
         # Dense: exercised for wire-format correctness only (see docstring).
         dense = await search_code(
-            store, embedder, "validate_jwt_expiry", indexed.project_id, channel="dense"
+            store, embedder, "validate_jwt_expiry", indexed.project_id, channel="dense",
+            gate=None,
         )
         assert dense["hits"]
     finally:

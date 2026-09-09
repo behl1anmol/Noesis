@@ -17,11 +17,16 @@ MCP endpoint is always `base_url` + `/mcp/` (note the trailing slash).
 
 ```bash
 docker compose up -d                                          # Qdrant on :6333
+uv sync                                                        # install dependencies
+uv run python -m noesis.prefetch                               # one-time asset download
 uv run uvicorn noesis.app:app --host 127.0.0.1 --port 8000    # the service
 ```
 
 If the service is down when the plugin loads, the `noesis:` tools won't connect —
-that's a service problem, not a query problem. Run `scripts/healthcheck.py`.
+that's a service problem, not a query problem. Run `scripts/healthcheck.py`. It also
+reports whether the embedding model's assets are cached — if not, the *first*
+`search_code` call blocks for minutes downloading them instead of the prefetch step
+above having done it up front (issue #47).
 
 ---
 

@@ -497,6 +497,15 @@ class WatcherManager:
                 paths=paths,
                 triggered_by="watcher",
             )
+        except state.IndexCapacityReached as exc:
+            # Same handling as already_running below, and for the same reason:
+            # no run started, so re-arm the quiet-period trigger and do NOT
+            # bump auto_runs. Matching this by exception rather than by status
+            # string is deliberate — a new status value would have fallen
+            # through the check below and been counted as a launch (ADR-85).
+            self._last_event[project_id] = time.monotonic()
+            logger.info("auto-reindex deferred for %s: %s", project_id, exc)
+            return
         except ValueError as exc:
             logger.warning("auto-reindex skipped for %s: %s", project_id, exc)
             return

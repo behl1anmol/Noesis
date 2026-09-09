@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -207,6 +208,63 @@ async def test_close_is_bounded_while_worker_is_stuck_in_model_load():
     assert elapsed < 6.0, f"close() blocked {elapsed:.1f}s on a stuck worker"
     release.set()
     await pending  # abandoned worker still finishes the in-flight job
+
+
+async def test_resolved_device_stays_none_until_model_load_succeeds():
+    """PR #50 review finding 1: ``resolved_device`` (and therefore
+    ``/healthz``'s ``embedder_ready``) must not go truthy while the real
+    ``SentenceTransformer(...)`` constructor is still mid-flight — only
+    ``_default_load`` is exercised here (real ``_load_model`` seam bypassed
+    on purpose), with ``SentenceTransformer`` and ``resolve_device`` stubbed
+    so no network/weights are touched."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class StubSentenceTransformer:
+        def __init__(self, model_id: str, trust_remote_code: bool = True, device=None):
+            started.set()
+            assert release.wait(timeout=5.0), "test never released model"
+
+        def encode(self, texts: list[str]) -> np.ndarray:
+            return np.array([[0.0, 1.0, 2.0, 3.0] for _ in texts])
+
+    with (
+        patch("sentence_transformers.SentenceTransformer", StubSentenceTransformer),
+        patch("noesis.core.compute.resolve_device", return_value="cpu"),
+    ):
+        embedder = LocalSTEmbedder(dim=4)
+        assert embedder.resolved_device is None
+        pending = asyncio.ensure_future(embedder.embed_query("q"))
+        assert await asyncio.to_thread(started.wait, 5.0)
+        # Constructor is mid-flight: must still read as not-ready.
+        assert embedder.resolved_device is None
+        release.set()
+        await pending
+        assert embedder.resolved_device == "cpu"
+        embedder.close()
+
+
+async def test_resolved_device_stays_none_after_failed_load():
+    """Companion to the above: a failed load must not leave
+    ``resolved_device`` truthy either — pre-fix it was set before the
+    constructor ran, so a caller polling ``/healthz`` saw
+    ``embedder_ready: true`` forever after a load that never succeeded."""
+
+    class ExplodingSentenceTransformer:
+        def __init__(self, model_id: str, trust_remote_code: bool = True, device=None):
+            raise OSError("simulated interrupted download")
+
+    with (
+        patch(
+            "sentence_transformers.SentenceTransformer", ExplodingSentenceTransformer
+        ),
+        patch("noesis.core.compute.resolve_device", return_value="cpu"),
+    ):
+        embedder = LocalSTEmbedder(dim=4)
+        with pytest.raises(OSError, match="simulated interrupted download"):
+            await embedder.embed_query("q")
+        assert embedder.resolved_device is None
+        embedder.close()
 
 
 def test_constructor_defaults():

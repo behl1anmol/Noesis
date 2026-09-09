@@ -5,10 +5,17 @@ that spawn local servers (e.g. a Claude Code ``command`` server entry).
 Core resources are built inside the FastMCP lifespan so they live on the
 serving event loop and are torn down on exit. stdio never opens a socket
 except the Qdrant client's localhost connection (CLAUDE.md rule 2).
+
+``--shared`` (ADR-86) runs a thin proxy to one shared server instead of
+building its own resources. Default stays standalone so no existing agent
+configuration changes behaviour; the flag is what a multi-agent setup wants,
+because a standalone process costs ~1.14 GB of unshared model memory and
+every agent pays it again. See ``noesis.mcp.shim``.
 """
 
 from __future__ import annotations
 
+import argparse
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -26,7 +33,34 @@ def main() -> None:
     # to stdout can't receive these records and corrupt the protocol
     # (noesis.logging_config).
     configure_logging(propagate=False)
+    parser = argparse.ArgumentParser(prog="python -m noesis.mcp")
+    parser.add_argument(
+        "--shared",
+        action="store_true",
+        help="proxy to one shared server instead of loading models in this "
+        "process (ADR-86) — what you want when several agents run at once",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="port of the shared server (default: [server] port from config)",
+    )
+    parser.add_argument(
+        "--no-spawn",
+        action="store_true",
+        help="with --shared, fail instead of starting a server when none is "
+        "running",
+    )
+    args = parser.parse_args()
     cfg = load_settings()
+
+    if args.shared:
+        from noesis.mcp.shim import run_shim
+
+        run_shim(args.port or cfg.server.port, spawn=not args.no_spawn)
+        return
+
     ctx_holder: list[AppContext] = []
 
     @asynccontextmanager

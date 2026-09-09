@@ -20,8 +20,19 @@ Python ≥ 3.11 (3.12 targeted), managed by [uv](https://docs.astral.sh/uv/);
 |---|---|
 | `uv run pytest` | full offline suite (~300 tests) — `FakeEmbedder` + in-memory Qdrant, no Docker, no model downloads |
 | `uv run pytest -m integration` | opt-in: loads the real embedding model |
+| `uv run pytest -m server` | opt-in: needs a live Qdrant (`docker compose up -d`) — the concurrency and pin-compatibility proofs that the in-memory client structurally cannot make |
 | `uv run pytest tests/eval/ -m golden -s` | the [evaluation harness](internals/evaluation.md) — self-indexes this repo against the 40-query golden set |
 | `bash .claude/scripts/ci_greps.sh` | guardrail greps (local-only invariants) |
+
+!!! tip "Run the prefetch once before your first suite run"
+
+    `uv run python -m noesis.prefetch` fetches the BM25 tokenizer assets the
+    sparse channel needs. Without them the first indexing run in the suite
+    downloads them inline and can overshoot `test_api.py`'s 5 s wait, failing
+    `test_register_index_search_roundtrip` on a cold cache and passing on the
+    re-run. Nothing is broken when that happens — it is the very cold-start
+    cost [ADR-77](project/decisions.md) exists to remove — but it looks like a
+    flake, and it costs the next contributor an hour.
 
 ## Guardrails enforced in CI
 
@@ -32,6 +43,10 @@ push and pull request:
   `core/reranker.py` ([ADR-33](project/decisions.md))
 - no HTTP client anywhere in `core/` ([ADR-25](project/decisions.md))
 - `127.0.0.1`-only binds — never `0.0.0.0`
+- no `QdrantClient` constructed outside `runtime.py` / `prefetch.py`, and no
+  `models.Document` built outside `VectorStore` / `prefetch.py`
+  ([ADR-83](project/decisions.md)) — who owns the client objects *is* the
+  concurrency design, so both are structural, not stylistic
 - `mcp` pinned `< 2` until the MCP v2 checkpoint decision
 
 ## House rules

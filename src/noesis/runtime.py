@@ -17,11 +17,31 @@ from sqlite3 import Connection
 from qdrant_client import QdrantClient
 
 from noesis.core import state
-from noesis.core.config import IndexingSettings, Settings, StructuralSettings
+from noesis.core.config import (
+    IndexingSettings,
+    Settings,
+    StructuralSettings,
+    available_cpus,
+    derive_query_connections,
+    derive_query_queue_depth,
+)
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
+from noesis.core.search_gate import SearchGate
 from noesis.core.telemetry import QueryTelemetry
 from noesis.core.vectorstore import VectorStore
+
+
+def _default_search_gate() -> SearchGate:
+    """A bounded gate for contexts built by hand (tests, adapters).
+
+    Defaulted rather than left None so there is exactly ONE search path in
+    the codebase — a permanent unbounded fallback would be the old
+    default-executor behaviour surviving under a new name.
+    ``build_runtime_context`` overrides this with a gate sized from the same
+    derived value as the store's query pool, keeping the 1:1 pairing."""
+    connections = derive_query_connections()
+    return SearchGate(connections, derive_query_queue_depth(connections))
 
 
 @dataclass
@@ -53,6 +73,10 @@ class AppContext:
     # can no longer reach anyone else's. Defaulted so every adapter and test
     # that builds an AppContext by hand gets a working writer for free.
     telemetry: QueryTelemetry = field(default_factory=QueryTelemetry)
+    # ADR-84: bounded search executor + fail-fast admission. Same rationale
+    # as ``telemetry`` above for owning it here — its lifecycle must match
+    # the lifecycle that closes it.
+    search_gate: SearchGate = field(default_factory=_default_search_gate)
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
     # M8 (ADR-40): live run progress (jobs.run_progress reads it) and the
     # watcher manager, both owned by the lifespan.
@@ -64,6 +88,12 @@ class AppContext:
     # set_compute_device would silently override it (PR #10 review).
     config_device_pin: str | None = None
     config_reranker_device_pin: str | None = None
+    # ADR-77 (issue #47): background embedder warm-up, kicked off after this
+    # context is built. Tracked here (not ctx.jobs — that dict's keys are
+    # index run_ids and its consumers, e.g. status/progress endpoints, treat
+    # every entry as one) so close_runtime_context can cancel/await it like
+    # any other in-flight work before tearing down the embedder.
+    embedder_warmup: asyncio.Task | None = None
 
 
 async def build_runtime_context(cfg: Settings) -> AppContext:
@@ -110,11 +140,45 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         device=embedder_device,
     )
     log = logging.getLogger(__name__)
+    # Resolved here, not at the use site, so one log line tells an operator
+    # what the machine actually got — a derived value nobody can see is a
+    # value nobody can debug (ADR-83/84).
+    query_connections = derive_query_connections(cfg.qdrant.query_connections)
+    query_queue_depth = derive_query_queue_depth(
+        query_connections, cfg.qdrant.query_queue_depth
+    )
+    log.info(
+        "search concurrency: %d query connections, queue depth %d "
+        "(cpus=%d, %s)",
+        query_connections,
+        query_queue_depth,
+        available_cpus(),
+        "configured"
+        if cfg.qdrant.query_connections is not None
+        else "derived — set [qdrant] query_connections to override",
+    )
     # A silent hang here (Qdrant down/unreachable) is a common false "bug"
     # report — name what we're waiting on before the blocking round-trips.
-    log.info("connecting to Qdrant at %s", cfg.qdrant.url)
+    log.info(
+        "connecting to Qdrant at %s (%d query + 1 index + 1 admin connections, "
+        "ADR-83)",
+        cfg.qdrant.url,
+        query_connections,
+    )
+    # Three roles, deliberately distinct objects (ADR-83):
+    #   admin  — deletes, counts, scroll, retrieve, collection setup. None of
+    #            these build a models.Document, so they need no pool slot and
+    #            must never take one from a query.
+    #   index  — upsert_chunks only, so an index run cannot consume a query
+    #            connection however long its batch runs.
+    #   query  — the pool, one checked out per sparse/hybrid search.
     store = VectorStore(
-        QdrantClient(url=cfg.qdrant.url), collection_name=cfg.qdrant.collection
+        QdrantClient(url=cfg.qdrant.url),
+        collection_name=cfg.qdrant.collection,
+        index_client=QdrantClient(url=cfg.qdrant.url),
+        query_clients=[
+            QdrantClient(url=cfg.qdrant.url) for _ in range(query_connections)
+        ],
     )
     created = store.ensure_collection(embedder)
     if created:
@@ -157,12 +221,15 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
             # loads log their own start/ready lines (core.embedder/reranker).
             log.info("preloading reranker model (may take a while)")
             await reranker.preload()
-    log.info("runtime ready")
-    return AppContext(
+    ctx = AppContext(
         conn=conn,
         store=store,
         embedder=embedder,
         reranker=reranker,
+        # Sized from the SAME derived value as the store's query pool above:
+        # a slot and a connection must be 1:1, or a checked-out search waits
+        # on a connection that no thread is holding, or vice versa (ADR-84).
+        search_gate=SearchGate(query_connections, query_queue_depth),
         rerank_candidates=cfg.reranker.candidates,
         embed_batch_size=cfg.embedder.batch_size,
         structural=cfg.structural,
@@ -171,6 +238,26 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         config_device_pin=cfg.embedder.device,
         config_reranker_device_pin=cfg.reranker.device,
     )
+
+    async def _warm_up_embedder() -> None:
+        # ADR-77 (issue #47): not awaited here — this coroutine runs as a
+        # background task instead, so a multi-minute cold download overlaps
+        # the agent's own setup time rather than delaying the
+        # FastMCP/FastAPI lifespan, which must finish before the server
+        # answers `initialize` (blocking it here would look like a server
+        # that failed to start). Both transports share this function, since
+        # both share build_runtime_context.
+        try:
+            await ctx.embedder.preload()
+            log.info("embedder warm-up complete")
+        except Exception:
+            log.exception(
+                "embedder warm-up failed — will load lazily on first use instead"
+            )
+
+    ctx.embedder_warmup = asyncio.create_task(_warm_up_embedder())
+    log.info("runtime ready")
+    return ctx
 
 
 async def close_runtime_context(ctx: AppContext) -> None:
@@ -182,20 +269,36 @@ async def close_runtime_context(ctx: AppContext) -> None:
     must AWAIT the tasks' unwind before closing anything they touch — closing
     ``conn`` first would make that final write raise ``ProgrammingError`` and
     leave the run row stuck ``running`` (H5). Order: cancel → await → stop
-    model workers → stop the telemetry writer → close SQLite."""
+    model workers → close the Qdrant client(s) → stop the telemetry writer →
+    close SQLite. ``ctx.store.close()`` (ADR-76) closes a pre-existing gap:
+    the QdrantClient(s) were never explicitly closed before, single or
+    split. Each resource's close() is isolated (PR #50 round-3 review): one
+    raising is logged and must not skip the rest, or the telemetry/conn
+    cleanup after them."""
+    import logging
+
+    log = logging.getLogger(__name__)
     tasks = [t for t in ctx.jobs.values() if not t.done()]
+    if ctx.embedder_warmup is not None and not ctx.embedder_warmup.done():
+        tasks.append(ctx.embedder_warmup)
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    for resource in (ctx.embedder, ctx.reranker):
+    # search_gate first: it may still be running a search that holds one of
+    # the store's query connections, and closing the store under it would
+    # pull the connection out from beneath an in-flight call.
+    for resource in (ctx.search_gate, ctx.embedder, ctx.reranker, ctx.store):
         close = getattr(resource, "close", None)
         if close is not None:
             # Each close() joins a worker thread with a 5s bound. Bounded is
             # not the same as free: run it off the loop, or teardown blocks
             # every other task (including the MCP session manager's own
             # shutdown in the combined lifespan) for up to 5s per resource.
-            await asyncio.to_thread(close)
+            try:
+                await asyncio.to_thread(close)
+            except Exception:
+                log.exception("error closing %r during teardown", resource)
     # Same reason, and it must happen here rather than at process exit: the
     # writer holds its own handle to the state DB, which would otherwise
     # outlive ctx.conn and survive a DB-file removal. Scoped to this context's

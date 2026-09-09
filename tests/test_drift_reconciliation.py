@@ -257,6 +257,77 @@ async def test_index_status_exposes_drift(ctx, repo):
     assert status["expected_chunks"] > 0
 
 
+# --- 8b. index_status surfaces embedder warm-up state (PR #50 round-4 review) --
+#
+# ADR row 77 claimed the background warm-up task was "complemented by an
+# assets_ready/warming_up field on the existing status/drift tool" — no such
+# field existed anywhere. index_status is that tool's shared REST/MCP shape
+# (GET /projects/{id}/status and the get_index_status MCP tool both call it),
+# so adding the fields here closes the gap for both surfaces at once, mirroring
+# the assets/embedder_ready fields already on /healthz (ADR rows 78/79).
+
+
+async def test_index_status_reports_embedder_assets_and_readiness(ctx, repo):
+    from unittest.mock import patch
+
+    project_id, _ = await _index(ctx, repo)
+
+    with patch("noesis.prefetch.embedder_assets_ready", return_value=False):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["embedder_assets"] == "missing"
+    # FakeEmbedder has no resolved_device attribute at all — same "not
+    # applicable to this embedder" contract /healthz already uses.
+    assert status["embedder_ready"] == "n/a"
+
+    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["embedder_assets"] == "ready"
+
+
+async def test_index_status_reports_embedder_state_when_never_indexed(ctx, repo):
+    # The never_indexed branch is a separate return statement in
+    # jobs.index_status — must carry the same fields, not just the run branch.
+    from unittest.mock import patch
+
+    project_id = state.register_project(ctx.conn, str(repo), ctx.embedder.model_id)
+
+    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["status"] == "never_indexed"
+    assert status["embedder_assets"] == "ready"
+    assert status["embedder_ready"] == "n/a"
+
+
+# --- 8c. healthz and index_status share ONE readiness implementation --------
+#
+# PR #50 round-5 review: row 81's own rationale claimed this design avoids
+# "a second, possibly-divergent readiness check" against /healthz -- but the
+# two call sites had the same 4 lines pasted in twice, kept in sync only by
+# comparing their output, not by sharing code. Patching the one function they
+# should both call has to move both endpoints together; if either endpoint
+# still computed readiness independently, patching prefetch.embedder_readiness
+# would leave it untouched.
+
+
+async def test_healthz_and_index_status_share_one_readiness_implementation(ctx, repo):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from noesis.api.routes import healthz
+
+    project_id, _ = await _index(ctx, repo)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+
+    with patch("noesis.prefetch.embedder_readiness", return_value=("missing", "n/a")):
+        rest_body = await healthz(request)
+        status = await jobs.index_status(ctx, project_id)
+
+    assert rest_body["assets"] == "missing"
+    assert rest_body["embedder_ready"] == "n/a"
+    assert status["embedder_assets"] == "missing"
+    assert status["embedder_ready"] == "n/a"
+
+
 # --- 9. Drift heal under a live git fast path (PR #20 review finding #1) ------
 
 

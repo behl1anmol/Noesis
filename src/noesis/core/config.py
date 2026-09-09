@@ -109,11 +109,22 @@ class IndexingSettings:
     be walked before the paths it hides stop being re-queued for retry.
 
     ``0`` disables each independently, restoring the pre-ADR-56 behaviour.
+
+    ``max_concurrent_index_runs`` (ADR-85) caps index runs across the whole
+    machine, not per project — ``try_start_run`` already guarantees one run
+    per project, and this bounds how many projects may run at once. The
+    default of 4 is a judgment call, NOT a measurement: concurrent runs
+    serialize on the single embedder worker (ADR-20) regardless, so a larger
+    number buys no indexing throughput and only multiplies simultaneous file
+    walks, open descriptors and executor pressure; a value of 1 would be a
+    visible behaviour change, since today a second project need not wait
+    behind a long run. Set it explicitly if your machine says otherwise.
     """
 
     promote_after_scoped_runs: int = 20
     promote_candidate_fraction: float = 0.25
     unwalkable_quarantine_runs: int = 5
+    max_concurrent_index_runs: int = 4
 
 
 @dataclass(frozen=True)
@@ -127,9 +138,100 @@ class WatcherSettings:
 
 
 @dataclass(frozen=True)
+class ServerSettings:
+    """§3.8 ``[server]``. Only the port is configurable: the host is fixed at
+    127.0.0.1 by CLAUDE.md rule 2, and exposing it as a knob would make a
+    wildcard bind one config edit away. The shim (ADR-86) reads this to know
+    where to find — or start — the shared server, so the port has to live
+    somewhere both it and the operator agree on."""
+
+    port: int = 8000
+
+
+@dataclass(frozen=True)
 class QdrantSettings:
+    """§3.3 ``[qdrant]``.
+
+    ``query_connections`` sizes the search connection pool and, 1:1, the
+    search executor's slots (ADR-83/84). ``None`` means derive from the
+    machine — the same "None means auto" convention ``embedder.device``
+    already uses — because the right value is a property of the host, not
+    of the project. See ``derive_query_connections`` for the rule and the
+    measurements behind it. Set it explicitly to override on a machine
+    whose shape the rule guesses wrong.
+
+    ``query_queue_depth`` bounds how many searches may WAIT for a slot
+    before the service starts rejecting instead of queueing without limit.
+    ``None`` derives it from ``query_connections``."""
+
     url: str = DEFAULT_QUERY_URL
     collection: str = "noesis_chunks"
+    query_connections: int | None = None
+    query_queue_depth: int | None = None
+
+
+def available_cpus() -> int:
+    """CPUs this process may actually run on.
+
+    ``os.cpu_count()`` reports the host's CPUs, which is wrong inside a
+    cgroup-limited container — it would size the pool for hardware the
+    process cannot use. ``sched_getaffinity`` reports the real allowance
+    where it exists (Linux); everything else falls back."""
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is not None:
+        try:
+            return max(1, len(getaffinity(0)))
+        except OSError:
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
+# Bounds for the derived pool size. The floor is measured: K=1 costs ~33%
+# throughput (258 q/s vs 384) because a single connection cannot overlap a
+# query with the next one's round trip. The ceiling is a judgment call, not
+# a measurement — see derive_query_connections.
+_MIN_QUERY_CONNECTIONS = 2
+_MAX_QUERY_CONNECTIONS = 8
+# Waiters allowed per slot before rejecting. Four keeps a burst absorbable
+# while bounding the wait a caller can be made to sit through to roughly
+# four service times — tens of milliseconds at measured p50 — rather than
+# letting an unbounded queue turn overload into an unbounded stall, which
+# is the failure mode this whole change exists to remove.
+_QUEUE_DEPTH_PER_CONNECTION = 4
+
+
+def derive_query_connections(configured: int | None = None) -> int:
+    """Resolve the search pool size; *configured* wins when given.
+
+    Rule: ``clamp(available_cpus(), 2, 8)``.
+
+    Measured on a 4-CPU box, 16 concurrent searches, 5,000 points, hybrid,
+    prefetch 50, against a live Qdrant 1.18.3 — throughput saturates
+    exactly at ``cpu_count`` and stays flat well past it while latency
+    climbs monotonically:
+
+        K=1  258 q/s  p95  4.7ms     K=6   375 q/s  p95 23.7ms
+        K=2  353 q/s  p95  8.1ms     K=8   375 q/s  p95 33.3ms
+        K=4  384 q/s  p95 16.0ms     K=12  379 q/s  p95 48.4ms
+
+    The knee sits at the CPU count because Qdrant is co-resident and
+    competing for the same cores: past it, queries queue inside Qdrant
+    instead of in our pool, buying latency for no throughput.
+
+    The ceiling of 8 is explicitly NOT measured — a bigger box was not
+    available — which is precisely why the override exists."""
+    if configured is not None:
+        return configured
+    return max(
+        _MIN_QUERY_CONNECTIONS, min(_MAX_QUERY_CONNECTIONS, available_cpus())
+    )
+
+
+def derive_query_queue_depth(connections: int, configured: int | None = None) -> int:
+    """Resolve how many searches may queue for a slot; *configured* wins."""
+    if configured is not None:
+        return configured
+    return connections * _QUEUE_DEPTH_PER_CONNECTION
 
 
 @dataclass(frozen=True)
@@ -142,6 +244,7 @@ class Settings:
     watcher: WatcherSettings = field(default_factory=WatcherSettings)
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
+    server: ServerSettings = field(default_factory=ServerSettings)
 
 
 def _require_bool(value: object, key: str) -> bool:
@@ -171,6 +274,15 @@ def _require_non_negative_int(value: object, key: str) -> int:
     if n < 0:
         raise ValueError(f"config field {key!r} must be >= 0, got {n!r}")
     return n
+
+
+def _optional_positive_int(value: object, key: str) -> int | None:
+    """A knob whose absence means "derive it". Distinguishes "not set" from
+    a set-but-invalid value, which must still be rejected loudly rather
+    than silently falling back to the derived default."""
+    if value is None:
+        return None
+    return _require_positive_int(value, key)
 
 
 def _require_fraction(value: object, key: str) -> float:
@@ -211,6 +323,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     wat = raw.get("watcher", {})
     idx = raw.get("indexing", {})
     qdr = raw.get("qdrant", {})
+    srv = raw.get("server", {})
     raw_db = raw.get("db_path")
     if raw_db is None:
         db_path = default_db_path()
@@ -292,9 +405,27 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
                 ),
                 "indexing.unwalkable_quarantine_runs",
             ),
+            max_concurrent_index_runs=_require_positive_int(
+                idx.get(
+                    "max_concurrent_index_runs",
+                    IndexingSettings.max_concurrent_index_runs,
+                ),
+                "indexing.max_concurrent_index_runs",
+            ),
         ),
         qdrant=QdrantSettings(
             url=qdr.get("url", QdrantSettings.url),
             collection=qdr.get("collection", QdrantSettings.collection),
+            query_connections=_optional_positive_int(
+                qdr.get("query_connections"), "qdrant.query_connections"
+            ),
+            query_queue_depth=_optional_positive_int(
+                qdr.get("query_queue_depth"), "qdrant.query_queue_depth"
+            ),
+        ),
+        server=ServerSettings(
+            port=_require_positive_int(
+                srv.get("port", ServerSettings.port), "server.port"
+            ),
         ),
     )
