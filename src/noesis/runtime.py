@@ -27,8 +27,21 @@ from noesis.core.config import (
 )
 from noesis.core.embedder import Embedder, LocalSTEmbedder
 from noesis.core.reranker import LocalCrossEncoderReranker, Reranker
+from noesis.core.search_gate import SearchGate
 from noesis.core.telemetry import QueryTelemetry
 from noesis.core.vectorstore import VectorStore
+
+
+def _default_search_gate() -> SearchGate:
+    """A bounded gate for contexts built by hand (tests, adapters).
+
+    Defaulted rather than left None so there is exactly ONE search path in
+    the codebase — a permanent unbounded fallback would be the old
+    default-executor behaviour surviving under a new name.
+    ``build_runtime_context`` overrides this with a gate sized from the same
+    derived value as the store's query pool, keeping the 1:1 pairing."""
+    connections = derive_query_connections()
+    return SearchGate(connections, derive_query_queue_depth(connections))
 
 
 @dataclass
@@ -60,6 +73,10 @@ class AppContext:
     # can no longer reach anyone else's. Defaulted so every adapter and test
     # that builds an AppContext by hand gets a working writer for free.
     telemetry: QueryTelemetry = field(default_factory=QueryTelemetry)
+    # ADR-84: bounded search executor + fail-fast admission. Same rationale
+    # as ``telemetry`` above for owning it here — its lifecycle must match
+    # the lifecycle that closes it.
+    search_gate: SearchGate = field(default_factory=_default_search_gate)
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
     # M8 (ADR-40): live run progress (jobs.run_progress reads it) and the
     # watcher manager, both owned by the lifespan.
@@ -209,6 +226,10 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         store=store,
         embedder=embedder,
         reranker=reranker,
+        # Sized from the SAME derived value as the store's query pool above:
+        # a slot and a connection must be 1:1, or a checked-out search waits
+        # on a connection that no thread is holding, or vice versa (ADR-84).
+        search_gate=SearchGate(query_connections, query_queue_depth),
         rerank_candidates=cfg.reranker.candidates,
         embed_batch_size=cfg.embedder.batch_size,
         structural=cfg.structural,
@@ -264,7 +285,10 @@ async def close_runtime_context(ctx: AppContext) -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    for resource in (ctx.embedder, ctx.reranker, ctx.store):
+    # search_gate first: it may still be running a search that holds one of
+    # the store's query connections, and closing the store under it would
+    # pull the connection out from beneath an in-flight call.
+    for resource in (ctx.search_gate, ctx.embedder, ctx.reranker, ctx.store):
         close = getattr(resource, "close", None)
         if close is not None:
             # Each close() joins a worker thread with a 5s bound. Bounded is

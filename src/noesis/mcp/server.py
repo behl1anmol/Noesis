@@ -24,6 +24,7 @@ from pydantic import Field
 
 from noesis.core import jobs, state
 from noesis.core import retriever
+from noesis.core.search_gate import SearchOverloaded
 from noesis.core import structural as structural_mod
 
 
@@ -62,18 +63,25 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
         if state.get_project(ctx.conn, project_id) is None:
             raise ToolError("unknown project_id")
         t0 = time.perf_counter()
-        result = await retriever.search_code(
-            ctx.store,
-            ctx.embedder,
-            query,
-            project_id,
-            top_k=top_k,
-            language=language,
-            channel=channel,
-            reranker=ctx.reranker,
-            rerank=rerank,
-            candidates=ctx.rerank_candidates,
-        )
+        try:
+            result = await retriever.search_code(
+                ctx.store,
+                ctx.embedder,
+                query,
+                project_id,
+                top_k=top_k,
+                language=language,
+                channel=channel,
+                reranker=ctx.reranker,
+                rerank=rerank,
+                candidates=ctx.rerank_candidates,
+                gate=ctx.search_gate,
+            )
+        except SearchOverloaded as exc:
+            # MCP has no status codes, so the agent-facing equivalent of a
+            # 429 is a ToolError whose text says what happened, that nothing
+            # failed, what to do now, and which knob changes it (ADR-84).
+            raise ToolError(exc.agent_message()) from exc
         await ctx.telemetry.record_query(
             ctx.conn,
             interface="mcp",

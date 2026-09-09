@@ -430,7 +430,8 @@ structural_patterns:
     language: python
     expected:
       # 7 since M6: status/reindex endpoints added 404 + 404/409 raises.
-      src/noesis/api/routes.py: 7
+      # 8 since ADR-84: /search raises 429 when the search gate is saturated.
+      src/noesis/api/routes.py: 8
       # M8 dashboard adapter + ADR-42 register/browse/preview + ADR-43 delete.
       src/noesis/api/dashboard.py: 10
       # L5: the localhost-CSRF guard raises one 403.
@@ -458,6 +459,9 @@ structural_patterns:
       src/noesis/core/structural.py: 1
       # ADR-42: preview runs discovery in an executor to keep the loop free.
       src/noesis/core/dashboard.py: 1
+      # ADR-84: the search gate dispatches onto its own bounded executor
+      # rather than the process-wide default one.
+      src/noesis/core/search_gate.py: 1
 
   - id: sp-09
     pattern: "uuid.uuid4()"

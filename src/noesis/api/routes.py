@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from noesis.api.security import verify_local_origin
 from noesis.core import jobs, state
 from noesis.core.retriever import search_code
+from noesis.core.search_gate import SearchOverloaded
 from noesis.core.state import MixedModelError
 from noesis.core.structural import StructuralSearchError, structural_search
 from noesis.core.vectorstore import SearchChannel
@@ -162,18 +163,30 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
     if state.get_project(ctx.conn, req.project_id) is None:
         raise HTTPException(status_code=404, detail="unknown project_id")
     t0 = time.perf_counter()
-    result = await search_code(
-        ctx.store,
-        ctx.embedder,
-        req.query,
-        req.project_id,
-        top_k=req.top_k,
-        language=req.language,
-        channel=req.channel,
-        reranker=ctx.reranker,
-        rerank=req.rerank,
-        candidates=ctx.rerank_candidates,
-    )
+    try:
+        result = await search_code(
+            ctx.store,
+            ctx.embedder,
+            req.query,
+            req.project_id,
+            top_k=req.top_k,
+            language=req.language,
+            channel=req.channel,
+            reranker=ctx.reranker,
+            rerank=req.rerank,
+            candidates=ctx.rerank_candidates,
+            gate=ctx.search_gate,
+        )
+    except SearchOverloaded as exc:
+        # 429, not 503 (ADR-84): 503 is also what a dead or unreachable
+        # server returns, and a client that cannot tell "busy" from "down"
+        # retries the wrong way. Connection-refused and a failing /healthz
+        # already mean down; this means slow down.
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     await ctx.telemetry.record_query(
         ctx.conn,
         interface="rest",
