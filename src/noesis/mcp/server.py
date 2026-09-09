@@ -208,6 +208,10 @@ def build_mcp(get_ctx: Callable[[], Any], *, lifespan: Any | None = None) -> Fas
             # dashboard-only operator cannot reach the escape (PR #24 round-7
             # review). `docs/reference/dashboard.md` points them at the curl.
             return jobs.launch_index_run(ctx, project["root_path"])
+        except state.IndexCapacityReached as exc:
+            # Agent-readable equivalent of a 429 (ADR-85): says nothing was
+            # started, so the agent retries rather than assuming it is queued.
+            raise ToolError(exc.agent_message()) from exc
         except ValueError as exc:  # mixed-model guard
             raise ToolError(str(exc)) from exc
 

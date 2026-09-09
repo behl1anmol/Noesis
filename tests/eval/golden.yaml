@@ -431,9 +431,11 @@ structural_patterns:
     expected:
       # 7 since M6: status/reindex endpoints added 404 + 404/409 raises.
       # 8 since ADR-84: /search raises 429 when the search gate is saturated.
-      src/noesis/api/routes.py: 8
+      # 10 since ADR-85: both launch endpoints raise 429 at index capacity.
+      src/noesis/api/routes.py: 10
       # M8 dashboard adapter + ADR-42 register/browse/preview + ADR-43 delete.
-      src/noesis/api/dashboard.py: 10
+      # 11 since ADR-85: reindex-pending raises 429 at index capacity.
+      src/noesis/api/dashboard.py: 11
       # L5: the localhost-CSRF guard raises one 403.
       src/noesis/api/security.py: 1
 
@@ -447,7 +449,10 @@ structural_patterns:
       # M8: live progress clock (jobs) + debounce/quiet clocks (watcher).
       src/noesis/core/jobs.py: 2
       # H3 added the re-arm clock in _launch_scoped, bringing watcher to 3.
-      src/noesis/core/watcher.py: 3
+      # 4 since ADR-85: the auto-reindex path re-arms its quiet-period
+      # trigger when a launch is refused for capacity, as it already did for
+      # a launch refused because a run was in flight.
+      src/noesis/core/watcher.py: 4
       # flush()'s deadline: one to set it, two to read what is left of it
       # while it retries a barrier into a full queue (PR #24 round-6 review).
       src/noesis/core/telemetry.py: 3

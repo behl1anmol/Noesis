@@ -391,7 +391,9 @@ def set_project_flags(
                     paths=[p["path"] for p in pending],
                     triggered_by="watcher",
                 )
-            except ValueError as exc:
+            except (ValueError, state.IndexCapacityReached) as exc:
+                # Best effort by design: the flag change the operator asked
+                # for must succeed even when the catch-up run cannot start.
                 logger.warning("catch-up reindex skipped: %s", exc)
     refreshed = state.get_project(ctx.conn, project_id)
     assert refreshed is not None
@@ -657,7 +659,15 @@ def register_project(
         watcher.set_watch(project_id, watch)
     run: dict[str, Any] | None = None
     if index_now:
-        run = jobs.launch_index_run(ctx, root_path, triggered_by="manual")
+        try:
+            run = jobs.launch_index_run(ctx, root_path, triggered_by="manual")
+        except state.IndexCapacityReached as exc:
+            # The project is already registered by this point. Failing the
+            # whole request would leave the operator with a registered
+            # project and an error, so report no run instead — the same
+            # outcome as index_now=False, which the UI already renders, and
+            # the Reindex button covers the retry.
+            logger.warning("register: initial index run not started: %s", exc)
     project = state.get_project(ctx.conn, project_id)
     assert project is not None
     return {"project": _project_summary(ctx, project), "run": run}

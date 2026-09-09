@@ -92,6 +92,15 @@ async def register_and_index(
     ctx = request.app.state.ctx
     try:
         return jobs.launch_index_run(ctx, req.root_path)
+    except state.IndexCapacityReached as exc:
+        # 429 for the same reason /search uses it (ADR-84/85): the machine is
+        # busy, nothing failed, and 503 would be indistinguishable from the
+        # server being down.
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     except ValueError as exc:
         # Typed, not text-matched (M3): the mixed-model guard is a real 409
         # Conflict ("re-index required"), but a missing/non-directory path is
@@ -135,6 +144,15 @@ async def reindex(
         raise HTTPException(status_code=404, detail="unknown project_id")
     try:
         return jobs.launch_index_run(ctx, project["root_path"], force=force)
+    except state.IndexCapacityReached as exc:
+        # 429 for the same reason /search uses it (ADR-84/85): the machine is
+        # busy, nothing failed, and 503 would be indistinguishable from the
+        # server being down.
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     except ValueError as exc:
         # Mixed-model guard → 409; a vanished root_path → 400 (M3).
         status = 409 if isinstance(exc, MixedModelError) else 400

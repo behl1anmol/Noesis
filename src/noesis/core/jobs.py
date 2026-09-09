@@ -190,8 +190,16 @@ def launch_index_run(
     # dual-transport deployment (HTTP + stdio MCP sharing this DB), where two
     # near-simultaneous launches could both pass the check and race two index
     # runs onto the same collection.
+    # max_concurrent (ADR-85) is enforced inside that same transaction, the
+    # only place a cap can be atomic across the HTTP + stdio deployment.
+    # It raises IndexCapacityReached rather than returning a status; every
+    # caller of this function handles it explicitly.
     run_id, created = state.try_start_run(
-        ctx.conn, project_id, triggered_by=triggered_by, scoped=paths is not None
+        ctx.conn,
+        project_id,
+        triggered_by=triggered_by,
+        scoped=paths is not None,
+        max_concurrent=ctx.indexing.max_concurrent_index_runs,
     )
     if not created:
         return {

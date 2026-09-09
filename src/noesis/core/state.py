@@ -624,12 +624,42 @@ def start_run(
     return run_id
 
 
+class IndexCapacityReached(Exception):
+    """Raised by ``try_start_run`` when the machine-wide cap is already met.
+
+    A distinct exception rather than a third return status, deliberately: the
+    watcher's re-arm path matches the ``already_running`` status by string, so
+    a new status value would have fallen through it silently — counting a run
+    that never started and leaving pending files stuck. An unhandled exception
+    is loud; a silently mishandled status is the bug this whole change is
+    about."""
+
+    def __init__(self, running: int, limit: int) -> None:
+        self.running = running
+        self.limit = limit
+        self.retry_after_seconds = 30
+        super().__init__(
+            f"index capacity reached: {running} runs already in flight, "
+            f"limit {limit}"
+        )
+
+    def agent_message(self) -> str:
+        return (
+            f"Noesis is at indexing capacity — {self.running} index runs are "
+            f"already in flight against a limit of {self.limit}. Nothing "
+            f"failed and nothing was started; this project was not queued. "
+            f"Retry once a run finishes, or raise "
+            f"[indexing] max_concurrent_index_runs in config.toml."
+        )
+
+
 def try_start_run(
     conn: sqlite3.Connection,
     project_id: str,
     *,
     triggered_by: str = "manual",
     scoped: bool = False,
+    max_concurrent: int | None = None,
 ) -> tuple[str, bool]:
     """Atomically open a run — or return the one already running.
 
@@ -644,17 +674,33 @@ def try_start_run(
     Returns ``(run_id, created)`` — ``created`` False means a live run
     already exists and ``run_id`` is that run's id.
 
+    *max_concurrent* (ADR-85) caps how many runs may be alive across the
+    WHOLE machine, not per project. It is enforced here rather than in
+    ``jobs.launch_index_run`` because only this transaction is atomic across
+    processes: an ``asyncio.Semaphore`` would bound one process while the
+    co-process proceeds unaware, which for the documented HTTP + stdio
+    deployment is no cap at all. ``None`` means uncapped, which keeps every
+    direct caller (``indexer.prepare_run``, tests) behaving exactly as
+    before — only ``launch_index_run`` passes a limit, because it is the
+    fan-out path where N projects can pile up.
+
+    The running-row scan is global for the same reason, so the dead-owner
+    cleanup now covers other projects' orphans too. That is the same
+    operation ``fail_orphaned_runs`` already performs at startup, and it has
+    to happen here or a crashed co-process's stale row would count against
+    the cap until the next restart.
+
     *scoped* records whether this run was given an explicit candidate set,
     written at INSERT rather than at ``finish_run`` so a run that crashes still
     counts toward the promotion trigger (ADR-57) — otherwise a project that
     keeps dying mid-run would never promote.
     """
     conn.execute("BEGIN IMMEDIATE")
+    at_capacity: IndexCapacityReached | None = None
     try:
         rows = conn.execute(
-            "SELECT id, owner FROM index_runs WHERE project_id = ?"
-            " AND status = 'running' ORDER BY started_at DESC, rowid DESC",
-            (project_id,),
+            "SELECT id, project_id, owner FROM index_runs"
+            " WHERE status = 'running' ORDER BY started_at DESC, rowid DESC",
         ).fetchall()
         alive: list[sqlite3.Row] = []
         dead: list[sqlite3.Row] = []
@@ -671,23 +717,35 @@ def try_start_run(
                 " finished_at = ? WHERE id = ?",
                 [(now, r["id"]) for r in dead],
             )
-        if alive:
+        mine = [r for r in alive if r["project_id"] == project_id]
+        if mine or (max_concurrent is not None and len(alive) >= max_concurrent):
             if dead:
                 conn.commit()  # persist the dead-row cleanup; releases the lock
             else:
                 conn.rollback()  # nothing written; release the lock
-            return alive[0]["id"], False
-        run_id = uuid.uuid4().hex
-        conn.execute(
-            "INSERT INTO index_runs (id, project_id, status, started_at,"
-            " triggered_by, owner, scoped) VALUES (?, ?, 'running', ?, ?, ?, ?)",
-            (run_id, project_id, _now(), triggered_by, _OWNER, int(scoped)),
-        )
-        conn.commit()
-        return run_id, True
+            if mine:
+                # This project's own run wins over the cap: the caller asked
+                # about work that is already happening, which is a truthful
+                # "already running", not a refusal.
+                return mine[0]["id"], False
+            at_capacity = IndexCapacityReached(
+                running=len(alive), limit=max_concurrent
+            )
+        else:
+            run_id = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO index_runs (id, project_id, status, started_at,"
+                " triggered_by, owner, scoped) VALUES (?, ?, 'running', ?, ?, ?, ?)",
+                (run_id, project_id, _now(), triggered_by, _OWNER, int(scoped)),
+            )
+            conn.commit()
+            return run_id, True
     except BaseException:
         conn.rollback()
         raise
+    # Raised outside the try so the handler above cannot roll back a
+    # transaction this branch has already settled.
+    raise at_capacity
 
 
 def get_latest_run(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row | None:

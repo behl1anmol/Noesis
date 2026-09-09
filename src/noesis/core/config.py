@@ -109,11 +109,22 @@ class IndexingSettings:
     be walked before the paths it hides stop being re-queued for retry.
 
     ``0`` disables each independently, restoring the pre-ADR-56 behaviour.
+
+    ``max_concurrent_index_runs`` (ADR-85) caps index runs across the whole
+    machine, not per project — ``try_start_run`` already guarantees one run
+    per project, and this bounds how many projects may run at once. The
+    default of 4 is a judgment call, NOT a measurement: concurrent runs
+    serialize on the single embedder worker (ADR-20) regardless, so a larger
+    number buys no indexing throughput and only multiplies simultaneous file
+    walks, open descriptors and executor pressure; a value of 1 would be a
+    visible behaviour change, since today a second project need not wait
+    behind a long run. Set it explicitly if your machine says otherwise.
     """
 
     promote_after_scoped_runs: int = 20
     promote_candidate_fraction: float = 0.25
     unwalkable_quarantine_runs: int = 5
+    max_concurrent_index_runs: int = 4
 
 
 @dataclass(frozen=True)
@@ -380,6 +391,13 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
                     IndexingSettings.unwalkable_quarantine_runs,
                 ),
                 "indexing.unwalkable_quarantine_runs",
+            ),
+            max_concurrent_index_runs=_require_positive_int(
+                idx.get(
+                    "max_concurrent_index_runs",
+                    IndexingSettings.max_concurrent_index_runs,
+                ),
+                "indexing.max_concurrent_index_runs",
             ),
         ),
         qdrant=QdrantSettings(

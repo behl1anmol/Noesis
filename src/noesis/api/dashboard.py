@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from noesis.api.security import verify_local_origin
 from noesis.core import dashboard as core_dashboard
-from noesis.core.state import MixedModelError
+from noesis.core.state import IndexCapacityReached, MixedModelError
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -183,6 +183,12 @@ async def api_set_flags(
 async def api_reindex_pending(project_id: str, request: Request) -> dict[str, Any]:
     try:
         result = core_dashboard.reindex_pending(request.app.state.ctx, project_id)
+    except IndexCapacityReached as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     except ValueError as exc:
         # Same typed split as /projects (M3): mixed-model → 409, a root that
         # vanished since registration → 400.
