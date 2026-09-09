@@ -87,7 +87,20 @@ class SearchGate:
 
     ``connections`` slots run concurrently; ``queue_depth`` more may wait.
     Anything beyond that is refused. ``connections`` must match the size of
-    ``VectorStore``'s query pool — pass both from the same derived value."""
+    ``VectorStore``'s query pool — pass both from the same derived value.
+
+    That pairing is a requirement, not a description, and it holds only on
+    the production path. ``build_runtime_context`` sizes this gate and the
+    store's pool from one derived number, so a free slot always implies a
+    free connection and a checkout never waits. A hand-built ``AppContext``
+    (tests, adapters) gets a gate sized to the machine but a ``VectorStore``
+    whose pool falls back to a single client, so K slots contend for one
+    connection and the bounded wait degrades into an unbounded block inside
+    ``queue.Queue.get()``. Harmless where it occurs — those contexts do not
+    serve concurrent agents — but do not read the invariant as unconditional
+    (PR #50 round-7 review). Such contexts also never reach
+    ``close_runtime_context``, so their executors are not closed; the threads
+    are only created on first use, so an unused gate costs nothing."""
 
     def __init__(self, connections: int, queue_depth: int) -> None:
         if connections < 1:

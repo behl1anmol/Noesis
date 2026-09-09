@@ -561,7 +561,12 @@ class VectorStore:
             # connection nor a lock (ADR-83; verified by instrumenting
             # ModelEmbedder — zero accumulate/drain calls for dense).
             # Deliberately left on ``client`` so a dense-only caller (the
-            # eval harness's baseline channels) never contends for a slot.
+            # eval harness's baseline channels) never contends for a
+            # CONNECTION. It does still take an executor slot: the gate wraps
+            # every channel, and that is correct — a dense query is a real
+            # round trip to a co-resident Qdrant and belongs inside the bound.
+            # An earlier wording here said "slot" and seeded a false claim in
+            # the architecture doc (PR #50 round-7 review).
             response = self._client.query_points(
                 collection_name=self._collection,
                 query=dense_vector,
