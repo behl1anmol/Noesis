@@ -1,0 +1,815 @@
+<title>One Server, Many Agents</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+  :root {
+    --ground: #EDF1F0; --surface: #FFFFFF; --surface-2: #E3E9E8;
+    --ink: #131A1D; --ink-2: #3D4B50; --muted: #64757A;
+    --rule: #C9D4D2; --rule-soft: #DCE4E2;
+    --accent: #0C6E6B; --accent-soft: #D6EAE7;
+    --danger: #A93A22; --danger-soft: #F6DFD8;
+    --warn: #8A6206; --warn-soft: #F5E7C8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0E1518; --surface: #161F23; --surface-2: #1E2A2F;
+      --ink: #E2EAE9; --ink-2: #BCC9CA; --muted: #8B9EA1;
+      --rule: #2C3A3F; --rule-soft: #223035;
+      --accent: #4FD1C5; --accent-soft: #14312F;
+      --danger: #F0876A; --danger-soft: #3A1F17;
+      --warn: #E3B563; --warn-soft: #35290F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0E1518; --surface: #161F23; --surface-2: #1E2A2F;
+    --ink: #E2EAE9; --ink-2: #BCC9CA; --muted: #8B9EA1;
+    --rule: #2C3A3F; --rule-soft: #223035;
+    --accent: #4FD1C5; --accent-soft: #14312F;
+    --danger: #F0876A; --danger-soft: #3A1F17;
+    --warn: #E3B563; --warn-soft: #35290F;
+  }
+
+  body { background: var(--ground); color: var(--ink);
+    font-family: "IBM Plex Serif", Georgia, serif; font-size: 16.5px; line-height: 1.62; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 40px 24px 96px; }
+  .col { max-width: 68ch; }
+
+  h1, h2, h3, .eyebrow, th, .label { font-family: "IBM Plex Sans", system-ui, sans-serif; }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.08; font-weight: 700;
+    letter-spacing: -.022em; margin: 0 0 14px; text-wrap: balance; }
+  h2 { font-size: 23px; font-weight: 600; letter-spacing: -.012em; margin: 0 0 6px; text-wrap: balance; }
+  h3 { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
+  p { margin: 0 0 15px; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .88em; }
+  code { background: var(--surface-2); padding: .12em .34em; border-radius: 3px; }
+  .eyebrow { font-size: 11.5px; font-weight: 600; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted); }
+
+  header.masthead { border-bottom: 2px solid var(--ink); padding-bottom: 26px; margin-bottom: 34px; }
+  .standfirst { font-size: 19px; line-height: 1.5; color: var(--ink-2); max-width: 62ch; margin: 0; }
+
+  section { margin: 0 0 54px; }
+  .sec-head { display: flex; gap: 14px; align-items: baseline; margin-bottom: 16px; }
+  .sec-num { font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 500;
+    color: var(--accent); flex: none; padding-top: 3px; }
+
+  figure { margin: 26px 0; }
+  figure svg { display: block; width: 100%; height: auto; }
+  .figframe { background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 4px; padding: 20px 18px 12px; overflow-x: auto; }
+  figcaption { font-size: 13.5px; color: var(--muted); margin-top: 12px;
+    line-height: 1.5; max-width: 78ch; }
+
+  .tablewrap { overflow-x: auto; margin: 22px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 540px; }
+  th { text-align: left; font-size: 11.5px; font-weight: 600; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--rule); padding: 0 12px 7px 0; }
+  td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top; font-family: "IBM Plex Sans", sans-serif; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
+    font-family: "IBM Plex Mono", monospace; }
+  tr.bad td { color: var(--danger); }
+  tr.win td { color: var(--accent); font-weight: 500; }
+
+  .callout { border-left: 3px solid var(--accent); background: var(--surface);
+    padding: 16px 18px; margin: 22px 0; border-radius: 0 4px 4px 0; }
+  .callout.alarm { border-left-color: var(--danger); }
+  .callout.flip { border-left-color: var(--warn); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .label { font-size: 11.5px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 5px; }
+
+  pre { background: var(--surface); border: 1px solid var(--rule); border-radius: 4px;
+    padding: 14px 16px; overflow-x: auto; font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px; line-height: 1.6; margin: 18px 0; color: var(--ink-2); }
+  pre b { color: var(--ink); font-weight: 600; }
+  pre .add { color: var(--accent); }
+
+  ul.plain { padding-left: 18px; margin: 12px 0; }
+  ul.plain li { margin-bottom: 7px; }
+  .qbox { background: var(--warn-soft); border: 1px solid var(--warn);
+    border-radius: 4px; padding: 16px 18px; margin: 14px 0; }
+  .qbox h3 { color: var(--warn); }
+  .qbox p { margin-bottom: 0; font-size: 15px; }
+  .divider { border: 0; border-top: 1px solid var(--rule); margin: 0 0 40px; }
+  .footnote { font-size: 13.5px; color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">Noesis &middot; target concurrency architecture &middot; for approval</div>
+  <h1>One server, many agents</h1>
+  <p class="standfirst">
+    Four things bound this system: how many searches run at once, how many connections
+    exist, how many index runs are in flight, and how many processes hold a copy of the
+    model. Today only the last one is even counted &mdash; and it is the expensive one.
+  </p>
+</header>
+
+<div class="col">
+  <p>
+    Two of the assumptions behind the earlier plan turned out to be wrong when measured.
+    Both corrections are below, and both change the design. Everything here ran on this
+    machine against a live Qdrant 1.18.3 and a real model load.
+  </p>
+</div>
+
+<hr class="divider">
+
+<!-- ===== 1. CORRECTIONS ===== -->
+<section>
+  <div class="sec-head">
+    <div class="sec-num">01</div>
+    <div>
+      <h2>Two corrections before the architecture</h2>
+      <div class="eyebrow">Both were my own assumptions; both were falsified</div>
+    </div>
+  </div>
+
+  <div class="callout flip">
+    <span class="label">Correction 1 &mdash; client-per-thread was the wrong recommendation</span>
+    <p>
+      I previously leaned toward one connection per worker thread. A <b>bounded pool of 4</b>
+      beats it, and beats today's unsafe code, on throughput, p95 and p99 simultaneously
+      &mdash; because a bounded pool is also <em>admission control</em>. Capping concurrent
+      queries stops Qdrant and the GIL thrashing, so latency stays flat as agents scale.
+      Thread-per-agent is what produces a 1.2-second tail.
+    </p>
+  </div>
+
+  <div class="callout flip">
+    <span class="label">Correction 2 &mdash; the re-download you were worried about is not happening</span>
+    <p>
+      Model weights are cached on disk once and shared by every process. Measured:
+      first process 98.5&nbsp;s (download + load), second process on the same cache
+      <b>11.7&nbsp;s with zero bytes fetched</b>; four processes cold-starting
+      simultaneously against one empty cache all succeeded, producing one shared cache.
+      The repo already fixed the one real instance of this &mdash; the pre-M8
+      cwd-relative fastembed path, documented in <code>default_fastembed_cache</code>.
+    </p>
+    <p>
+      But the thing I expected to save you does not exist. I assumed weights would be
+      <code>mmap</code>&rsquo;d from that shared cache, so the OS page cache would share
+      them across agents. Measured across two concurrent processes:
+      <code>Shared_File = 0&nbsp;MB</code>, private memory 976&nbsp;MB each. The weights land
+      in private tensors. <b>Sharing the cache saves disk and download time; it saves no
+      RAM at all.</b>
+    </p>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Measured</th><th class="num">1 agent process</th><th class="num">2 concurrent</th><th>What it means</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Resident memory (RSS)</td><td class="num">1342 MB</td><td class="num">1305 MB each</td><td>Embedder only. Reranker is opt-in and adds more.</td></tr>
+        <tr class="bad"><td>Unshared share (PSS)</td><td class="num">1340 MB</td><td class="num">1140 MB each</td><td>Only ~165 MB of library pages shared. Weights are not.</td></tr>
+        <tr><td>Page-cache-shared weights</td><td class="num">0 MB</td><td class="num">0 MB</td><td>The mmap hypothesis, falsified.</td></tr>
+        <tr><td>Model load time</td><td class="num">98.5 s cold</td><td class="num">11.7 s warm</td><td>Download is shared; the load is paid per process.</td></tr>
+        <tr><td>On-disk cache</td><td class="num">523 MB</td><td class="num">523 MB</td><td>One copy, however many agents.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <p>
+      So ten stdio agents is not ten downloads &mdash; it is roughly <b>11 GB of RAM</b>
+      and ten model loads. On a 16 GB laptop with the reranker on, that is the machine.
+      No caching change fixes it. Only topology does.
+    </p>
+  </div>
+</section>
+
+<!-- ===== 2. TARGET ARCHITECTURE ===== -->
+<section>
+  <div class="sec-head">
+    <div class="sec-num">02</div>
+    <div>
+      <h2>The target architecture</h2>
+      <div class="eyebrow">Every boundary labelled with the number that bounds it</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <p>
+      The organising idea: <b>one process owns the expensive things, and every queue into
+      them has a number on it.</b> Today the model workers are bounded (one thread each,
+      ADR-20) and nothing else is &mdash; searches land on CPython&rsquo;s shared default
+      executor, connections are a single shared object, and index runs are capped per
+      project but not globally.
+    </p>
+  </div>
+
+  <figure>
+    <div class="figframe">
+      <svg viewBox="0 0 980 470" role="img" aria-label="Target architecture: agents connect over one HTTP transport to a single Noesis process, where searches pass through a bounded executor of K slots into a pool of K Qdrant connections, indexing passes through a global cap and a dedicated index connection, and one embedder and one reranker worker thread own the models.">
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="currentColor"/>
+          </marker>
+          <marker id="a1t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="#0C6E6B"/>
+          </marker>
+        </defs>
+        <g font-family="IBM Plex Sans, sans-serif">
+
+          <!-- agents -->
+          <text x="10" y="22" font-size="11.5" font-weight="600" fill="var(--muted)">AGENTS</text>
+          <g>
+            <rect x="10" y="34" width="96" height="30" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="58" y="53" text-anchor="middle" font-size="11" fill="currentColor">agent 1</text>
+            <rect x="10" y="70" width="96" height="30" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="58" y="89" text-anchor="middle" font-size="11" fill="currentColor">agent 2</text>
+            <rect x="10" y="106" width="96" height="30" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="58" y="125" text-anchor="middle" font-size="11" fill="currentColor">agent 3</text>
+            <text x="58" y="156" text-anchor="middle" font-size="11" fill="var(--muted)">… agent N</text>
+            <rect x="10" y="166" width="96" height="30" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="58" y="185" text-anchor="middle" font-size="11" fill="currentColor">agent N</text>
+          </g>
+          <text x="58" y="216" text-anchor="middle" font-size="10" fill="var(--accent)">~30 MB each</text>
+          <text x="58" y="229" text-anchor="middle" font-size="10" fill="var(--muted)">(thin, no model)</text>
+
+          <!-- transport -->
+          <rect x="132" y="80" width="86" height="76" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+          <text x="175" y="104" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">MCP over</text>
+          <text x="175" y="119" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">HTTP</text>
+          <text x="175" y="137" text-anchor="middle" font-size="10" fill="var(--muted)">127.0.0.1</text>
+          <g stroke="var(--accent)" stroke-width="1.3" fill="none">
+            <line x1="106" y1="49" x2="128" y2="96" marker-end="url(#a1t)"/>
+            <line x1="106" y1="85" x2="128" y2="110" marker-end="url(#a1t)"/>
+            <line x1="106" y1="121" x2="128" y2="122" marker-end="url(#a1t)"/>
+            <line x1="106" y1="181" x2="128" y2="140" marker-end="url(#a1t)"/>
+          </g>
+
+          <!-- the one process -->
+          <rect x="242" y="14" width="490" height="440" rx="5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="5 4"/>
+          <text x="258" y="34" font-size="11.5" font-weight="600" fill="currentColor">ONE NOESIS PROCESS &mdash; owns every expensive thing</text>
+
+          <line x1="222" y1="118" x2="238" y2="118" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a1t)"/>
+
+          <!-- event loop -->
+          <rect x="262" y="48" width="120" height="40" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="322" y="66" text-anchor="middle" font-size="11" fill="currentColor">event loop</text>
+          <text x="322" y="80" text-anchor="middle" font-size="10" fill="var(--muted)">sqlite, state, jobs</text>
+
+          <!-- SEARCH LANE -->
+          <text x="262" y="118" font-size="11" font-weight="600" fill="var(--accent)">SEARCH LANE</text>
+          <rect x="262" y="128" width="128" height="56" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+          <text x="326" y="148" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">search executor</text>
+          <text x="326" y="163" text-anchor="middle" font-size="10.5" fill="currentColor">K threads, bounded</text>
+          <text x="326" y="177" text-anchor="middle" font-size="10" fill="var(--muted)">queue full → fail fast</text>
+
+          <rect x="416" y="128" width="128" height="56" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+          <text x="480" y="148" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">connection pool</text>
+          <text x="480" y="163" text-anchor="middle" font-size="10.5" fill="currentColor">K clients, 1:1 with slots</text>
+          <text x="480" y="177" text-anchor="middle" font-size="10" fill="var(--muted)">checkout never waits</text>
+
+          <line x1="390" y1="156" x2="412" y2="156" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a1t)"/>
+          <line x1="322" y1="88" x2="322" y2="124" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+
+          <!-- INDEX LANE -->
+          <text x="262" y="228" font-size="11" font-weight="600" fill="var(--warn)">INDEX LANE</text>
+          <rect x="262" y="238" width="128" height="56" rx="3" fill="var(--warn-soft)" stroke="var(--warn)" stroke-width="1.5"/>
+          <text x="326" y="258" text-anchor="middle" font-size="11" font-weight="600" fill="var(--warn)">global run cap</text>
+          <text x="326" y="273" text-anchor="middle" font-size="10.5" fill="currentColor">in SQLite, cross-process</text>
+          <text x="326" y="287" text-anchor="middle" font-size="10" fill="var(--muted)">≤ G runs machine-wide</text>
+
+          <rect x="416" y="238" width="128" height="56" rx="3" fill="var(--warn-soft)" stroke="var(--warn)" stroke-width="1.5"/>
+          <text x="480" y="258" text-anchor="middle" font-size="11" font-weight="600" fill="var(--warn)">index connection</text>
+          <text x="480" y="273" text-anchor="middle" font-size="10.5" fill="currentColor">1 client + its own lock</text>
+          <text x="480" y="287" text-anchor="middle" font-size="10" fill="var(--muted)">never steals a query slot</text>
+
+          <line x1="390" y1="266" x2="412" y2="266" stroke="var(--warn)" stroke-width="1.3" marker-end="url(#a1)"/>
+          <line x1="322" y1="88" x2="322" y2="234" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#a1)"/>
+
+          <!-- MODEL LANE -->
+          <text x="262" y="338" font-size="11" font-weight="600" fill="currentColor">MODEL LANE &mdash; unchanged (ADR-20)</text>
+          <rect x="262" y="348" width="128" height="48" rx="3" fill="var(--surface)" stroke="var(--rule)"/>
+          <text x="326" y="368" text-anchor="middle" font-size="11" fill="currentColor">embedder worker</text>
+          <text x="326" y="383" text-anchor="middle" font-size="10.5" fill="var(--muted)">1 thread, priority queue</text>
+
+          <rect x="416" y="348" width="128" height="48" rx="3" fill="var(--surface)" stroke="var(--rule)"/>
+          <text x="480" y="368" text-anchor="middle" font-size="11" fill="currentColor">reranker worker</text>
+          <text x="480" y="383" text-anchor="middle" font-size="10.5" fill="var(--muted)">1 thread, FIFO</text>
+
+          <text x="403" y="422" text-anchor="middle" font-size="10.5" fill="var(--accent)">the pattern the search lane now copies &mdash; bounded, resource-owning</text>
+          <text x="403" y="438" text-anchor="middle" font-size="10.5" fill="var(--muted)">1.14 GB of model lives here, once for the whole machine</text>
+
+          <!-- Qdrant -->
+          <rect x="784" y="128" width="176" height="56" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="872" y="150" text-anchor="middle" font-size="11.5" fill="currentColor">Qdrant 1.18.3</text>
+          <text x="872" y="166" text-anchor="middle" font-size="10.5" fill="var(--muted)">K + 1 connections total</text>
+          <line x1="544" y1="156" x2="780" y2="156" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a1t)"/>
+
+          <rect x="784" y="238" width="176" height="56" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="872" y="260" text-anchor="middle" font-size="11.5" fill="currentColor">one collection</text>
+          <text x="872" y="276" text-anchor="middle" font-size="10.5" fill="var(--muted)">project_id payload filter</text>
+          <line x1="544" y1="266" x2="780" y2="266" stroke="var(--warn)" stroke-width="1.3" marker-end="url(#a1)"/>
+
+          <rect x="784" y="348" width="176" height="56" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="872" y="370" text-anchor="middle" font-size="11.5" fill="currentColor">shared HF cache</text>
+          <text x="872" y="386" text-anchor="middle" font-size="10.5" fill="var(--muted)">523 MB, one copy on disk</text>
+          <line x1="544" y1="376" x2="780" y2="376" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#a1)"/>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      Three lanes, three different bounds, chosen for what each resource actually is:
+      searches are I/O-bound so K of them run at once; indexing is long and write-heavy so
+      it gets its own connection and a machine-wide cap; models are compute-bound so one
+      thread owns each, exactly as ADR-20 already has it.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ===== 3. SEARCH LANE ===== -->
+<section>
+  <div class="sec-head">
+    <div class="sec-num">03</div>
+    <div>
+      <h2>Search lane &mdash; why K slots and K connections</h2>
+      <div class="eyebrow">Scenario: bounded search + backpressure</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <p>
+      The two numbers are deliberately the same number. If the executor admits K searches
+      and the pool holds K connections, a connection is free whenever a thread is free
+      &mdash; checkout never blocks and no lock is ever contended. One knob sets both, so
+      they cannot drift apart.
+    </p>
+  </div>
+
+  <figure>
+    <div class="figframe">
+      <svg viewBox="0 0 940 250" role="img" aria-label="Today, N searches spawn N default-executor threads that all share one client, corrupting each other. In the target design, N requests queue at a bounded executor of K slots, each slot paired with its own connection, with excess requests rejected rather than queued without limit.">
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="currentColor"/>
+          </marker>
+          <marker id="a2d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="#A93A22"/>
+          </marker>
+          <marker id="a2t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="#0C6E6B"/>
+          </marker>
+        </defs>
+        <g font-family="IBM Plex Sans, sans-serif">
+          <!-- TODAY -->
+          <text x="10" y="20" font-size="12" font-weight="600" fill="var(--danger)">TODAY</text>
+          <text x="10" y="36" font-size="10.5" fill="var(--muted)">unbounded threads, one shared client</text>
+          <g>
+            <rect x="10" y="52" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <rect x="10" y="80" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <rect x="10" y="108" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <rect x="10" y="136" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="37" y="67" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+            <text x="37" y="95" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+            <text x="37" y="123" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+            <text x="37" y="151" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+          </g>
+          <rect x="96" y="48" width="96" height="114" rx="3" fill="none" stroke="var(--rule)" stroke-dasharray="3 3"/>
+          <text x="144" y="66" text-anchor="middle" font-size="10" fill="var(--muted)">default pool</text>
+          <text x="144" y="80" text-anchor="middle" font-size="10" fill="var(--muted)">min(32, cpu+4)</text>
+          <text x="144" y="100" text-anchor="middle" font-size="10" fill="var(--muted)">shared with</text>
+          <text x="144" y="114" text-anchor="middle" font-size="10" fill="var(--muted)">the indexer,</text>
+          <text x="144" y="128" text-anchor="middle" font-size="10" fill="var(--muted)">git, hashing,</text>
+          <text x="144" y="142" text-anchor="middle" font-size="10" fill="var(--muted)">file reads</text>
+          <g stroke="currentColor" stroke-width="1.2" fill="none">
+            <line x1="64" y1="63" x2="92" y2="70" marker-end="url(#a2)"/>
+            <line x1="64" y1="91" x2="92" y2="95" marker-end="url(#a2)"/>
+            <line x1="64" y1="119" x2="92" y2="118" marker-end="url(#a2)"/>
+            <line x1="64" y1="147" x2="92" y2="142" marker-end="url(#a2)"/>
+          </g>
+          <rect x="226" y="82" width="96" height="46" rx="3" fill="var(--danger-soft)" stroke="#A93A22" stroke-width="1.6"/>
+          <text x="274" y="102" text-anchor="middle" font-size="10.5" font-weight="600" fill="var(--danger)">1 client</text>
+          <text x="274" y="117" text-anchor="middle" font-size="10" fill="var(--muted)">shared FIFO</text>
+          <g stroke="#A93A22" stroke-width="1.3" fill="none">
+            <line x1="192" y1="80" x2="222" y2="96" marker-end="url(#a2d)"/>
+            <line x1="192" y1="105" x2="222" y2="105" marker-end="url(#a2d)"/>
+            <line x1="192" y1="130" x2="222" y2="115" marker-end="url(#a2d)"/>
+          </g>
+          <text x="216" y="188" text-anchor="middle" font-size="10.5" fill="var(--danger)">p95 148 ms at 32 agents · results cross-talk</text>
+          <text x="216" y="204" text-anchor="middle" font-size="10.5" fill="var(--danger)">latches permanently once it fires</text>
+
+          <line x1="400" y1="10" x2="400" y2="230" stroke="var(--rule)" stroke-width="1"/>
+
+          <!-- TARGET -->
+          <text x="432" y="20" font-size="12" font-weight="600" fill="var(--accent)">TARGET</text>
+          <text x="432" y="36" font-size="10.5" fill="var(--muted)">K slots, K connections, explicit rejection</text>
+          <g>
+            <rect x="432" y="52" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <rect x="432" y="80" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <rect x="432" y="108" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <rect x="432" y="136" width="54" height="22" rx="2" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="459" y="67" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+            <text x="459" y="95" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+            <text x="459" y="123" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+            <text x="459" y="151" text-anchor="middle" font-size="9.5" fill="currentColor">req</text>
+          </g>
+          <rect x="516" y="48" width="70" height="114" rx="3" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.4"/>
+          <text x="551" y="70" text-anchor="middle" font-size="10" fill="var(--accent)">bounded</text>
+          <text x="551" y="84" text-anchor="middle" font-size="10" fill="var(--accent)">queue</text>
+          <text x="551" y="112" text-anchor="middle" font-size="10" fill="var(--muted)">depth Q</text>
+          <text x="551" y="140" text-anchor="middle" font-size="10" fill="var(--danger)">full → 503</text>
+          <g stroke="var(--accent)" stroke-width="1.2" fill="none">
+            <line x1="486" y1="63" x2="512" y2="72" marker-end="url(#a2t)"/>
+            <line x1="486" y1="91" x2="512" y2="96" marker-end="url(#a2t)"/>
+            <line x1="486" y1="119" x2="512" y2="118" marker-end="url(#a2t)"/>
+            <line x1="486" y1="147" x2="512" y2="140" marker-end="url(#a2t)"/>
+          </g>
+          <g>
+            <rect x="620" y="56" width="88" height="24" rx="2" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <rect x="620" y="88" width="88" height="24" rx="2" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <rect x="620" y="120" width="88" height="24" rx="2" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <text x="664" y="72" text-anchor="middle" font-size="9.5" fill="var(--accent)">slot + conn</text>
+            <text x="664" y="104" text-anchor="middle" font-size="9.5" fill="var(--accent)">slot + conn</text>
+            <text x="664" y="136" text-anchor="middle" font-size="9.5" fill="var(--accent)">slot + conn</text>
+            <text x="664" y="158" text-anchor="middle" font-size="9.5" fill="var(--muted)">… K pairs</text>
+          </g>
+          <line x1="586" y1="104" x2="616" y2="104" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a2t)"/>
+          <rect x="756" y="82" width="96" height="46" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="804" y="102" text-anchor="middle" font-size="10.5" fill="currentColor">Qdrant</text>
+          <text x="804" y="117" text-anchor="middle" font-size="10" fill="var(--muted)">K in flight</text>
+          <g stroke="var(--accent)" stroke-width="1.2" fill="none">
+            <line x1="708" y1="68" x2="752" y2="94" marker-end="url(#a2t)"/>
+            <line x1="708" y1="100" x2="752" y2="104" marker-end="url(#a2t)"/>
+            <line x1="708" y1="132" x2="752" y2="116" marker-end="url(#a2t)"/>
+          </g>
+          <text x="660" y="188" text-anchor="middle" font-size="10.5" fill="var(--accent)">p95 16 ms at 32 agents · no shared state to corrupt</text>
+          <text x="660" y="204" text-anchor="middle" font-size="10.5" fill="var(--muted)">flat from 8 to 32 agents; overload is a clear error, not a stall</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      The pairing is the whole trick. Each slot owns its connection for the life of the
+      call, so no two threads ever touch one client&rsquo;s inference state &mdash; the
+      corruption becomes structurally impossible rather than locked against.
+    </figcaption>
+  </figure>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>32 concurrent searches</th>
+          <th class="num">Connections</th>
+          <th class="num">Throughput</th>
+          <th class="num">p95</th>
+          <th class="num">p99</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="bad"><td>Today &mdash; shared client, unguarded</td><td class="num">1</td><td class="num">363 q/s</td><td class="num">148 ms</td><td class="num">189 ms</td></tr>
+        <tr><td>One mutex around search</td><td class="num">1</td><td class="num">222 q/s</td><td class="num">672 ms</td><td class="num">1131 ms</td></tr>
+        <tr><td>Client per worker thread</td><td class="num">33</td><td class="num">288 q/s</td><td class="num">150 ms</td><td class="num">1218 ms</td></tr>
+        <tr class="win"><td>Pool of 4 &mdash; proposed</td><td class="num">5</td><td class="num">372 q/s</td><td class="num">16 ms</td><td class="num">76 ms</td></tr>
+        <tr><td>Pool of 8</td><td class="num">9</td><td class="num">372 q/s</td><td class="num">34 ms</td><td class="num">65 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <p class="footnote">
+      Live server, 5,000 points, hybrid channel, prefetch 50. The same ordering holds at 8
+      and 16 concurrent searches; pool-of-4 p95 moves 15.9 &rarr; 16.4 &rarr; 16.1 ms across
+      8/16/32 agents, while every unpooled option degrades 2&ndash;5&times;. Zero errors and
+      zero wrong results in every pooled run.
+    </p>
+    <p>
+      A lock still gets built, but as the correctness <em>floor</em>, not the mechanism:
+      the <code>:memory:</code> configuration used by ~25 existing tests cannot have a second
+      connection, because a second local client is a different database. The lock must be
+      keyed to the client <em>object</em> so that when there is only one, the search path and
+      the write path share one mutex rather than holding two different ones over the same state.
+    </p>
+  </div>
+</section>
+
+<!-- ===== 4. GLOBAL CAP ===== -->
+<section>
+  <div class="sec-head">
+    <div class="sec-num">04</div>
+    <div>
+      <h2>Index lane &mdash; the cap has to live in SQLite</h2>
+      <div class="eyebrow">Scenario: global cap on concurrent index runs</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <p>
+      <code>try_start_run</code> already guarantees one run per project, and it does so
+      <em>across processes</em> using <code>BEGIN IMMEDIATE</code> plus an owner-liveness probe.
+      What it does not do is cap the total. Ten registered projects with
+      <code>auto_reindex</code> on can start ten runs at once, all sharing one embedder
+      worker, one index connection and the same executor.
+    </p>
+    <p>
+      The trap worth naming: an <code>asyncio.Semaphore</code> would look like a fix and
+      would not be one. The deployment this repo documents runs an HTTP server and a stdio
+      MCP process against the same database, so an in-process counter bounds one process
+      while the other proceeds unaware. The cap belongs where the existing guard already
+      lives.
+    </p>
+  </div>
+
+  <figure>
+    <div class="figframe">
+      <svg viewBox="0 0 940 260" role="img" aria-label="An in-process semaphore bounds only its own process, so two processes each admit their own runs. A cap enforced inside the same SQLite transaction as the existing per-project guard bounds the machine as a whole.">
+        <defs>
+          <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="currentColor"/>
+          </marker>
+          <marker id="a3d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="#A93A22"/>
+          </marker>
+          <marker id="a3t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="#0C6E6B"/>
+          </marker>
+        </defs>
+        <g font-family="IBM Plex Sans, sans-serif">
+          <!-- wrong -->
+          <text x="10" y="20" font-size="12" font-weight="600" fill="var(--danger)">In-process semaphore &mdash; looks right, isn&rsquo;t</text>
+          <rect x="10" y="36" width="150" height="86" rx="3" fill="none" stroke="var(--rule)" stroke-dasharray="4 3"/>
+          <text x="85" y="54" text-anchor="middle" font-size="10.5" fill="currentColor">HTTP server process</text>
+          <rect x="24" y="62" width="122" height="24" rx="2" fill="var(--danger-soft)" stroke="#A93A22"/>
+          <text x="85" y="78" text-anchor="middle" font-size="10" fill="var(--danger)">Semaphore(2) → 2 runs</text>
+          <text x="85" y="106" text-anchor="middle" font-size="10" fill="var(--muted)">counts only itself</text>
+
+          <rect x="10" y="134" width="150" height="86" rx="3" fill="none" stroke="var(--rule)" stroke-dasharray="4 3"/>
+          <text x="85" y="152" text-anchor="middle" font-size="10.5" fill="currentColor">stdio MCP process</text>
+          <rect x="24" y="160" width="122" height="24" rx="2" fill="var(--danger-soft)" stroke="#A93A22"/>
+          <text x="85" y="176" text-anchor="middle" font-size="10" fill="var(--danger)">Semaphore(2) → 2 runs</text>
+          <text x="85" y="204" text-anchor="middle" font-size="10" fill="var(--muted)">also counts only itself</text>
+
+          <rect x="214" y="98" width="140" height="60" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="284" y="122" text-anchor="middle" font-size="11" fill="currentColor">one Qdrant collection</text>
+          <text x="284" y="139" text-anchor="middle" font-size="11" font-weight="600" fill="var(--danger)">4 runs land, cap said 2</text>
+          <line x1="160" y1="76" x2="210" y2="116" stroke="#A93A22" stroke-width="1.3" marker-end="url(#a3d)"/>
+          <line x1="160" y1="174" x2="210" y2="142" stroke="#A93A22" stroke-width="1.3" marker-end="url(#a3d)"/>
+
+          <line x1="410" y1="10" x2="410" y2="245" stroke="var(--rule)" stroke-width="1"/>
+
+          <!-- right -->
+          <text x="440" y="20" font-size="12" font-weight="600" fill="var(--accent)">Cap inside the existing transaction</text>
+          <rect x="440" y="36" width="150" height="86" rx="3" fill="none" stroke="var(--rule)" stroke-dasharray="4 3"/>
+          <text x="515" y="54" text-anchor="middle" font-size="10.5" fill="currentColor">HTTP server process</text>
+          <rect x="454" y="62" width="122" height="24" rx="2" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <text x="515" y="78" text-anchor="middle" font-size="10" fill="var(--accent)">asks the DB</text>
+
+          <rect x="440" y="134" width="150" height="86" rx="3" fill="none" stroke="var(--rule)" stroke-dasharray="4 3"/>
+          <text x="515" y="152" text-anchor="middle" font-size="10.5" fill="currentColor">stdio MCP process</text>
+          <rect x="454" y="160" width="122" height="24" rx="2" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <text x="515" y="176" text-anchor="middle" font-size="10" fill="var(--accent)">asks the DB</text>
+
+          <rect x="644" y="86" width="170" height="84" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+          <text x="729" y="106" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">state.db · BEGIN IMMEDIATE</text>
+          <text x="729" y="124" text-anchor="middle" font-size="10" fill="currentColor">count running rows</text>
+          <text x="729" y="139" text-anchor="middle" font-size="10" fill="currentColor">reject if ≥ G</text>
+          <text x="729" y="157" text-anchor="middle" font-size="10" fill="var(--muted)">same lock the per-project</text>
+          <text x="729" y="170" text-anchor="middle" font-size="10" fill="var(--muted)">guard already takes</text>
+
+          <line x1="590" y1="76" x2="640" y2="112" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a3t)"/>
+          <line x1="590" y1="174" x2="640" y2="146" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a3t)"/>
+          <text x="729" y="200" text-anchor="middle" font-size="10.5" fill="var(--accent)">≤ G runs machine-wide, whatever the topology</text>
+          <text x="729" y="216" text-anchor="middle" font-size="10.5" fill="var(--muted)">no new coordination mechanism &mdash; one extra COUNT</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      The cap costs one <code>COUNT</code> inside a transaction that is already being taken,
+      and it returns the same <code>already_running</code>-style status the callers already
+      handle, so the watcher&rsquo;s existing re-arm path covers it.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ===== 5. MULTI-AGENT ===== -->
+<section>
+  <div class="sec-head">
+    <div class="sec-num">05</div>
+    <div>
+      <h2>Multi-agent &mdash; the cost is processes, not downloads</h2>
+      <div class="eyebrow">Scenario: many agents on one machine</div>
+    </div>
+  </div>
+
+  <figure>
+    <div class="figframe">
+      <svg viewBox="0 0 940 300" role="img" aria-label="Today each stdio agent spawns a full Noesis process holding its own 1.14 gigabyte model copy and its own Qdrant connections. In the target, agents run thin stdio shims that proxy to one server process holding a single model copy.">
+        <defs>
+          <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="currentColor"/>
+          </marker>
+          <marker id="a4t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,1 10,5 0,9" fill="#0C6E6B"/>
+          </marker>
+        </defs>
+        <g font-family="IBM Plex Sans, sans-serif">
+          <!-- today -->
+          <text x="10" y="20" font-size="12" font-weight="600" fill="var(--danger)">TODAY &mdash; process per agent</text>
+          <g>
+            <rect x="10" y="34" width="168" height="52" rx="3" fill="var(--danger-soft)" stroke="#A93A22"/>
+            <text x="94" y="52" text-anchor="middle" font-size="10.5" fill="currentColor">agent 1 + full runtime</text>
+            <text x="94" y="68" text-anchor="middle" font-size="10.5" font-weight="600" fill="var(--danger)">1.14 GB model + K conns</text>
+            <text x="94" y="80" text-anchor="middle" font-size="9.5" fill="var(--muted)">11.7 s load, every launch</text>
+
+            <rect x="10" y="96" width="168" height="52" rx="3" fill="var(--danger-soft)" stroke="#A93A22"/>
+            <text x="94" y="114" text-anchor="middle" font-size="10.5" fill="currentColor">agent 2 + full runtime</text>
+            <text x="94" y="130" text-anchor="middle" font-size="10.5" font-weight="600" fill="var(--danger)">1.14 GB model + K conns</text>
+            <text x="94" y="142" text-anchor="middle" font-size="9.5" fill="var(--muted)">11.7 s load, every launch</text>
+
+            <rect x="10" y="158" width="168" height="52" rx="3" fill="var(--danger-soft)" stroke="#A93A22"/>
+            <text x="94" y="176" text-anchor="middle" font-size="10.5" fill="currentColor">agent N + full runtime</text>
+            <text x="94" y="192" text-anchor="middle" font-size="10.5" font-weight="600" fill="var(--danger)">1.14 GB model + K conns</text>
+            <text x="94" y="204" text-anchor="middle" font-size="9.5" fill="var(--muted)">11.7 s load, every launch</text>
+          </g>
+          <text x="94" y="236" text-anchor="middle" font-size="11" font-weight="600" fill="var(--danger)">10 agents ≈ 11 GB RAM, 10 × K connections</text>
+          <text x="94" y="252" text-anchor="middle" font-size="10.5" fill="var(--muted)">disk cache IS shared (523 MB, one copy)</text>
+          <text x="94" y="268" text-anchor="middle" font-size="10.5" fill="var(--muted)">RAM is not &mdash; Shared_File measured at 0 MB</text>
+
+          <rect x="222" y="96" width="118" height="52" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="281" y="118" text-anchor="middle" font-size="10.5" fill="currentColor">Qdrant + state.db</text>
+          <text x="281" y="134" text-anchor="middle" font-size="10" fill="var(--muted)">N × K connections</text>
+          <g stroke="currentColor" stroke-width="1.2" fill="none">
+            <line x1="178" y1="60" x2="218" y2="106" marker-end="url(#a4)"/>
+            <line x1="178" y1="122" x2="218" y2="122" marker-end="url(#a4)"/>
+            <line x1="178" y1="184" x2="218" y2="138" marker-end="url(#a4)"/>
+          </g>
+
+          <line x1="400" y1="10" x2="400" y2="285" stroke="var(--rule)" stroke-width="1"/>
+
+          <!-- target -->
+          <text x="432" y="20" font-size="12" font-weight="600" fill="var(--accent)">TARGET &mdash; thin shim per agent, one server</text>
+          <g>
+            <rect x="432" y="40" width="120" height="34" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="492" y="55" text-anchor="middle" font-size="10.5" fill="currentColor">agent 1 shim</text>
+            <text x="492" y="68" text-anchor="middle" font-size="9.5" fill="var(--accent)">~30 MB, no model</text>
+            <rect x="432" y="86" width="120" height="34" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="492" y="101" text-anchor="middle" font-size="10.5" fill="currentColor">agent 2 shim</text>
+            <text x="492" y="114" text-anchor="middle" font-size="9.5" fill="var(--accent)">~30 MB, no model</text>
+            <rect x="432" y="132" width="120" height="34" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+            <text x="492" y="147" text-anchor="middle" font-size="10.5" fill="currentColor">agent N shim</text>
+            <text x="492" y="160" text-anchor="middle" font-size="9.5" fill="var(--accent)">~30 MB, no model</text>
+          </g>
+          <g stroke="var(--accent)" stroke-width="1.3" fill="none">
+            <line x1="552" y1="57" x2="596" y2="96" marker-end="url(#a4t)"/>
+            <line x1="552" y1="103" x2="596" y2="112" marker-end="url(#a4t)"/>
+            <line x1="552" y1="149" x2="596" y2="128" marker-end="url(#a4t)"/>
+          </g>
+          <text x="574" y="182" text-anchor="middle" font-size="9.5" fill="var(--muted)">MCP/HTTP</text>
+
+          <rect x="600" y="52" width="176" height="120" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+          <text x="688" y="74" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">one server process</text>
+          <text x="688" y="93" text-anchor="middle" font-size="10.5" fill="currentColor">1.14 GB model, once</text>
+          <text x="688" y="109" text-anchor="middle" font-size="10.5" fill="currentColor">K search slots + K conns</text>
+          <text x="688" y="125" text-anchor="middle" font-size="10.5" fill="currentColor">1 index conn, capped runs</text>
+          <text x="688" y="145" text-anchor="middle" font-size="10" fill="var(--muted)">loads once, stays warm &mdash;</text>
+          <text x="688" y="158" text-anchor="middle" font-size="10" fill="var(--muted)">no agent pays the 11.7 s</text>
+
+          <rect x="806" y="86" width="124" height="52" rx="3" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="868" y="108" text-anchor="middle" font-size="10.5" fill="currentColor">Qdrant + state.db</text>
+          <text x="868" y="124" text-anchor="middle" font-size="10" fill="var(--muted)">K + 1 connections</text>
+          <line x1="776" y1="112" x2="802" y2="112" stroke="var(--accent)" stroke-width="1.3" marker-end="url(#a4t)"/>
+
+          <text x="688" y="212" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">10 agents ≈ 1.4 GB RAM, K + 1 connections</text>
+          <text x="688" y="230" text-anchor="middle" font-size="10.5" fill="var(--muted)">and this is precisely why the search lane had to be fixed first:</text>
+          <text x="688" y="246" text-anchor="middle" font-size="10.5" fill="var(--muted)">one shared process means every agent&rsquo;s query meets every other&rsquo;s</text>
+          <text x="688" y="268" text-anchor="middle" font-size="10.5" fill="var(--warn)">trade-off: the server is now a single point of failure</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      The two halves depend on each other. Sharing one process is what makes ten agents
+      affordable; bounding and unsharing the query path is what makes one shared process
+      safe. Shipping either alone is worse than shipping neither.
+    </figcaption>
+  </figure>
+
+  <div class="col">
+    <p>
+      What I have <b>not</b> resolved, and want your call on: how the shim finds its server.
+      Simplest is that it refuses to start without one and says so. Most convenient is
+      docker-style &mdash; probe the configured port, and spawn the server if nothing answers,
+      which needs singleton election so ten agents starting together do not spawn ten
+      servers. That is a real distributed-systems problem in miniature and I would rather
+      not smuggle it in unnoticed.
+    </p>
+  </div>
+
+  <div class="callout">
+    <span class="label">Kept honest</span>
+    <p>
+      The <code>~30 MB</code> shim figure is an estimate from a bare Python + MCP client
+      process, not a measurement of a shim that does not exist yet. Everything else in this
+      section was measured. The reranker is excluded throughout because it defaults to off;
+      with <code>reranker.enabled = true</code> the per-process figure grows by roughly its
+      2.3 GB of weights, which I did not load.
+    </p>
+  </div>
+</section>
+
+<!-- ===== 6. GUARDRAIL ===== -->
+<section>
+  <div class="sec-head">
+    <div class="sec-num">06</div>
+    <div>
+      <h2>Why this cannot silently come back</h2>
+      <div class="eyebrow">Scenario: CI guardrail &mdash; your &ldquo;never again&rdquo; requirement</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <p>
+      Six review rounds passed over this. Worth being precise about why, because it tells
+      you which layer to invest in: no test exercised readers alone, and the tests that did
+      exist counted exceptions rather than checking results. The silent 99% was invisible to
+      the oracle. A reviewer reading the diff could not see it either, because the class
+      docstring <em>claimed</em> both paths were handled.
+    </p>
+    <p>
+      So three layers, each catching what the one before it misses:
+    </p>
+    <ul class="plain">
+      <li><b>Design</b> &mdash; a raw client is not reachable from search code. Queries go
+        through a checkout that hands back a connection; there is no shared object to touch.
+        This is the only layer that makes the bug impossible rather than detectable.</li>
+      <li><b>CI grep</b> &mdash; <code>ci_greps.sh</code> gains a pattern rejecting
+        <code>QdrantClient(</code> outside <code>runtime.py</code>/<code>prefetch.py</code>
+        and raw <code>self._client</code> use in the query path. Follows the file&rsquo;s
+        existing shape, including its convention of naming the review round that motivated
+        each rule.</li>
+      <li><b>Tests with a real oracle</b> &mdash; the default suite gets reader-vs-reader on
+        one <code>:memory:</code> client asserting <em>correct results</em>; the
+        <code>-m server</code> tier gets the same against a live server plus the latch check
+        (run load, stop it, then verify quiet sequential queries are still correct). The
+        server tier already runs in CI via the <code>server-compat</code> job, so no workflow
+        edit is needed.</li>
+    </ul>
+    <p>
+      And one process point: the false claim in ADR row 76 &mdash; a measurement that does
+      not reproduce &mdash; is itself the finding. Rule 9 exists for exactly this, and it
+      earned lesson 20 another occurrence.
+    </p>
+  </div>
+</section>
+
+<!-- ===== 7. WHAT I NEED ===== -->
+<section>
+  <div class="sec-head">
+    <div class="sec-num">07</div>
+    <div>
+      <h2>Open decisions</h2>
+      <div class="eyebrow">Everything else is settled; these change the diff</div>
+    </div>
+  </div>
+
+  <div class="qbox">
+    <h3>1. Does the thin shim ship in this PR, or become its own?</h3>
+    <p>
+      The shim is a new transport, not a bug fix. It has its own failure modes (server
+      discovery, singleton election, what an agent sees when the server dies). My lean:
+      this PR delivers the in-process architecture &mdash; search lane, index cap, guardrail,
+      docs &mdash; and the shim lands next with its own ADR, because a shared server is only
+      safe <em>after</em> the search lane is fixed. Shipping it here doubles a PR that is
+      already six rounds deep.
+    </p>
+  </div>
+
+  <div class="qbox">
+    <h3>2. K and Q &mdash; pick the numbers, or derive them?</h3>
+    <p>
+      My lean: <code>[qdrant] query_connections = 4</code> as an explicit knob, with the
+      queue depth derived from it rather than a second knob to get wrong. 4 measured best
+      here on 4 CPUs; a machine with more cores may prefer more, and I would rather that be
+      editable than inferred.
+    </p>
+  </div>
+
+  <div class="qbox">
+    <h3>3. What does a rejected search return?</h3>
+    <p>
+      Under the bounded queue, overload has to surface. REST can answer 503 with a
+      retry-after. MCP has no equivalent, so the choice is an error result the agent can
+      read, or blocking until a slot frees. My lean: explicit error, because a silent stall
+      is the failure mode this whole exercise is about.
+    </p>
+  </div>
+</section>
+
+<hr class="divider">
+
+<div class="col">
+  <p class="footnote">
+    Reproduction: probes and benchmarks are in the session scratchpad and can land in-tree
+    with the PR if you want them committed. Docker, Qdrant 1.18.3, the 523 MB model cache
+    and the full dependency set are live on this machine, so the <code>-m server</code>
+    tier and the memory measurements can be re-run on demand.
+  </p>
+</div>
+
+</div>
