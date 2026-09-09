@@ -311,3 +311,95 @@ def test_register_at_index_capacity_still_reports_the_registered_project(
     # And the project really is registered, not a phantom id.
     listed = {p["id"] for p in client.get("/projects").json()}
     assert body["project_id"] in listed
+
+
+def _saturate(ctx) -> "tuple[object, threading.Event]":
+    """Fill the context's search gate to capacity and hold it there.
+
+    Uses a real ``SearchGate`` occupied by a real blocked job rather than a
+    stub that raises: the point of these tests is that the adapter is wired
+    to a gate at all, and a stub would still pass if the wiring were removed.
+    """
+    from noesis.core.search_gate import SearchGate
+
+    release = threading.Event()
+    gate = SearchGate(connections=1, queue_depth=0)  # capacity 1
+    ctx.search_gate = gate
+    admitted = threading.Event()
+
+    async def occupy():
+        def block():
+            admitted.set()
+            release.wait(timeout=30)
+
+        await gate.run(block)
+
+    loop_thread = threading.Thread(
+        target=lambda: asyncio.run(occupy()), daemon=True
+    )
+    loop_thread.start()
+    assert admitted.wait(timeout=5), "the blocking job never started"
+    return gate, release
+
+
+def test_search_answers_429_with_retry_after_when_the_gate_is_saturated(
+    client, project_dir
+):
+    """The bound only exists if the adapter is wired to the gate.
+
+    A round-7 reviewer mutation-tested this: deleting ``gate=ctx.search_gate``
+    from both adapters left the whole suite green while every bound ADR-84
+    adds — the slots, the 1:1 connection pairing, the rejection, the 429 —
+    silently ceased to exist. Nothing outside ``test_search_gate.py`` asserted
+    the adapter surface at all. Watched failing with the argument removed:
+    the request returned 200, because ``retriever`` fell back to
+    ``asyncio.to_thread`` and no rejection was ever raised.
+    """
+    ctx = client.app.state.ctx
+    # A real project: the route resolves project_id BEFORE it consumes a
+    # slot, so an unknown id 404s without ever reaching the gate. That
+    # ordering is right — input validation should not cost capacity — but it
+    # means an unregistered project would make this test vacuous.
+    pid = state.register_project(ctx.conn, str(project_dir), "fake-embedder-v1")
+    gate, release = _saturate(ctx)
+    try:
+        resp = client.post(
+            "/search", json={"project_id": pid, "query": "validate token"}
+        )
+        assert resp.status_code == 429, (
+            f"a saturated gate must refuse, got {resp.status_code} — the "
+            f"adapter is not passing ctx.search_gate to search_code"
+        )
+        # 429 not 503: 503 is also what a dead server returns, and a client
+        # that cannot tell "busy" from "down" retries the wrong way.
+        assert resp.headers.get("Retry-After"), "429 must tell the caller when to retry"
+        assert int(resp.headers["Retry-After"]) >= 1
+    finally:
+        release.set()
+        gate.close()
+
+
+def test_search_adapter_passes_the_contexts_real_gate(client, monkeypatch):
+    """Closes the hole the required keyword argument cannot.
+
+    ``gate`` is keyword-only without a default, so DELETING it is now a
+    TypeError. Silently changing it to ``gate=None`` would still compile and
+    still disable every bound, so pin the identity of what is passed.
+    """
+    from noesis.core import retriever as retriever_module
+
+    seen = {}
+
+    async def spy(*args, **kwargs):
+        seen["gate"] = kwargs.get("gate", "ABSENT")
+        return {"hits": [], "reranked": False}
+
+    monkeypatch.setattr("noesis.api.routes.search_code", spy)
+    ctx = client.app.state.ctx
+    pid = state.register_project(ctx.conn, ".", "fake-embedder-v1")
+    client.post("/search", json={"project_id": pid, "query": "x"})
+
+    assert seen["gate"] is ctx.search_gate, (
+        f"the REST adapter must pass the context's own gate, got {seen['gate']!r}"
+    )
+    assert isinstance(seen["gate"], retriever_module.SearchGate)

@@ -251,7 +251,8 @@ def _worker(config_path: Path) -> int:
         async def search(label: str, tolerate_errors: bool = False) -> None:
             with meter.phase(label, tolerate_errors=tolerate_errors) as record:
                 hits = await retriever.search_code(
-                    ctx.store, ctx.embedder, query, project_id, top_k=5
+                    ctx.store, ctx.embedder, query, project_id, top_k=5,
+                    gate=None,
                 )
                 record["hits"] = len(hits["hits"])
 

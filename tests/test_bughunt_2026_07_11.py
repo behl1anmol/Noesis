@@ -308,7 +308,8 @@ def test_nan_rerank_score_ranks_last_not_random(tmp_path):
 
     result = asyncio.run(
         search_code(
-            StubStore(), FakeEmbedder(), "q", "p1", reranker=NaNReranker(), top_k=2
+            StubStore(), FakeEmbedder(), "q", "p1", reranker=NaNReranker(), top_k=2,
+            gate=None,
         )
     )
 

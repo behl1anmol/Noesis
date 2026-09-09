@@ -1573,6 +1573,7 @@ async def test_golden_set_gate_numbers(corpus):
                 channel=channel,
                 reranker=reranker if rerank else None,
                 rerank=rerank or None,
+                gate=None,
             )
             return result["hits"]
 
@@ -1638,7 +1639,8 @@ async def test_golden_set_gate_numbers(corpus):
         # on a run this long is worse than none. This cannot flake, and it is
         # what catches the filter being dropped from one prefetch.
         filtered = await search_code(
-            store, embedder, golden[0].query, project_id, top_k=10, language="python"
+            store, embedder, golden[0].query, project_id, top_k=10, language="python",
+            gate=None,
         )
         assert filtered["hits"], "python-only filter returned nothing at all"
         assert {hit["language"] for hit in filtered["hits"]} == {"python"}

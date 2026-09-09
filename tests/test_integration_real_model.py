@@ -55,6 +55,7 @@ async def test_nl_query_returns_sane_spans(tmp_path, embedder):
             "where do we validate JWT expiry",
             result.project_id,
             top_k=2,
+            gate=None,
         )
     )["hits"]
     assert hits

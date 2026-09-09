@@ -255,3 +255,74 @@ async def test_mounted_http_transport_lifespan(ctx, project_dir):
         server.should_exit = True
         thread.join(timeout=10)
         assert not thread.is_alive()
+
+
+async def test_search_code_reports_capacity_as_an_actionable_tool_error(ctx, mcp):
+    """MCP has no status codes, so the agent-facing equivalent of REST's 429
+    is a ``ToolError`` — and an agent can only act on it if the text says so.
+
+    The docs promise operators that the message names the config key, so that
+    string is part of the contract, not decoration. Asserted explicitly here
+    because an error that says only "capacity reached" leaves an agent with
+    nothing to do but retry blindly or give up.
+
+    Watched failing with ``gate=None`` substituted in ``mcp/server.py``: the
+    call returned a normal empty result set, because ``retriever`` fell back
+    to the default executor and nothing ever refused.
+    """
+    from noesis.core.search_gate import SearchGate
+
+    project_id = state.register_project(ctx.conn, ".", "fake-embedder-v1")
+
+    # Occupy the single slot with a real blocked job — a stub that just raises
+    # would still pass if the adapter stopped passing the gate at all.
+    release = threading.Event()
+    admitted = threading.Event()
+    gate = SearchGate(connections=1, queue_depth=0)
+    ctx.search_gate = gate
+
+    async def occupy():
+        def block():
+            admitted.set()
+            release.wait(timeout=30)
+
+        await gate.run(block)
+
+    holder = threading.Thread(target=lambda: asyncio.run(occupy()), daemon=True)
+    holder.start()
+    assert admitted.wait(timeout=5), "the blocking job never started"
+
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError) as excinfo:
+                await client.call_tool(
+                    "search_code", {"project_id": project_id, "query": "validate"}
+                )
+        message = str(excinfo.value)
+        assert "query_connections" in message, (
+            f"the refusal must name the knob that changes the limit; got: {message}"
+        )
+        assert "capacity" in message.lower()
+    finally:
+        release.set()
+        gate.close()
+
+
+async def test_mcp_adapter_passes_the_contexts_real_gate(ctx, mcp, monkeypatch):
+    """Identity check, for the same reason as the REST twin: a missing
+    ``gate`` is now a TypeError, but silently passing ``None`` would not be."""
+    seen = {}
+
+    async def spy(*args, **kwargs):
+        seen["gate"] = kwargs.get("gate", "ABSENT")
+        return {"hits": [], "reranked": False}
+
+    monkeypatch.setattr("noesis.core.retriever.search_code", spy)
+    project_id = state.register_project(ctx.conn, ".", "fake-embedder-v1")
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "search_code", {"project_id": project_id, "query": "validate"}
+        )
+    assert seen["gate"] is ctx.search_gate, (
+        f"the MCP adapter must pass the context's own gate, got {seen['gate']!r}"
+    )
