@@ -141,7 +141,10 @@ class LocalCrossEncoderReranker:
     @property
     def resolved_device(self) -> str | None:
         """The device the model loaded on, or None before the first rerank
-        (the worker loads lazily on its first job)."""
+        (the worker loads lazily on its first job). Read by ``/healthz``'s
+        ``reranker_ready`` and ``get_index_status`` (issue #52), so it means
+        "the model is loaded", not "a device was chosen" — it is assigned
+        only after the ``CrossEncoder`` constructor returns."""
         return self._resolved_device
 
     def _default_load(self) -> Any:
@@ -154,7 +157,14 @@ class LocalCrossEncoderReranker:
 
         # Explicit device resolution, not ST's device=None auto-detect, which
         # was seen running this cross-encoder on CPU with a T4 idle (lesson 4).
-        self._resolved_device = resolve_device(self._device)
+        # Kept in a local until the model actually loads (below) — issue #52
+        # makes self._resolved_device the load signal behind /healthz's
+        # reranker_ready, so it must not go truthy while CrossEncoder(...) is
+        # still downloading/constructing (minutes, on ~2.3GB), and must not
+        # stay truthy if it raises. ADR-79 fixed the identical pattern in
+        # embedder.py and explicitly declined to fix it here because nothing
+        # read it then; reading it is exactly what issue #52 adds.
+        resolved = resolve_device(self._device)
         # Frame the load like the embedder: the cross-encoder is ~2.3GB and on
         # a cold cache blocks for minutes with no other output. model_id +
         # device only — no query or chunk text (ADR-25).
@@ -162,10 +172,11 @@ class LocalCrossEncoderReranker:
             "loading reranker model %s on %s "
             "(first run may download weights; can take minutes)",
             self._model_id,
-            self._resolved_device,
+            resolved,
         )
         started = time.perf_counter()
-        model = CrossEncoder(self._model_id, device=self._resolved_device)
+        model = CrossEncoder(self._model_id, device=resolved)
+        self._resolved_device = resolved
         logger.info(
             "reranker model %s ready on %s took=%.1fs",
             self._model_id,

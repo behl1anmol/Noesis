@@ -64,25 +64,50 @@ class StructuralSearchRequest(BaseModel):
 
 @router.get("/healthz")
 async def healthz(request: Request) -> dict[str, Any]:
-    """``status`` is unconditional (process is up); ``assets`` and
-    ``embedder_ready`` are the ADR-77/78 fail-loud surface (issue #47
-    finding 4) — previously a caller saw green here and then paid a
-    multi-minute silent stall on the next search. ``ctx`` can be absent
-    (e.g. a bare app without the lifespan wired), in which case both stay
-    ``"unknown"`` rather than raising on a healthcheck. The readiness check
-    itself (blocking filesystem stat calls, PR #50 round-3 review) lives in
-    ``prefetch.embedder_readiness``, shared with ``jobs.index_status`` (PR
-    #50 round-5 review) rather than computed twice — it already runs via
-    ``asyncio.to_thread``, the same convention ``runtime.py`` uses for
-    ``delete_orphan_points``, so this stays off the event loop without
-    repeating that plumbing here."""
+    """``status`` is unconditional (process is up); the four readiness fields
+    are the ADR-77/78 fail-loud surface (issue #47 finding 4, extended to the
+    reranker by issue #52) — previously a caller saw green here and then paid
+    a multi-minute silent stall on the next search.
+
+    ``assets``/``embedder_ready`` cover the embedding model;
+    ``reranker_assets``/``reranker_ready`` cover the optional cross-encoder,
+    whose cold load is ~2.3GB. Flat rather than nested, matching both this
+    body's existing shape and ``jobs.index_status``'s. With reranking off
+    (``reranker.enabled=false``, the default) the reranker pair reads
+    ``"disabled"``: the keys are always present, so a client can tell "off"
+    from "this server doesn't report it", and no operator is sent chasing
+    weights for a feature they never turned on.
+
+    ``ctx`` can be absent (e.g. a bare app without the lifespan wired), in
+    which case all four stay ``"unknown"`` rather than raising on a
+    healthcheck. The readiness checks themselves (blocking filesystem stat
+    calls, PR #50 round-3 review) live in ``prefetch``, shared with
+    ``jobs.index_status`` (PR #50 round-5 review) rather than computed twice —
+    they already run via ``asyncio.to_thread``, the same convention
+    ``runtime.py`` uses for ``delete_orphan_points``, so this stays off the
+    event loop without repeating that plumbing here."""
     ctx = getattr(request.app.state, "ctx", None)
     if ctx is None:
-        return {"status": "ok", "assets": "unknown", "embedder_ready": "unknown"}
-    from noesis.prefetch import embedder_readiness
+        return {
+            "status": "ok",
+            "assets": "unknown",
+            "embedder_ready": "unknown",
+            "reranker_assets": "unknown",
+            "reranker_ready": "unknown",
+        }
+    from noesis.prefetch import model_readiness, reranker_readiness
 
-    assets, embedder_ready = await embedder_readiness(ctx.embedder)
-    return {"status": "ok", "assets": assets, "embedder_ready": embedder_ready}
+    assets, embedder_ready = await model_readiness(ctx.embedder)
+    reranker_assets, reranker_ready = await reranker_readiness(
+        getattr(ctx, "reranker", None)
+    )
+    return {
+        "status": "ok",
+        "assets": assets,
+        "embedder_ready": embedder_ready,
+        "reranker_assets": reranker_assets,
+        "reranker_ready": reranker_ready,
+    }
 
 
 @router.post("/projects", status_code=202)

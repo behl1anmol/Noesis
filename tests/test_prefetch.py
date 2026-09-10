@@ -1,13 +1,19 @@
 """Tests for the no-network asset-readiness check (PR #50 review finding 2:
 config.json alone reported ``ready`` after a download interrupted before the
-weight file arrived)."""
+weight file arrived).
+
+Issue #52 renamed ``embedder_assets_ready``/``embedder_readiness`` to
+``model_assets_ready``/``model_readiness``: the reranker asks the same
+question of the same HF cache, and a function the reranker calls should not
+claim in its name to be about the embedder.
+"""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from noesis.prefetch import embedder_assets_ready, embedder_readiness
+from noesis.prefetch import model_assets_ready, model_readiness, reranker_readiness
 
 MODEL_ID = "nomic-ai/CodeRankEmbed"
 
@@ -35,7 +41,7 @@ def _cache_fake(present: dict[str, str], absent_confirmed: set[str] = frozenset(
 
 def test_missing_config_is_not_ready():
     with patch("huggingface_hub.try_to_load_from_cache", _cache_fake(present={})):
-        assert embedder_assets_ready(MODEL_ID) is False
+        assert model_assets_ready(MODEL_ID) is False
 
 
 def test_config_without_any_weight_file_is_not_ready():
@@ -46,7 +52,7 @@ def test_config_without_any_weight_file_is_not_ready():
         "huggingface_hub.try_to_load_from_cache",
         _cache_fake(present={"config.json": "/cache/config.json"}),
     ):
-        assert embedder_assets_ready(MODEL_ID) is False
+        assert model_assets_ready(MODEL_ID) is False
 
 
 def test_config_and_single_file_safetensors_is_ready():
@@ -59,7 +65,7 @@ def test_config_and_single_file_safetensors_is_ready():
             }
         ),
     ):
-        assert embedder_assets_ready(MODEL_ID) is True
+        assert model_assets_ready(MODEL_ID) is True
 
 
 def test_config_and_single_file_pytorch_bin_is_ready():
@@ -72,7 +78,7 @@ def test_config_and_single_file_pytorch_bin_is_ready():
             }
         ),
     ):
-        assert embedder_assets_ready(MODEL_ID) is True
+        assert model_assets_ready(MODEL_ID) is True
 
 
 def test_config_and_sharded_safetensors_index_is_ready():
@@ -85,7 +91,7 @@ def test_config_and_sharded_safetensors_index_is_ready():
             }
         ),
     ):
-        assert embedder_assets_ready(MODEL_ID) is True
+        assert model_assets_ready(MODEL_ID) is True
 
 
 def test_config_and_sharded_pytorch_index_is_ready():
@@ -98,7 +104,7 @@ def test_config_and_sharded_pytorch_index_is_ready():
             }
         ),
     ):
-        assert embedder_assets_ready(MODEL_ID) is True
+        assert model_assets_ready(MODEL_ID) is True
 
 
 def test_confirmed_absent_sharded_index_is_not_mistaken_for_present():
@@ -117,7 +123,7 @@ def test_confirmed_absent_sharded_index_is_not_mistaken_for_present():
             },
         ),
     ):
-        assert embedder_assets_ready(MODEL_ID) is False
+        assert model_assets_ready(MODEL_ID) is False
 
 
 # --- embedder_readiness: the shared (assets, embedder_ready) computation ----
@@ -130,8 +136,8 @@ def test_confirmed_absent_sharded_index_is_not_mistaken_for_present():
 
 async def test_embedder_readiness_reports_ready_with_resolved_device():
     embedder = SimpleNamespace(model_id=MODEL_ID, resolved_device="cpu")
-    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
-        assets, embedder_ready = await embedder_readiness(embedder)
+    with patch("noesis.prefetch.model_assets_ready", return_value=True):
+        assets, embedder_ready = await model_readiness(embedder)
     assert assets == "ready"
     assert embedder_ready is True
 
@@ -141,8 +147,8 @@ async def test_embedder_readiness_reports_missing_and_na_without_resolved_device
     # resolved_device attribute at all -- must read "n/a", not raise or
     # default to a real ready/missing verdict.
     embedder = SimpleNamespace(model_id=MODEL_ID)
-    with patch("noesis.prefetch.embedder_assets_ready", return_value=False):
-        assets, embedder_ready = await embedder_readiness(embedder)
+    with patch("noesis.prefetch.model_assets_ready", return_value=False):
+        assets, embedder_ready = await model_readiness(embedder)
     assert assets == "missing"
     assert embedder_ready == "n/a"
 
@@ -152,8 +158,8 @@ async def test_embedder_readiness_reports_false_once_device_resolved():
     # future embedder might report) must come back as the bool False, not
     # the "n/a" sentinel -- "n/a" means "never attempted", not "not ready".
     embedder = SimpleNamespace(model_id=MODEL_ID, resolved_device=False)
-    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
-        _, embedder_ready = await embedder_readiness(embedder)
+    with patch("noesis.prefetch.model_assets_ready", return_value=True):
+        _, embedder_ready = await model_readiness(embedder)
     assert embedder_ready is False
 
 
@@ -174,7 +180,64 @@ def test_a_local_model_directory_does_not_take_the_health_surface_down(tmp_path)
     """
     local_model = tmp_path / "coderank"
     local_model.mkdir()
-    assert embedder_assets_ready(str(local_model)) is True
+    assert model_assets_ready(str(local_model)) is True
 
     # A path that is not there is "missing", not a crash and not a false ready.
-    assert embedder_assets_ready(str(tmp_path / "absent")) is False
+    assert model_assets_ready(str(tmp_path / "absent")) is False
+
+
+# --- reranker_readiness: the same question, plus the kill switch (issue #52) --
+#
+# ``AppContext.reranker`` is None whenever ``reranker.enabled=false`` (the
+# shipped default), and "off" is a different answer from "on but missing its
+# weights". Both /healthz and jobs.index_status need that distinction, so it
+# lives here rather than being re-derived at each call site — the exact
+# duplication ADR-82 had to unwind for the embedder half.
+
+RERANKER_MODEL_ID = "BAAI/bge-reranker-v2-m3"
+
+
+async def test_reranker_readiness_reports_disabled_when_no_reranker_wired():
+    # Must not touch the HF cache at all: with no reranker there is no model
+    # id to ask about, and "missing" would read as a fetchable problem.
+    with patch("noesis.prefetch.model_assets_ready") as probe:
+        assets, ready = await reranker_readiness(None)
+    assert assets == "disabled"
+    assert ready == "disabled"
+    probe.assert_not_called()
+
+
+async def test_reranker_readiness_asks_about_the_reranker_model_not_the_embedder():
+    seen: list[str] = []
+
+    def fake(model_id: str) -> bool:
+        seen.append(model_id)
+        return True
+
+    reranker = SimpleNamespace(model_id=RERANKER_MODEL_ID, resolved_device="cuda")
+    with patch("noesis.prefetch.model_assets_ready", fake):
+        assets, ready = await reranker_readiness(reranker)
+    assert seen == [RERANKER_MODEL_ID]
+    assert assets == "ready"
+    assert ready is True
+
+
+async def test_reranker_readiness_is_not_ready_before_the_model_loads():
+    # The cold-start case issue #52 exists for: weights cached, model not
+    # loaded yet (reranker.preload=false), so the next reranked search still
+    # pays the multi-minute construction. Assets ready, reranker NOT ready.
+    reranker = SimpleNamespace(model_id=RERANKER_MODEL_ID, resolved_device=None)
+    with patch("noesis.prefetch.model_assets_ready", return_value=True):
+        assets, ready = await reranker_readiness(reranker)
+    assert assets == "ready"
+    assert ready is False
+
+
+async def test_reranker_readiness_reports_na_for_a_reranker_without_a_device():
+    # FakeReranker has no resolved_device attribute at all — same "not
+    # applicable to this implementation" contract the embedder half uses.
+    reranker = SimpleNamespace(model_id="fake-reranker-v1")
+    with patch("noesis.prefetch.model_assets_ready", return_value=False):
+        assets, ready = await reranker_readiness(reranker)
+    assert assets == "missing"
+    assert ready == "n/a"

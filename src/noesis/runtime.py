@@ -94,6 +94,11 @@ class AppContext:
     # every entry as one) so close_runtime_context can cancel/await it like
     # any other in-flight work before tearing down the embedder.
     embedder_warmup: asyncio.Task | None = None
+    # Issue #52: the same background warm-up for the optional reranker, whose
+    # cold load is ~4x the embedder's (~2.3GB). None whenever there is nothing
+    # to warm — reranking disabled, or ``reranker.preload=true`` already
+    # loaded the model inline during startup.
+    reranker_warmup: asyncio.Task | None = None
 
 
 async def build_runtime_context(cfg: Settings) -> AppContext:
@@ -256,6 +261,40 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
             )
 
     ctx.embedder_warmup = asyncio.create_task(_warm_up_embedder())
+
+    async def _warm_up_reranker() -> None:
+        # Issue #52: ADR-77's argument applies unchanged to the reranker, only
+        # more so — its model is ~2.3GB against the embedder's ~570MB, and
+        # with `reranker.enabled=true` every search reranks by default
+        # (ADR-34), so the first search pays that load in full.
+        #
+        # Queued BEHIND the embedder's warm-up rather than beside it: the
+        # embedder gates every search, the reranker only scores hits a search
+        # already produced, so two concurrent cold loads would slow the one
+        # that is actually on the critical path (and, on a small GPU, contend
+        # for the memory both are claiming). Sequential costs the reranker
+        # nothing real — a first search cannot reach the rerank stage before
+        # the embed stage is done anyway.
+        #
+        # `asyncio.wait` rather than `await task`: it waits for completion
+        # without adopting the other task's outcome, so a warm-up that failed
+        # (it logs and swallows its own errors) still lets this one run, and
+        # cancelling THIS task at teardown does not reach in and cancel the
+        # embedder's. A CancelledError delivered here propagates on purpose.
+        if ctx.embedder_warmup is not None:
+            await asyncio.wait([ctx.embedder_warmup])
+        try:
+            await reranker.preload()
+            log.info("reranker warm-up complete")
+        except Exception:
+            log.exception(
+                "reranker warm-up failed — will load lazily on first use instead"
+            )
+
+    # Nothing to warm when the kill switch is off, and nothing left to warm
+    # when `reranker.preload=true` already awaited the load above.
+    if reranker is not None and not cfg.reranker.preload:
+        ctx.reranker_warmup = asyncio.create_task(_warm_up_reranker())
     log.info("runtime ready")
     return ctx
 
@@ -279,8 +318,9 @@ async def close_runtime_context(ctx: AppContext) -> None:
 
     log = logging.getLogger(__name__)
     tasks = [t for t in ctx.jobs.values() if not t.done()]
-    if ctx.embedder_warmup is not None and not ctx.embedder_warmup.done():
-        tasks.append(ctx.embedder_warmup)
+    for warmup in (ctx.embedder_warmup, ctx.reranker_warmup):
+        if warmup is not None and not warmup.done():
+            tasks.append(warmup)
     for task in tasks:
         task.cancel()
     if tasks:

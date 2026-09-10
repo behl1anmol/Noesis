@@ -40,9 +40,17 @@ def default_fastembed_cache() -> str:
     return str(Path(base).expanduser() / "noesis" / "fastembed")
 
 
-def embedder_assets_ready(model_id: str) -> bool:
+def model_assets_ready(model_id: str) -> bool:
     """Best-effort, no-network check: is ``model_id`` fully cached in the
     local HF cache (ADR-78 addendum, issue #47 finding 4, PR #50 review)?
+
+    Asked of BOTH model boundaries (issue #52): the embedder's
+    ``SentenceTransformer`` and the reranker's ``CrossEncoder`` resolve the
+    same HF cache and need the same files — ``BAAI/bge-reranker-v2-m3``, the
+    default reranker, ships exactly ``config.json`` + ``model.safetensors``
+    (checked against the hub's file list, not assumed). Hence the neutral
+    name: it was ``embedder_assets_ready`` while the embedder was the only
+    caller.
 
     Requires ``config.json`` AND at least one weight file: a single-file
     checkpoint (``model.safetensors`` / ``pytorch_model.bin``) or a sharded
@@ -50,9 +58,9 @@ def embedder_assets_ready(model_id: str) -> bool:
     reported ``ready`` after a download interrupted between metadata and
     weights — exactly the silent cold-start stall this check exists to
     surface. Only the pytorch-backend filenames are checked, not the whole
-    repo tree: ``LocalSTEmbedder`` never requests ``backend="onnx"``, so an
-    onnx/openvino variant shipped alongside pytorch weights in the same repo
-    must not cause a false "missing".
+    repo tree: neither ``LocalSTEmbedder`` nor ``LocalCrossEncoderReranker``
+    requests ``backend="onnx"``, so an onnx/openvino variant shipped alongside
+    pytorch weights in the same repo must not cause a false "missing".
 
     ``try_to_load_from_cache`` returns a sentinel object — not ``None`` — for
     a filename HF has already probed and confirmed absent from the repo
@@ -70,9 +78,9 @@ def embedder_assets_ready(model_id: str) -> bool:
     def cached(filename: str) -> bool:
         return isinstance(try_to_load_from_cache(model_id, filename), str)
 
-    # ``[embedder] model`` is free text and sentence-transformers accepts a
-    # local directory, which is not a hub repo id — the hub call raises
-    # HFValidationError for it. Unguarded, that propagated out of /healthz,
+    # ``[embedder] model`` (and ``[reranker] model``) is free text and
+    # sentence-transformers accepts a local directory, which is not a hub repo
+    # id — the hub call raises HFValidationError for it. Unguarded, that propagated out of /healthz,
     # GET /projects/{id}/status and the get_index_status MCP tool, so a
     # locally-pinned model took down the very surface ADR-78 added to keep
     # the health check honest. For a real directory the answer is knowable
@@ -94,22 +102,47 @@ def embedder_assets_ready(model_id: str) -> bool:
     return any(cached(f) for f in weight_files)
 
 
-async def embedder_readiness(embedder: object) -> tuple[str, bool | str]:
-    """Shared ``(assets, embedder_ready)`` computation behind both
-    ``/healthz`` (ADR rows 78/79) and ``jobs.index_status`` (ADR row 81) —
-    PR #50 round-5 review. Previously pasted verbatim in both call sites:
-    they agreed only because the text was identical and one test compared
-    the two endpoints' output, not because there was one implementation: a
-    future edit to either copy (e.g. a "warming" state, a different ``n/a``
-    rule) had nothing stopping it from landing on one side only. ``embedder``
-    is duck-typed — ``model_id`` required, ``resolved_device`` optional — so
-    this has no dependency on a specific Embedder implementation and stays
-    outside ``core/`` like the rest of this module (module docstring)."""
-    ready = await asyncio.to_thread(embedder_assets_ready, embedder.model_id)
+async def model_readiness(model: object) -> tuple[str, bool | str]:
+    """Shared ``(assets, ready)`` computation behind ``/healthz`` (ADR rows
+    78/79) and ``jobs.index_status`` (ADR row 81) — PR #50 round-5 review.
+    Previously pasted verbatim in both call sites: they agreed only because
+    the text was identical and one test compared the two endpoints' output,
+    not because there was one implementation: a future edit to either copy
+    (e.g. a "warming" state, a different ``n/a`` rule) had nothing stopping it
+    from landing on one side only. *model* is duck-typed — ``model_id``
+    required, ``resolved_device`` optional — so this has no dependency on a
+    specific Embedder or Reranker implementation and stays outside ``core/``
+    like the rest of this module (module docstring).
+
+    ``resolved_device`` is the load signal, not a device-selection record:
+    both boundaries assign it only after the model constructor returns
+    (ADR-79 for the embedder; issue #52 for the reranker, which had the same
+    premature assignment until this signal started reading it). So ``False``
+    here means "assets may be cached, but the model is not loaded yet — the
+    next call pays the load", and ``"n/a"`` means the implementation does not
+    report a device at all (a test double)."""
+    ready = await asyncio.to_thread(model_assets_ready, model.model_id)
     assets = "ready" if ready else "missing"
-    resolved_device = getattr(embedder, "resolved_device", "n/a")
-    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
-    return assets, embedder_ready
+    resolved_device = getattr(model, "resolved_device", "n/a")
+    model_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
+    return assets, model_ready
+
+
+async def reranker_readiness(reranker: object | None) -> tuple[str, bool | str]:
+    """``(reranker_assets, reranker_ready)`` for the health surfaces (issue
+    #52). ``None`` is the ``reranker.enabled=false`` kill switch (§3.3, the
+    shipped default), which is a different answer from "enabled but its
+    weights are missing" — reporting ``"missing"`` for a feature nobody turned
+    on would send an operator to fetch 2.3GB they do not need, and omitting
+    the fields entirely would leave a caller unable to tell "off" from "this
+    server does not report it". So the kill switch gets its own value and no
+    HF-cache lookup happens at all.
+
+    Lives here, next to the embedder half, rather than at the two call sites:
+    ADR-82 had to unwind exactly that duplication once already."""
+    if reranker is None:
+        return "disabled", "disabled"
+    return await model_readiness(reranker)
 
 
 def prefetch_grammars() -> list[str]:

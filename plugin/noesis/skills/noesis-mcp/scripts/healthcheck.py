@@ -8,10 +8,12 @@ this when the ``noesis:`` MCP tools are missing or misbehaving — it separates
 
 Standard library only: runs under any ``python3`` without the Noesis venv.
 
-Exit codes: 0 healthy; 1 unhealthy (service unreachable, /healthz not ok, or
-the embedding model's assets are missing from the local cache — ADR-78,
-issue #47 finding 4: green here previously meant nothing about whether the
-next search pays a multi-minute silent download).
+Exit codes: 0 healthy; 1 unhealthy (service unreachable, /healthz not ok, or a
+model whose assets are missing from the local cache — ADR-78, issue #47
+finding 4: green here previously meant nothing about whether the next search
+pays a multi-minute silent download). The reranker is checked the same way
+when it is switched on (issue #52); when it is off — the shipped default —
+its fields read "disabled" and nothing is reported about it.
 """
 
 from __future__ import annotations
@@ -88,6 +90,26 @@ def main() -> None:
     elif assets == "ready":
         print("  [ OK ] embedding model assets are cached")
     # "unknown" (bare app, no lifespan wired): not actionable, say nothing.
+
+    # Same check for the optional reranker (issue #52). Only "missing" and
+    # "ready" are reported on. "disabled" (the kill switch is off — the
+    # shipped default) and an absent field (a service predating this, or one
+    # behind a proxy that strips it) both stay silent: neither is something an
+    # operator can act on, and warning about a feature nobody turned on is a
+    # false alarm.
+    reranker_assets = payload.get("reranker_assets")
+    if reranker_assets == "missing":
+        print(
+            "  [FAIL] reranking is enabled but the reranker model's assets are "
+            "not in the local cache —\n"
+            "         the next reranked search will block for minutes "
+            "downloading ~2.3 GB.\n"
+            "         Fetch them now: uv run python -m noesis.prefetch  "
+            "(or turn reranking off in config.toml)"
+        )
+        sys.exit(1)
+    elif reranker_assets == "ready":
+        print("  [ OK ] reranker model assets are cached")
 
     # 2. /projects
     try:

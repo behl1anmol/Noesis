@@ -272,14 +272,14 @@ async def test_index_status_reports_embedder_assets_and_readiness(ctx, repo):
 
     project_id, _ = await _index(ctx, repo)
 
-    with patch("noesis.prefetch.embedder_assets_ready", return_value=False):
+    with patch("noesis.prefetch.model_assets_ready", return_value=False):
         status = await jobs.index_status(ctx, project_id)
     assert status["embedder_assets"] == "missing"
     # FakeEmbedder has no resolved_device attribute at all — same "not
     # applicable to this embedder" contract /healthz already uses.
     assert status["embedder_ready"] == "n/a"
 
-    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
+    with patch("noesis.prefetch.model_assets_ready", return_value=True):
         status = await jobs.index_status(ctx, project_id)
     assert status["embedder_assets"] == "ready"
 
@@ -291,7 +291,7 @@ async def test_index_status_reports_embedder_state_when_never_indexed(ctx, repo)
 
     project_id = state.register_project(ctx.conn, str(repo), ctx.embedder.model_id)
 
-    with patch("noesis.prefetch.embedder_assets_ready", return_value=True):
+    with patch("noesis.prefetch.model_assets_ready", return_value=True):
         status = await jobs.index_status(ctx, project_id)
     assert status["status"] == "never_indexed"
     assert status["embedder_assets"] == "ready"
@@ -305,7 +305,7 @@ async def test_index_status_reports_embedder_state_when_never_indexed(ctx, repo)
 # two call sites had the same 4 lines pasted in twice, kept in sync only by
 # comparing their output, not by sharing code. Patching the one function they
 # should both call has to move both endpoints together; if either endpoint
-# still computed readiness independently, patching prefetch.embedder_readiness
+# still computed readiness independently, patching prefetch.model_readiness
 # would leave it untouched.
 
 
@@ -318,7 +318,7 @@ async def test_healthz_and_index_status_share_one_readiness_implementation(ctx, 
     project_id, _ = await _index(ctx, repo)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
 
-    with patch("noesis.prefetch.embedder_readiness", return_value=("missing", "n/a")):
+    with patch("noesis.prefetch.model_readiness", return_value=("missing", "n/a")):
         rest_body = await healthz(request)
         status = await jobs.index_status(ctx, project_id)
 
@@ -355,3 +355,76 @@ async def test_drift_self_heal_with_git_fast_path(ctx, repo):
     assert result.fast_path_used is True
     assert ctx.store.count_project_points(project_id) == expected
     assert result.chunks_written == expected
+
+
+# --- 8d. index_status carries the reranker's cold-start state too (issue #52) -
+#
+# ADR-81's reason for putting the embedder pair here applies unchanged to the
+# reranker: a pure-stdio MCP agent has no /healthz to poll, so without these
+# fields it has no way to learn that a reranked search is about to block on a
+# ~2.3GB load. The ctx fixture in this file is a bare object with no
+# `reranker` attribute at all — index_status must read it defensively, the
+# same way it already tolerates a duck-typed embedder.
+
+
+async def test_index_status_reports_reranker_disabled_by_default(ctx, repo):
+    project_id, _ = await _index(ctx, repo)
+    status = await jobs.index_status(ctx, project_id)
+    assert status["reranker_assets"] == "disabled"
+    assert status["reranker_ready"] == "disabled"
+
+
+async def test_index_status_reports_reranker_state_when_enabled(ctx, repo):
+    from unittest.mock import patch
+
+    from noesis.core.reranker import FakeReranker
+
+    ctx.reranker = FakeReranker()
+    project_id, _ = await _index(ctx, repo)
+
+    with patch("noesis.prefetch.model_assets_ready", return_value=False):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["reranker_assets"] == "missing"
+    assert status["reranker_ready"] == "n/a"
+
+    with patch("noesis.prefetch.model_assets_ready", return_value=True):
+        status = await jobs.index_status(ctx, project_id)
+    assert status["reranker_assets"] == "ready"
+
+
+async def test_index_status_reports_reranker_state_when_never_indexed(ctx, repo):
+    # The never_indexed branch is a separate return statement — the reranker
+    # pair has to be on both, exactly like the embedder pair (8b).
+    from noesis.core.reranker import FakeReranker
+
+    ctx.reranker = FakeReranker()
+    project_id = state.register_project(ctx.conn, str(repo), ctx.embedder.model_id)
+
+    status = await jobs.index_status(ctx, project_id)
+    assert status["status"] == "never_indexed"
+    assert status["reranker_assets"] == "missing"
+    assert status["reranker_ready"] == "n/a"
+
+
+async def test_healthz_and_index_status_share_one_reranker_readiness(ctx, repo):
+    # Same anti-divergence pin as 8c, for the reranker half: patching the one
+    # shared function must move both surfaces, or one of them is computing
+    # readiness on its own again.
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from noesis.api.routes import healthz
+    from noesis.core.reranker import FakeReranker
+
+    ctx.reranker = FakeReranker()
+    project_id, _ = await _index(ctx, repo)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+
+    with patch("noesis.prefetch.reranker_readiness", return_value=("ready", True)):
+        rest_body = await healthz(request)
+        status = await jobs.index_status(ctx, project_id)
+
+    assert rest_body["reranker_assets"] == "ready"
+    assert rest_body["reranker_ready"] is True
+    assert status["reranker_assets"] == "ready"
+    assert status["reranker_ready"] is True
