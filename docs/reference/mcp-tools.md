@@ -105,7 +105,9 @@ Status of the most recent index run, shaped identically for REST and MCP:
   "unwalkable_dirs": 0,
   "quarantined_dirs": 0,
   "embedder_assets": "ready",
-  "embedder_ready": true
+  "embedder_ready": true,
+  "reranker_assets": "disabled",
+  "reranker_ready": "disabled"
 }
 ```
 
@@ -120,6 +122,8 @@ The cost of that rule is worth knowing: while a run is actively committing, `dri
 Both zero is the healthy state. Non-zero does **not** mean anything was deleted — nothing under an unwalked directory is ever purged, because "I could not look" is not evidence of absence. It means results from that part of the tree may reflect older content than what is on disk. Worth checking before treating a search result as authoritative, and worth reporting to the human if a search over that project is coming back thin. Recovery is automatic: the first run that walks the directory again re-hashes its contents. There is no tool to clear this — it is a filesystem problem (a permissions change, an unmounted disk) or a deliberate scope decision, and both are resolved outside Noesis.
 
 `embedder_assets`/`embedder_ready` mirror `/healthz`'s cold-start warm-up signal (issue #47) for callers with no HTTP surface to poll — an MCP stdio server has no `/healthz` at all. `embedder_assets` is `"ready"` or `"missing"` (are the model's weights cached locally, checked without touching the network); `embedder_ready` is `true`/`false` once the embedder reports which device it loaded on, or the string `"n/a"` for an embedder implementation that doesn't expose one (e.g. a test double). A `search_code` call arriving while `embedder_ready` is still `false` will block until the background warm-up finishes loading the model — this pair of fields is why, not a hang.
+
+`reranker_assets`/`reranker_ready` are the same pair for the optional cross-encoder ([ADR-87](../project/decisions.md)), with the same values plus `"disabled"` on both when the `reranker.enabled` kill switch is off — the shipped default, and the value shown above. A value rather than absent keys, so a caller can tell "reranking is off" from "this server doesn't report it", and nobody is sent after 2.3 GB of weights for a feature they never turned on. When reranking *is* on, `reranker_ready: false` alongside `reranker_assets: "ready"` means the next reranked search pays the cross-encoder's ~2.3 GB load, which is roughly 4x the embedder's — and `reranker_assets: "missing"` means it pays the download too.
 
 ## `get_chunk`
 

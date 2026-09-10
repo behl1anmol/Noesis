@@ -67,10 +67,11 @@ Every design decision in Noesis carries a recorded rationale — the house rule 
 | 79 | PR #50 round-1 fixes | Readiness reported only after the model actually loads; weights checked, not just `config.json`; `close()` cannot leak the second client |
 | 80 | PR #50 round-3 fixes | Per-resource isolation in teardown; the health check's filesystem stats moved off the event loop |
 | 81 | Warm-up state on the MCP surface too | `embedder_assets`/`embedder_ready` on `get_index_status`, since `/healthz` is unreachable over stdio |
-| 82 | One shared readiness implementation | `prefetch.embedder_readiness` replaces the same logic pasted into two call sites |
+| 82 | One shared readiness implementation | `prefetch.embedder_readiness` replaces the same logic pasted into two call sites (renamed `model_readiness` by ADR-87, once the reranker became its second caller) |
 | 83 | **Bounded query-connection pool + object-keyed locks** | Closes the reader-vs-reader half of issue #48: a connection per in-flight query, and one lock per client *object* rather than per role |
 | 84 | **Bounded search executor with fail-fast admission** | Search leaves the process-wide default thread pool for its own executor, sized 1:1 with connections; overload answers 429 / `ToolError` instead of stalling |
 | 85 | **Index-run cap enforced in SQLite** | A machine-wide limit on concurrent runs, inside the existing `BEGIN IMMEDIATE` — an in-process semaphore cannot bound the HTTP + stdio deployment |
 | 86 | **Shared server + thin stdio shims** | `--shared` proxies to one server instead of loading the model per agent; singleton election via an OS-released advisory lock |
+| 87 | **Reranker cold-start visibility + warm-up** | `reranker_assets`/`reranker_ready` on `/healthz` and `get_index_status`, `"disabled"` when reranking is off; a background warm-up chained behind the embedder's; `resolved_device` set only after the model actually loads |
 
 See also the [risk register](risks.md) and [milestones](milestones.md).

@@ -30,7 +30,9 @@ The MCP server didn't connect. In order of likelihood:
 
 Verify the endpoint by hand:
 ```bash
-curl -sS http://127.0.0.1:8000/healthz          # → {"status":"ok","assets":"ready","embedder_ready":true}
+curl -sS http://127.0.0.1:8000/healthz
+# → {"status":"ok","assets":"ready","embedder_ready":true,
+#    "reranker_assets":"disabled","reranker_ready":"disabled"}
 ```
 
 ## First `search_code` call blocks for minutes
@@ -47,6 +49,16 @@ noesis repo) and restart the service. `"embedder_ready":false` with `"assets":"r
 means the assets are cached but the service's background warm-up hasn't finished
 loading them into memory yet (seconds, not minutes) — the call will complete, just not
 instantly. This is a one-time cost per service start, not per query.
+
+`reranker_assets`/`reranker_ready` say the same two things about the optional
+cross-encoder, and read `"disabled"` when reranking is off — the shipped default, in
+which case none of this applies. With it on, the numbers are bigger: ~2.3 GB to
+download, and `"reranker_ready":false` with `"reranker_assets":"ready"` means the next
+*reranked* search pays that load. Its background warm-up runs after the embedder's
+finishes, not alongside it (the embedder gates every search; the reranker only rescores
+hits a search already produced), so it turns ready later on a cold start. The
+healthcheck above fails on `"reranker_assets":"missing"` for the same reason it fails
+on the embedder's, and stays silent when reranking is off.
 
 ## `list_projects` is empty
 

@@ -83,7 +83,14 @@ Alternative models can be prefetched with `--model` / `--reranker-model` (they m
 ```bash
 uv run uvicorn noesis.app:app --host 127.0.0.1 --port 8000
 curl http://127.0.0.1:8000/healthz
-# {"status":"ok"}
+# {"status":"ok","assets":"ready","embedder_ready":true,
+#  "reranker_assets":"disabled","reranker_ready":"disabled"}
 ```
+
+`status` only says the process is answering. The readiness fields say whether
+the models are actually usable — `assets` is `"ready"` when the prefetch step
+above cached the weights, and `embedder_ready` turns `true` once the
+background warm-up has loaded them ([ADR-77/78, ADR-87](../project/decisions.md)).
+The reranker pair reads `"disabled"` unless you turned reranking on.
 
 Continue to the [Quickstart](quickstart.md) to index your first project.
