@@ -343,3 +343,65 @@ async def test_a_superseded_load_does_not_publish_its_device(caplog):
         assert "None" not in ready_lines[-1], ready_lines[-1]
         assert "cpu" in ready_lines[-1]
         reranker.close()
+
+
+class _BumpDeviceOnFirstWorkerLock:
+    """Drives a ``set_device`` into the window between the worker loop's
+    generation read and the loader's own — a gap of two adjacent statements,
+    unreachable by timing, so it is driven deterministically: the first time
+    the MODEL WORKER thread takes the lock, switch the device first.
+
+    Wrapping the lock rather than patching a method keeps the production code
+    path intact; ``set_device`` re-enters this wrapper, which passes straight
+    through after the first hit (the real lock is not held at that point, so
+    there is no deadlock)."""
+
+    def __init__(self, real, worker_name: str, bump) -> None:
+        self._real = real
+        self._worker_name = worker_name
+        self._bump = bump
+        self.fired = False
+
+    def __enter__(self):
+        if not self.fired and threading.current_thread().name == self._worker_name:
+            self.fired = True
+            self._bump()
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+
+async def test_a_device_switch_racing_the_load_does_not_cost_a_second_load():
+    """The worker read the generation, then the loader read it AGAIN. A
+    ``set_device`` landing between the two made the loader publish under the
+    NEW generation while the worker recorded the OLD one — so the freshly
+    loaded, already-correct model was thrown away and reloaded from scratch on
+    the very next rerank (minutes, for ~2.3GB), while ``/healthz`` reported
+    ready throughout. One snapshot, taken once by the worker, removes the
+    second read entirely: pre-fix this test sees two loads, post-fix one."""
+    loads: list[str] = []
+
+    class StubCrossEncoder:
+        def __init__(self, model_id: str, device=None):
+            loads.append(device)
+
+        def predict(self, pairs, batch_size: int):
+            return [0.0 for _ in pairs]
+
+    with (
+        patch("sentence_transformers.CrossEncoder", StubCrossEncoder),
+        patch("noesis.core.compute.resolve_device", side_effect=lambda d: d or "cpu"),
+    ):
+        reranker = LocalCrossEncoderReranker()
+        reranker._lock = _BumpDeviceOnFirstWorkerLock(
+            reranker._lock, "noesis-reranker", lambda: reranker.set_device("cuda")
+        )
+        await reranker.rerank("q", ["a"])
+        await reranker.rerank("q", ["a"])
+        assert reranker._lock.fired, "the race was never driven — test is vacuous"
+        assert loads == ["cuda"], (
+            f"expected one load on the switched-to device, got {loads}"
+        )
+        assert reranker.resolved_device == "cuda"
+        reranker.close()

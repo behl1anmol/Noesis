@@ -368,8 +368,9 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     from noesis.prefetch import UNKNOWN_RERANKER, model_readiness, reranker_readiness
 
     # Same two points as ``/healthz``'s copy of this call: gathered because the
-    # probes are independent and each cached model costs real filesystem work,
-    # and ``getattr`` with the sentinel because this function is called with
+    # probes are independent and nothing is gained by serializing them (the
+    # cost measurement lives on that copy), and ``getattr`` with the sentinel
+    # because this function is called with
     # hand-built duck-typed contexts (tests, adapters) that carry no reranker
     # attribute — which must not 500, and must not be reported as "disabled"
     # either, since nobody said it was off.

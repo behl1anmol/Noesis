@@ -75,5 +75,6 @@ Every design decision in Noesis carries a recorded rationale — the house rule 
 | 87 | **Reranker cold-start visibility + warm-up** | `reranker_assets`/`reranker_ready` on `/healthz` and `get_index_status`, `"disabled"` when reranking is off; a background warm-up chained behind the embedder's; `resolved_device` set only after the model actually loads |
 | 88 | **Issue #52 round-1 fixes** | A device switch during a model load can no longer be overwritten by the superseded load; `prefetch` fetches the models the config actually names, so the health check's "run prefetch" remedy works |
 | 89 | **Issue #52 round-2 fixes** | `"unknown"` (not `"disabled"`) for a context that never mentions a reranker; the load-completion log names the device it actually used; the two `/healthz` probes run together, worth ~9ms each on a cached model |
+| 90 | **Issue #52 round-3 fixes** | Cached weights without a tokenizer no longer count as `"ready"` (measured: it loads and silently ranks `<unk>`); an unreadable config skips the model downloads instead of guessing; the loader uses the worker's generation snapshot; three claims in rows 87-89 corrected in place |
 
 See also the [risk register](risks.md) and [milestones](milestones.md).

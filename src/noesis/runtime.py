@@ -272,9 +272,12 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         # embedder gates every search, the reranker only scores hits a search
         # already produced, so two concurrent cold loads would slow the one
         # that is actually on the critical path (and, on a small GPU, contend
-        # for the memory both are claiming). Sequential costs the reranker
-        # nothing real — a first search cannot reach the rerank stage before
-        # the embed stage is done anyway.
+        # for the memory both are claiming). This is a trade, not a free
+        # lunch: it delays reranker readiness by whatever is left of the
+        # embedder's load, so a first reranked search arriving in that window
+        # waits longer than it would have with both loading at once. That is
+        # the cost we choose — a slow first SEARCH is worse than a slow first
+        # RERANK, and the reranker is the optional half.
         #
         # `asyncio.wait` rather than `await task`: it waits for completion
         # without adopting the other task's outcome, so a warm-up that failed

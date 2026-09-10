@@ -497,12 +497,13 @@ async def test_healthz_reports_unknown_for_a_context_without_a_reranker():
 
 
 async def test_healthz_probes_both_models_concurrently():
-    """The two cache probes are independent, and on a warm cache each costs
-    real work — measured at ~9ms for a fully cached model (five
-    ``try_to_load_from_cache`` lookups against the real HF cache layout), so
-    running them one after the other doubles the blocking cost of every
-    ``/healthz``. The shim polls this endpoint on a 1s budget during its
-    election.
+    """The two cache probes are independent, so ``/healthz`` runs them
+    together rather than one after the other. Each is cheap — measured against
+    a real HF cache at 0.12ms cached and 0.01ms uncached — so this pins a
+    structural property, not a performance fix, and the docstring says so
+    rather than repeating the ~9ms figure an earlier version of it quoted
+    (that was the one-off ``huggingface_hub`` import amortised over the timing
+    loop, ADR-90).
 
     The barrier is the assertion: it needs both probes in flight at once to
     release. Serial probes time it out and the test fails."""

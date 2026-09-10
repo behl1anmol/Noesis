@@ -62,6 +62,7 @@ def test_config_and_single_file_safetensors_is_ready():
             present={
                 "config.json": "/cache/config.json",
                 "model.safetensors": "/cache/model.safetensors",
+                "tokenizer.json": "/cache/tokenizer.json",
             }
         ),
     ):
@@ -75,6 +76,7 @@ def test_config_and_single_file_pytorch_bin_is_ready():
             present={
                 "config.json": "/cache/config.json",
                 "pytorch_model.bin": "/cache/pytorch_model.bin",
+                "tokenizer.json": "/cache/tokenizer.json",
             }
         ),
     ):
@@ -88,6 +90,7 @@ def test_config_and_sharded_safetensors_index_is_ready():
             present={
                 "config.json": "/cache/config.json",
                 "model.safetensors.index.json": "/cache/model.safetensors.index.json",
+                "tokenizer.json": "/cache/tokenizer.json",
             }
         ),
     ):
@@ -101,6 +104,7 @@ def test_config_and_sharded_pytorch_index_is_ready():
             present={
                 "config.json": "/cache/config.json",
                 "pytorch_model.bin.index.json": "/cache/pytorch_model.bin.index.json",
+                "tokenizer.json": "/cache/tokenizer.json",
             }
         ),
     ):
@@ -252,7 +256,7 @@ async def test_reranker_readiness_reports_na_for_a_reranker_without_a_device():
 # a multi-GB model the service never loads and the health check stayed red.
 
 
-def _patched_main(monkeypatch, argv: list[str]):
+def _patched_main(monkeypatch, argv: list[str], expect_zero: bool = True):
     """Run prefetch.main() with every network-touching step stubbed out;
     returns the model ids it asked for."""
     import noesis.prefetch as prefetch
@@ -271,8 +275,11 @@ def _patched_main(monkeypatch, argv: list[str]):
         lambda model_id: called.__setitem__("reranker", model_id),
     )
     monkeypatch.setattr("sys.argv", ["prefetch", *argv])
-    assert prefetch.main() == 0
-    return called
+    code = prefetch.main()
+    if expect_zero:
+        assert code == 0, f"prefetch.main() returned {code}"
+        return called
+    return code, called
 
 
 def test_prefetch_takes_its_model_ids_from_the_resolved_config(monkeypatch):
@@ -313,19 +320,45 @@ def test_explicit_flags_still_beat_the_config(monkeypatch):
     assert called["reranker"] == "cli/reranker"
 
 
-def test_an_unreadable_config_does_not_stop_the_prefetch(monkeypatch):
-    # prefetch is the FIRST thing a new install runs, often before any config
-    # exists and sometimes with a broken one. Falling back to the shipped
-    # defaults keeps the grammars and BM25 assets coming down; a hard failure
-    # here would strand the install on an error about an unrelated file.
+def test_an_unreadable_config_skips_the_models_and_reports_failure(monkeypatch):
+    """A config that will not parse means we do not know which models the
+    service loads. Downloading the shipped defaults anyway is the exact
+    "fetched a model nobody loads" failure this whole change is about — up to
+    ~4.5 GB of it — so the config-independent assets (grammars, BM25) still
+    come down and the model steps are skipped with a non-zero exit."""
+
     def explode():
         raise ValueError("config field 'reranker.enabled' must be a boolean")
 
     monkeypatch.setattr("noesis.core.config.load_settings", explode)
 
-    called = _patched_main(monkeypatch, [])
-    assert called["model"] == "nomic-ai/CodeRankEmbed"
-    assert called["reranker"] == "BAAI/bge-reranker-v2-m3"
+    code, called = _patched_main(monkeypatch, [], expect_zero=False)
+    assert code != 0
+    assert "model" not in called
+    assert "reranker" not in called
+
+
+def test_explicit_flags_still_work_with_an_unreadable_config(monkeypatch):
+    # The operator has said which model they want; the broken file has no say.
+    def explode():
+        raise ValueError("bad config")
+
+    monkeypatch.setattr("noesis.core.config.load_settings", explode)
+
+    code, called = _patched_main(
+        monkeypatch, ["--model", "cli/embedder", "--skip-reranker"], expect_zero=False
+    )
+    assert called["model"] == "cli/embedder"
+    assert "reranker" not in called
+    # Everything the operator asked for happened — the id came from the flag
+    # and the reranker was explicitly skipped — so this run IS clean. Only an
+    # id that stayed unknown makes the exit non-zero.
+    assert code == 0
+
+    # ...and asking for a model whose id only the broken config knows does not.
+    code, called = _patched_main(monkeypatch, ["--skip-reranker"], expect_zero=False)
+    assert "model" not in called
+    assert code != 0
 
 
 async def test_a_context_that_does_not_model_a_reranker_is_unknown_not_disabled():
@@ -343,3 +376,58 @@ async def test_a_context_that_does_not_model_a_reranker_is_unknown_not_disabled(
         )
     assert (assets, ready) == ("unknown", "unknown")
     probe.assert_not_called()
+
+
+# --- a model without its tokenizer is not "ready" (issue #52 review round 3) --
+#
+# Watched, not reasoned about: with only config.json + model.safetensors left in
+# a real bge-reranker-v2-m3 snapshot (the other files removed, HF_HUB_OFFLINE=1),
+# `CrossEncoder(...)` did NOT fail — it constructed an XLMRobertaTokenizer with
+# vocab_size 5, tokenized "hello world" to [0, 3, 3, 2] (every token <unk>) and
+# still returned a score of 0.849. Silent nonsense ranking is worse than the
+# stall this field exists to warn about, and `model_assets_ready` called that
+# cache "ready".
+
+
+def test_config_and_weights_without_a_tokenizer_is_not_ready():
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is False
+
+
+def test_a_sentencepiece_only_tokenizer_counts(monkeypatch):
+    # bge-reranker-v2-m3's family ships sentencepiece rather than a vocab.txt;
+    # requiring one specific filename would report a false "missing" for it.
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "sentencepiece.bpe.model": "/cache/sentencepiece.bpe.model",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is True
+
+
+def test_a_wordpiece_vocab_counts_too():
+    # CodeRankEmbed ships vocab.txt alongside tokenizer.json.
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "vocab.txt": "/cache/vocab.txt",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is True

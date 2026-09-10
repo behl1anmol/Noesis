@@ -98,11 +98,14 @@ async def healthz(request: Request) -> dict[str, Any]:
         }
     from noesis.prefetch import UNKNOWN_RERANKER, model_readiness, reranker_readiness
 
-    # Gathered, not awaited one after the other: the two cache probes are
-    # independent, and a fully cached model costs ~9ms of real filesystem work
-    # (measured — five ``try_to_load_from_cache`` lookups against the HF cache
-    # layout), so serial probes double the blocking cost of an endpoint the
-    # shim polls on a 1s election budget.
+    # Gathered, not awaited one after the other: the two probes are
+    # independent and there is nothing to be gained by serializing them. Not a
+    # hot-spot fix — measured against a real HF cache, a probe costs 0.12ms
+    # cached (two lookups; ``any()`` short-circuits on the first weight file)
+    # and 0.01ms uncached (one). An earlier comment here claimed ~9ms and five
+    # lookups; that number was the one-off ``huggingface_hub`` import being
+    # amortised over the timing loop, and it did not survive re-measurement
+    # (ADR-90).
     # ``getattr`` with the sentinel, not ``None``: a duck-typed context that
     # carries no reranker attribute has not said the kill switch is off, and
     # a status field must not invent that (issue #52 review).
