@@ -3,20 +3,26 @@
 These run in the default suite: no model, no network, no Qdrant. They pin the
 two things that would silently make the harness lie — byte accounting and the
 delete guard — plus the scenario-ordering rule that gives 'warm' its meaning,
-and the --model/--dim/--qdrant-url plumbing PR #49 review found broken.
+and the --model/--dim/--qdrant-url plumbing PR #49 review found broken. They
+also pin the gate-wiring regression issue #53's spike found untested (below):
+_worker's inner `search` closure is the one call site nothing else exercises.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+
+from noesis.core.embedder import FakeEmbedder
 
 from .cold_start_harness import (
     Meter,
     _prefetch_command,
     _remote_collection_name,
     _wipe,
+    _worker,
     _worker_settings,
     dir_bytes,
     format_verdict,
@@ -212,27 +218,31 @@ def test_worker_settings_passes_through_model_and_dim() -> None:
     different vector size created a 768-dim collection and then failed on
     its first real vector, deep inside the workload rather than at the
     --dim/--model mismatch that caused it."""
-    settings = _worker_settings({
-        "db_path": "/tmp/does-not-need-to-exist.sqlite",
-        "model": "some-org/some-model",
-        "dim": 1024,
-        "device": "",
-        "qdrant_url": "",
-        "collection": "irrelevant-here",
-    })
+    settings = _worker_settings(
+        {
+            "db_path": "/tmp/does-not-need-to-exist.sqlite",
+            "model": "some-org/some-model",
+            "dim": 1024,
+            "device": "",
+            "qdrant_url": "",
+            "collection": "irrelevant-here",
+        }
+    )
     assert settings.embedder.model == "some-org/some-model"
     assert settings.embedder.dim == 1024
 
 
 def test_worker_settings_uses_the_namespaced_collection() -> None:
-    settings = _worker_settings({
-        "db_path": "/tmp/does-not-need-to-exist.sqlite",
-        "model": "m",
-        "dim": 768,
-        "device": "",
-        "qdrant_url": "http://127.0.0.1:6333",
-        "collection": "noesis_perf_cold_start_warm_2",
-    })
+    settings = _worker_settings(
+        {
+            "db_path": "/tmp/does-not-need-to-exist.sqlite",
+            "model": "m",
+            "dim": 768,
+            "device": "",
+            "qdrant_url": "http://127.0.0.1:6333",
+            "collection": "noesis_perf_cold_start_warm_2",
+        }
+    )
     assert settings.qdrant.collection == "noesis_perf_cold_start_warm_2"
     assert settings.qdrant.url == "http://127.0.0.1:6333"
 
@@ -253,3 +263,69 @@ def test_remote_collection_name_has_no_bare_hyphens() -> None:
     verbatim — kept boring/portable rather than relying on Qdrant accepting
     hyphens in every deployment."""
     assert "-" not in _remote_collection_name("warm-2")
+
+
+def test_worker_search_passes_the_contexts_gate_not_none(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """_worker's inner `search` closure must pass ctx.search_gate to
+    retriever.search_code, not a hardcoded None. A future bulk edit
+    defaulting `gate=` back to None on this call site would make every
+    cold-start number the harness prints measure the wrong (ungated)
+    executor, silently — nothing else imports this closure or asserts on
+    its `gate` kwarg (PR #50 round-8, commit 2fb369b; issue #53).
+
+    FakeEmbedder stands in for LocalSTEmbedder (imported inside _worker's
+    own body, so patchable there) and the embedded ':memory:' Qdrant client
+    needs no server — the same no-model, no-network convention every other
+    test in this file and tests/test_api.py already follows."""
+    seen: dict[str, object] = {}
+
+    async def fake_search_code(
+        store, embedder, query, project_id, *, top_k=5, gate, **kw
+    ):
+        seen["gate"] = gate
+        return {"hits": [], "reranked": False}
+
+    class _ClosableFakeEmbedder(FakeEmbedder):
+        """LocalSTEmbedder.close() shuts down its worker thread; FakeEmbedder
+        has no thread to shut down, so _worker's unconditional close() call
+        just needs a no-op to stand in for it here."""
+
+        def close(self) -> None:
+            pass
+
+    def fake_embedder_factory(*, model_id, dim, batch_size=None, device=None):
+        return _ClosableFakeEmbedder(dim=dim, model_id=model_id)
+
+    monkeypatch.setattr("noesis.core.embedder.LocalSTEmbedder", fake_embedder_factory)
+    monkeypatch.setattr("noesis.core.retriever.search_code", fake_search_code)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    config = {
+        "scenario": "test",
+        "label": "test",
+        "sequence": "query-first",
+        "caches": {},
+        "qdrant_url": "",
+        "collection": "cold_start_test",
+        "corpus": str(corpus),
+        "query": "x",
+        "model": "fake",
+        "dim": 8,
+        "device": None,
+        "db_path": str(tmp_path / "state.db"),
+        "result_path": str(tmp_path / "result.json"),
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+
+    exit_code = _worker(config_path)
+
+    assert exit_code == 0
+    assert "gate" in seen, "search_code was never called"
+    assert seen["gate"] is not None, (
+        "gate=None would make this line measure the ungated executor, "
+        "exactly the regression 2fb369b fixed"
+    )
