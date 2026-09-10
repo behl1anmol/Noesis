@@ -247,7 +247,19 @@ def test_two_independently_electing_runtime_dirs_converge_on_one_real_server(
     ``Popen`` handles this test needs for cleanup, since a winning
     ``ensure_server`` call deliberately returns just the port, never the
     process (the whole point of ``start_new_session`` is that the server
-    outlives the caller, so nothing hands that handle back)."""
+    outlives the caller, so nothing hands that handle back).
+
+    ``probe`` is also wrapped (never replaced — every call still reaches the
+    real implementation) so that each thread's FIRST probe — the fast-path
+    check ``ensure_server`` makes before it ever touches the election lock —
+    blocks on a two-party barrier. Without it, two ``Thread.start()`` calls
+    back to back are not a guarantee both reach that check before either
+    server exists: a delayed or heavily loaded runner can let the second
+    thread run entirely after the first server is already healthy, so it
+    returns from the fast path having never called ``_spawn_server`` at all
+    — which would make the "two independent elections" this test is about
+    an artifact of scheduling, not something it actually exercised (review
+    finding on an earlier revision of this test)."""
     port = _free_port()
     collection = f"noesis_shim_test_{uuid.uuid4().hex[:12]}"
     monkeypatch.setenv("NOESIS_CONFIG", str(_write_config(tmp_path, collection)))
@@ -266,6 +278,26 @@ def test_two_independently_electing_runtime_dirs_converge_on_one_real_server(
         return process
 
     monkeypatch.setattr(shim, "_spawn_server", recording_spawn)
+
+    real_probe = shim.probe
+    fast_path_barrier = threading.Barrier(2)
+    synced_threads: set[int] = set()
+    synced_lock = threading.Lock()
+
+    def synced_probe(probe_port: int, timeout: float = 1.0) -> bool:
+        tid = threading.get_ident()
+        with synced_lock:
+            is_first_call = tid not in synced_threads
+            synced_threads.add(tid)
+        if is_first_call:
+            # Neither thread's fast-path probe can return until both have
+            # reached it, so neither can observe the other's (not yet
+            # started) server here — both are forced past the fast path and
+            # into a real, independent election.
+            fast_path_barrier.wait(timeout=30)
+        return real_probe(probe_port, timeout=timeout)
+
+    monkeypatch.setattr(shim, "probe", synced_probe)
 
     results: dict[str, object] = {}
 
@@ -297,9 +329,13 @@ def test_two_independently_electing_runtime_dirs_converge_on_one_real_server(
 
         # Eventual, not immediate — see the docstring above: a losing
         # ensure_server call can return before its own duplicate process has
-        # gone through its connect/EADDRINUSE/shutdown cycle. Bounded well
-        # past the ~9-15s measured for that cycle to complete.
-        settle_deadline = time.monotonic() + 30.0
+        # gone through its connect/EADDRINUSE/shutdown cycle. The cycle
+        # itself measured ~9-15s on an otherwise-idle machine; a 30s margin
+        # over that was observed to flake under real contention (this file's
+        # two tests plus dockerd competing for the same CPUs slowed the
+        # settle past 30s at least once while writing this), so the bound
+        # here is well past double the idle measurement.
+        settle_deadline = time.monotonic() + 90.0
         alive = [p for p in spawned if p.poll() is None]
         while len(alive) != 1 and time.monotonic() < settle_deadline:
             time.sleep(0.2)
@@ -307,9 +343,17 @@ def test_two_independently_electing_runtime_dirs_converge_on_one_real_server(
         assert len(alive) == 1, (
             f"expected exactly one real server left holding the port after "
             f"letting the loser's own process settle, found {len(alive)} "
-            f"still running 30s after both ensure_server calls returned"
+            f"still running 90s after both ensure_server calls returned"
         )
     finally:
+        # A thread that outlived the join() above can still be inside
+        # ensure_server and call recording_spawn after this block starts —
+        # reap both fully (ensure_server's own internal bound is ~2x
+        # ready_timeout, per shim.py's module docstring) before touching
+        # `spawned`, or a late append leaks a real detached server nobody
+        # iterates over (review finding).
+        thread_a.join(timeout=2 * _READY_TIMEOUT_S)
+        thread_b.join(timeout=2 * _READY_TIMEOUT_S)
         for process in spawned:
             _kill_and_reap(process)
         _cleanup_collection(collection)

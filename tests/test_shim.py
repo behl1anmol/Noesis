@@ -72,8 +72,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
-import signal
 import socket
 import subprocess
 import sys
@@ -475,10 +473,16 @@ def test_a_killed_lock_holder_releases_the_election_lock(tmp_path):
     must itself raise ``Timeout`` — so this cannot pass because the two
     processes never actually contended for anything.
 
-    Watched failing with the ``os.kill`` call skipped (child left running):
-    ``filelock.Timeout: The file lock '.../server.lock' could not be
-    acquired.`` on the final acquire, which had a 5s timeout — i.e. the lock
-    was still held and the fix under test does nothing without the kill.
+    ``child.kill()`` rather than ``os.kill(child.pid, signal.SIGKILL)``:
+    ``signal.SIGKILL`` does not exist on Windows, and this file is in the
+    default suite — ``Popen.kill()`` sends it on POSIX and calls
+    ``TerminateProcess`` on Windows, which is the same "no graceful shutdown,
+    OS reclaims everything" event either way for what this test checks.
+
+    Watched failing with the ``child.kill()`` call skipped (child left
+    running): ``filelock.Timeout: The file lock '.../server.lock' could not
+    be acquired.`` on the final acquire, which had a 5s timeout — i.e. the
+    lock was still held and the fix under test does nothing without the kill.
     Watched passing with it restored: the same acquire succeeded in well
     under the 2s correctness bound below (a generous margin over what a
     same-machine ``flock()`` release costs — this is not a performance
@@ -503,7 +507,7 @@ def test_a_killed_lock_holder_releases_the_election_lock(tmp_path):
         with pytest.raises(Timeout):
             FileLock(str(lock_file), timeout=0.2).acquire()
 
-        os.kill(child.pid, signal.SIGKILL)
+        child.kill()
         child.wait(timeout=10)
 
         assert lock_file.exists(), (
