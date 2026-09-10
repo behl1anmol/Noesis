@@ -472,9 +472,13 @@ def test_bpe_merges_without_a_vocab_is_not_ready():
         assert model_assets_ready(MODEL_ID) is False
 
 
-def test_a_byte_level_bpe_vocab_is_ready():
-    # The other half of the pair: vocab.json IS a vocabulary, with or without
-    # merges.txt beside it in the cache yet.
+def test_a_byte_level_bpe_vocab_without_its_merges_is_not_ready():
+    """Byte-level BPE is the one family whose vocabulary is TWO files:
+    ``GPT2Tokenizer.vocab_files_names`` is
+    ``{'vocab_file': 'vocab.json', 'merges_file': 'merges.txt'}`` (checked
+    against the installed transformers, not assumed). Either alone is an
+    incomplete tokenizer, so neither alone may read ``ready`` (issue #52
+    review round 6)."""
     with patch(
         "huggingface_hub.try_to_load_from_cache",
         _cache_fake(
@@ -482,6 +486,40 @@ def test_a_byte_level_bpe_vocab_is_ready():
                 "config.json": "/cache/config.json",
                 "model.safetensors": "/cache/model.safetensors",
                 "vocab.json": "/cache/vocab.json",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is False
+
+
+def test_the_byte_level_bpe_pair_together_is_ready():
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "vocab.json": "/cache/vocab.json",
+                "merges.txt": "/cache/merges.txt",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is True
+
+
+def test_a_llama_family_sentencepiece_vocab_counts():
+    """``LlamaTokenizer.vocab_files_names`` names ``tokenizer.model``. Leaving
+    it out is a false MISSING, which sounds like the safe direction until you
+    follow it through: the plugin healthcheck then exits 1 on every run for a
+    correctly cached model, and its remedy — "run prefetch" — can never clear
+    it (issue #52 review round 6)."""
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "tokenizer.model": "/cache/tokenizer.model",
             }
         ),
     ):

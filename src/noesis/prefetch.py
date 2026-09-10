@@ -57,9 +57,14 @@ def model_assets_ready(model_id: str) -> bool:
       ``pytorch_model.bin``) or a sharded one's index manifest
       (``*.index.json``). ``config.json`` alone reported ``ready`` after a
       download interrupted between metadata and weights (ADR-79).
-    * tokenizer — any file that carries an actual VOCABULARY: a fast
-      tokenizer's ``tokenizer.json``, sentencepiece's ``*.model``, or a
-      wordpiece/BPE ``vocab``. Deliberately NOT ``tokenizer_config.json`` or
+    * tokenizer — a file carrying an actual VOCABULARY, taken from each
+      family's own ``vocab_files_names`` rather than guessed: a fast
+      tokenizer's ``tokenizer.json``; sentencepiece's ``sentencepiece.bpe.model``
+      (XLM-R), ``spiece.model`` (T5/ALBERT) or ``tokenizer.model`` (Llama);
+      wordpiece's ``vocab.txt``; or byte-level BPE's ``vocab.json`` AND
+      ``merges.txt``, which is the one family whose vocabulary is two files
+      (``GPT2Tokenizer`` declares both) and so is the one entry checked as a
+      pair. Deliberately NOT ``tokenizer_config.json`` or
       ``special_tokens_map.json``, which are metadata: they name the tokenizer
       class and its special tokens and hold no vocabulary, so a cache with
       only those is the same broken state as no tokenizer at all (issue #52
@@ -120,23 +125,27 @@ def model_assets_ready(model_id: str) -> bool:
         "model.safetensors.index.json",
         "pytorch_model.bin.index.json",
     )
-    # Every entry carries a vocabulary. `tokenizer_config.json` and
-    # `special_tokens_map.json` are deliberately absent: they are metadata,
-    # and a cache holding them without a vocab file loads the silently-broken
-    # tokenizer ADR-90 measured.
+    # Each entry is a SELF-SUFFICIENT vocabulary, read off the corresponding
+    # tokenizer class's `vocab_files_names` rather than guessed.
+    # `tokenizer_config.json` and `special_tokens_map.json` are deliberately
+    # absent: they are metadata, and a cache holding them without a vocabulary
+    # loads the silently-broken tokenizer ADR-90 measured.
     tokenizer_files = (
         "tokenizer.json",  # fast tokenizers (both default models ship one)
-        "sentencepiece.bpe.model",  # XLM-R family, e.g. bge-reranker-v2-m3
-        "spiece.model",  # T5/ALBERT family
+        "sentencepiece.bpe.model",  # XLM-R, e.g. bge-reranker-v2-m3
+        "spiece.model",  # T5/ALBERT
+        "tokenizer.model",  # Llama/Mistral sentencepiece
         "vocab.txt",  # wordpiece, e.g. CodeRankEmbed
-        "vocab.json",  # byte-level BPE
     )
-    # `merges.txt` is deliberately absent for the same reason as
-    # `tokenizer_config.json`: it holds BPE merge RULES, and the vocabulary
-    # they merge over lives in `vocab.json`. Listing it would accept a cache
-    # that has the rules but nothing to apply them to.
-    return any(cached(f) for f in weight_files) and any(
-        cached(f) for f in tokenizer_files
+    # Byte-level BPE is the exception: `GPT2Tokenizer.vocab_files_names`
+    # declares vocab.json AND merges.txt, so neither counts alone — the merges
+    # are rules with nothing to apply them to, and the vocab cannot be merged
+    # without them.
+    byte_level_bpe = ("vocab.json", "merges.txt")
+    if not any(cached(f) for f in weight_files):
+        return False
+    return any(cached(f) for f in tokenizer_files) or all(
+        cached(f) for f in byte_level_bpe
     )
 
 
