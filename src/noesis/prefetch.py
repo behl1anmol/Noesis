@@ -57,9 +57,13 @@ def model_assets_ready(model_id: str) -> bool:
       ``pytorch_model.bin``) or a sharded one's index manifest
       (``*.index.json``). ``config.json`` alone reported ``ready`` after a
       download interrupted between metadata and weights (ADR-79).
-    * tokenizer — any of the families the two model types actually ship
-      (``tokenizer.json``, ``tokenizer_config.json``, sentencepiece's
-      ``*.model``, or a wordpiece/BPE ``vocab``). Weights without one are not
+    * tokenizer — any file that carries an actual VOCABULARY: a fast
+      tokenizer's ``tokenizer.json``, sentencepiece's ``*.model``, or a
+      wordpiece/BPE ``vocab``. Deliberately NOT ``tokenizer_config.json`` or
+      ``special_tokens_map.json``, which are metadata: they name the tokenizer
+      class and its special tokens and hold no vocabulary, so a cache with
+      only those is the same broken state as no tokenizer at all (issue #52
+      review round 4). Weights without a vocabulary are not
       a working model, and the failure is quieter than a stall: with only
       ``config.json`` + ``model.safetensors`` left in a real
       ``BAAI/bge-reranker-v2-m3`` cache and ``HF_HUB_OFFLINE=1``,
@@ -116,13 +120,17 @@ def model_assets_ready(model_id: str) -> bool:
         "model.safetensors.index.json",
         "pytorch_model.bin.index.json",
     )
+    # Every entry carries a vocabulary. `tokenizer_config.json` and
+    # `special_tokens_map.json` are deliberately absent: they are metadata,
+    # and a cache holding them without a vocab file loads the silently-broken
+    # tokenizer ADR-90 measured.
     tokenizer_files = (
         "tokenizer.json",  # fast tokenizers (both default models ship one)
-        "tokenizer_config.json",
         "sentencepiece.bpe.model",  # XLM-R family, e.g. bge-reranker-v2-m3
         "spiece.model",  # T5/ALBERT family
         "vocab.txt",  # wordpiece, e.g. CodeRankEmbed
         "vocab.json",  # byte-level BPE
+        "merges.txt",  # the BPE half of the pair above
     )
     return any(cached(f) for f in weight_files) and any(
         cached(f) for f in tokenizer_files

@@ -431,3 +431,23 @@ def test_a_wordpiece_vocab_counts_too():
         ),
     ):
         assert model_assets_ready(MODEL_ID) is True
+
+
+def test_tokenizer_config_alone_is_not_a_tokenizer():
+    """``tokenizer_config.json`` is metadata — it names the tokenizer class and
+    its special tokens, and holds no vocabulary. A cache with the weights and
+    the small JSONs but no vocab file is exactly the state ADR-90 measured
+    loading a ``vocab_size`` 5 tokenizer that scored ``<unk>`` pairs, so it
+    must not satisfy the tokenizer requirement (issue #52 review round 4)."""
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "tokenizer_config.json": "/cache/tokenizer_config.json",
+                "special_tokens_map.json": "/cache/special_tokens_map.json",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is False
