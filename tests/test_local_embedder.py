@@ -272,3 +272,39 @@ def test_constructor_defaults():
     assert embedder.model_id == "nomic-ai/CodeRankEmbed"
     assert embedder.dim == 768
     embedder.close()  # no worker ever started; must not hang
+
+
+async def test_a_superseded_load_does_not_publish_its_device():
+    """Companion to the reranker's identical test (issue #52 review). The two
+    model boundaries are deliberate structural mirrors, so the same
+    ``set_device``-during-load race lives here: an in-flight generation-0 load
+    finishing after a device switch must not overwrite the ``None``
+    ``set_device`` just wrote, or ``/healthz``'s ``embedder_ready`` goes true
+    for a model the worker is about to drop and reload."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class StubSentenceTransformer:
+        def __init__(self, model_id: str, trust_remote_code: bool = True, device=None):
+            started.set()
+            assert release.wait(timeout=5.0), "test never released model"
+
+        def encode(self, texts: list[str]) -> np.ndarray:
+            return np.array([[0.0, 1.0, 2.0, 3.0] for _ in texts])
+
+    with (
+        patch("sentence_transformers.SentenceTransformer", StubSentenceTransformer),
+        patch("noesis.core.compute.resolve_device", side_effect=lambda d: d or "cpu"),
+    ):
+        embedder = LocalSTEmbedder(dim=4)
+        pending = asyncio.ensure_future(embedder.embed_query("q"))
+        assert await asyncio.to_thread(started.wait, 5.0)
+        embedder.set_device("cuda")
+        assert embedder.resolved_device is None
+        release.set()
+        await pending
+        assert embedder.resolved_device is None, (
+            "a superseded load published its device — health would report ready "
+            "for a model the worker is about to reload"
+        )
+        embedder.close()

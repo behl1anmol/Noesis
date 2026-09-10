@@ -292,3 +292,44 @@ async def test_resolved_device_stays_none_after_failed_load():
             await reranker.rerank("q", ["a"])
         assert reranker.resolved_device is None
         reranker.close()
+
+
+async def test_a_superseded_load_does_not_publish_its_device():
+    """PR review of issue #52: deferring the assignment until after the
+    constructor returns opened a race with ``set_device`` (ADR-40).
+
+    The dashboard can retarget the device while a load is in flight — and with
+    the new startup warm-up that window is now minutes wide on a cold cache.
+    ``set_device`` bumps the generation and clears ``resolved_device``; the
+    finishing OLD-generation load must not write its device back over that,
+    or ``/healthz`` reports ``reranker_ready: true`` for a model the worker is
+    about to throw away and reload.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    class StubCrossEncoder:
+        def __init__(self, model_id: str, device=None):
+            started.set()
+            assert release.wait(timeout=5.0), "test never released model"
+
+        def predict(self, pairs, batch_size: int):
+            return [0.0 for _ in pairs]
+
+    with (
+        patch("sentence_transformers.CrossEncoder", StubCrossEncoder),
+        patch("noesis.core.compute.resolve_device", side_effect=lambda d: d or "cpu"),
+    ):
+        reranker = LocalCrossEncoderReranker()
+        pending = asyncio.ensure_future(reranker.rerank("q", ["a"]))
+        assert await asyncio.to_thread(started.wait, 5.0)
+        # Operator switches device mid-load.
+        reranker.set_device("cuda")
+        assert reranker.resolved_device is None
+        release.set()
+        await pending
+        assert reranker.resolved_device is None, (
+            "a superseded load published its device — health would report ready "
+            "for a model the worker is about to reload"
+        )
+        reranker.close()

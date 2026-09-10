@@ -174,7 +174,18 @@ class LocalSTEmbedder:
         # is still downloading/constructing, and must not stay truthy if it
         # raises; a caller polling health during either window would wrongly
         # see "ready".
-        resolved = resolve_device(self._device)
+        # Read the device AND the generation it belongs to together, under the
+        # lock: `set_device` (ADR-40) can bump both while this load runs, and
+        # with the startup warm-up that window is now minutes wide on a cold
+        # cache. Publishing `_resolved_device` below is then conditional on
+        # this load still being the current generation — a superseded load
+        # must not overwrite the None `set_device` wrote, or the health
+        # surface reports ready for a model the worker is about to drop and
+        # reload (issue #52 review).
+        with self._lock:
+            generation = self._generation
+            device = self._device
+        resolved = resolve_device(device)
         # Frame the load: on a cold cache this blocks for minutes downloading
         # weights with no other output (the single silent stall M-users read as
         # a hang). model_id + device only — no code or query text (ADR-25).
@@ -188,7 +199,9 @@ class LocalSTEmbedder:
         model = SentenceTransformer(
             self._model_id, trust_remote_code=True, device=resolved
         )
-        self._resolved_device = resolved
+        with self._lock:
+            if self._generation == generation:
+                self._resolved_device = resolved
         logger.info(
             "embedding model %s ready on %s took=%.1fs",
             self._model_id,

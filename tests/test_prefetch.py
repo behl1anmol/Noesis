@@ -241,3 +241,88 @@ async def test_reranker_readiness_reports_na_for_a_reranker_without_a_device():
         assets, ready = await reranker_readiness(reranker)
     assert assets == "missing"
     assert ready == "n/a"
+
+
+# --- prefetch fetches the models the SERVICE will load (issue #52 review) ----
+#
+# The plugin's healthcheck answers `reranker_assets: "missing"` with "run
+# `uv run python -m noesis.prefetch`". That remedy was wrong for anyone with a
+# non-default `[embedder] model` or `[reranker] model`: main() hardcoded the
+# two default repo ids and never read config.toml, so the operator downloaded
+# a multi-GB model the service never loads and the health check stayed red.
+
+
+def _patched_main(monkeypatch, argv: list[str]):
+    """Run prefetch.main() with every network-touching step stubbed out;
+    returns the model ids it asked for."""
+    import noesis.prefetch as prefetch
+
+    called: dict[str, str] = {}
+    monkeypatch.setattr(prefetch, "prefetch_grammars", lambda: [])
+    monkeypatch.setattr(prefetch, "prefetch_bm25", lambda: None)
+    monkeypatch.setattr(
+        prefetch,
+        "prefetch_model",
+        lambda model_id: called.__setitem__("model", model_id),
+    )
+    monkeypatch.setattr(
+        prefetch,
+        "prefetch_reranker",
+        lambda model_id: called.__setitem__("reranker", model_id),
+    )
+    monkeypatch.setattr("sys.argv", ["prefetch", *argv])
+    assert prefetch.main() == 0
+    return called
+
+
+def test_prefetch_takes_its_model_ids_from_the_resolved_config(monkeypatch):
+    import dataclasses
+
+    from noesis.core.config import Settings
+
+    cfg = Settings()
+    configured = dataclasses.replace(
+        cfg,
+        embedder=dataclasses.replace(cfg.embedder, model="acme/custom-embedder"),
+        reranker=dataclasses.replace(cfg.reranker, model="acme/custom-reranker"),
+    )
+    monkeypatch.setattr("noesis.core.config.load_settings", lambda: configured)
+
+    called = _patched_main(monkeypatch, [])
+    assert called["model"] == "acme/custom-embedder"
+    assert called["reranker"] == "acme/custom-reranker"
+
+
+def test_explicit_flags_still_beat_the_config(monkeypatch):
+    import dataclasses
+
+    from noesis.core.config import Settings
+
+    cfg = Settings()
+    configured = dataclasses.replace(
+        cfg,
+        embedder=dataclasses.replace(cfg.embedder, model="acme/custom-embedder"),
+        reranker=dataclasses.replace(cfg.reranker, model="acme/custom-reranker"),
+    )
+    monkeypatch.setattr("noesis.core.config.load_settings", lambda: configured)
+
+    called = _patched_main(
+        monkeypatch, ["--model", "cli/embedder", "--reranker-model", "cli/reranker"]
+    )
+    assert called["model"] == "cli/embedder"
+    assert called["reranker"] == "cli/reranker"
+
+
+def test_an_unreadable_config_does_not_stop_the_prefetch(monkeypatch):
+    # prefetch is the FIRST thing a new install runs, often before any config
+    # exists and sometimes with a broken one. Falling back to the shipped
+    # defaults keeps the grammars and BM25 assets coming down; a hard failure
+    # here would strand the install on an error about an unrelated file.
+    def explode():
+        raise ValueError("config field 'reranker.enabled' must be a boolean")
+
+    monkeypatch.setattr("noesis.core.config.load_settings", explode)
+
+    called = _patched_main(monkeypatch, [])
+    assert called["model"] == "nomic-ai/CodeRankEmbed"
+    assert called["reranker"] == "BAAI/bge-reranker-v2-m3"

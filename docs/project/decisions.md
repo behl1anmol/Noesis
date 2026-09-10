@@ -73,5 +73,6 @@ Every design decision in Noesis carries a recorded rationale — the house rule 
 | 85 | **Index-run cap enforced in SQLite** | A machine-wide limit on concurrent runs, inside the existing `BEGIN IMMEDIATE` — an in-process semaphore cannot bound the HTTP + stdio deployment |
 | 86 | **Shared server + thin stdio shims** | `--shared` proxies to one server instead of loading the model per agent; singleton election via an OS-released advisory lock |
 | 87 | **Reranker cold-start visibility + warm-up** | `reranker_assets`/`reranker_ready` on `/healthz` and `get_index_status`, `"disabled"` when reranking is off; a background warm-up chained behind the embedder's; `resolved_device` set only after the model actually loads |
+| 88 | **Issue #52 round-1 fixes** | A device switch during a model load can no longer be overwritten by the superseded load; `prefetch` fetches the models the config actually names, so the health check's "run prefetch" remedy works |
 
 See also the [risk register](risks.md) and [milestones](milestones.md).

@@ -164,7 +164,18 @@ class LocalCrossEncoderReranker:
         # stay truthy if it raises. ADR-79 fixed the identical pattern in
         # embedder.py and explicitly declined to fix it here because nothing
         # read it then; reading it is exactly what issue #52 adds.
-        resolved = resolve_device(self._device)
+        # Read the device AND the generation it belongs to together, under the
+        # lock: `set_device` (ADR-40) can bump both while this load runs, and
+        # with the startup warm-up that window is now minutes wide on a cold
+        # cache. Publishing `_resolved_device` below is then conditional on
+        # this load still being the current generation — a superseded load
+        # must not overwrite the None `set_device` wrote, or the health
+        # surface reports ready for a model the worker is about to drop and
+        # reload (issue #52 review).
+        with self._lock:
+            generation = self._generation
+            device = self._device
+        resolved = resolve_device(device)
         # Frame the load like the embedder: the cross-encoder is ~2.3GB and on
         # a cold cache blocks for minutes with no other output. model_id +
         # device only — no query or chunk text (ADR-25).
@@ -176,7 +187,9 @@ class LocalCrossEncoderReranker:
         )
         started = time.perf_counter()
         model = CrossEncoder(self._model_id, device=resolved)
-        self._resolved_device = resolved
+        with self._lock:
+            if self._generation == generation:
+                self._resolved_device = resolved
         logger.info(
             "reranker model %s ready on %s took=%.1fs",
             self._model_id,

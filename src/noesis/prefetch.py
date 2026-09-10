@@ -214,19 +214,58 @@ def prefetch_bm25() -> None:
     print(f"bm25 ok: {BM25_MODEL_ID}")
 
 
+def configured_model_ids() -> tuple[str, str]:
+    """``(embedder model, reranker model)`` the SERVICE will actually load.
+
+    Read from the same config resolution the service uses (``NOESIS_CONFIG``
+    → ``./config.toml`` → XDG, ADR-44), because prefetching a model nobody
+    loads fixes nothing: with a non-default ``[embedder] model`` or
+    ``[reranker] model``, the hardcoded repo ids this replaces downloaded
+    multi-GB weights the service never opens, while ``/healthz`` and the
+    plugin's ``healthcheck.py`` — whose remedy is literally "run prefetch" —
+    kept reporting ``missing`` (issue #52 review). Run prefetch with the same
+    ``NOESIS_CONFIG`` the service gets, or from the same directory, for the
+    two to agree.
+
+    A config that cannot be read falls back to the shipped defaults rather
+    than aborting: this is the first command a fresh install runs, often
+    before any config exists, and grammars plus BM25 assets should not be
+    held hostage to an unrelated syntax error in a file the service has not
+    tried to load yet."""
+    from noesis.core.config import Settings, load_settings
+
+    try:
+        cfg = load_settings()
+    except Exception as exc:  # noqa: BLE001 — any config error, same fallback
+        print(
+            f"could not read config ({exc}); using default model ids", file=sys.stderr
+        )
+        cfg = Settings()
+    return cfg.embedder.model, cfg.reranker.model
+
+
 def main() -> int:
     os.environ.setdefault(FASTEMBED_CACHE_ENV, default_fastembed_cache())
+    default_model, default_reranker_model = configured_model_ids()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--skip-model", action="store_true", help="grammars only, no model weights"
     )
-    parser.add_argument("--model", default="nomic-ai/CodeRankEmbed")
+    parser.add_argument(
+        "--model",
+        default=default_model,
+        help=f"embedding model to fetch (default: {default_model}, from config)",
+    )
     parser.add_argument(
         "--skip-reranker",
         action="store_true",
         help="skip the ~2.3 GB reranker weights (only needed if reranker.enabled)",
     )
-    parser.add_argument("--reranker-model", default="BAAI/bge-reranker-v2-m3")
+    parser.add_argument(
+        "--reranker-model",
+        default=default_reranker_model,
+        help=f"reranker model to fetch (default: {default_reranker_model}, from config)",
+    )
     args = parser.parse_args()
 
     failed = prefetch_grammars()
