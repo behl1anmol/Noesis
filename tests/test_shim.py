@@ -30,6 +30,18 @@ happy-path run never touches. What this proves:
   the connection-refused path are the real ones. Both directions are probed:
   a genuine ``/healthz`` body must still return True, or the "fix" is just a
   probe that never succeeds.
+* **The OS releases the election lock when the holder dies** (issue #54 gap
+  1) — checked against a real second process, not a thread. SIGKILLing a
+  child that holds a real ``filelock.FileLock`` leaves the lock *file* on
+  disk but frees the OS-level lock well within seconds, which is the one
+  property (module docstring, shim.py) that justifies ``filelock`` over a PID
+  file. Every other test in this file shares one process, so this is the
+  first time that claim has been checked against what it is actually about.
+* **``probe`` accepting any service that answers the same contract is a
+  recorded residual, not a bug** (issue #54 gap 3; architecture-docs/
+  code-indexer-expanded-architecture.md risk register row 18, open question
+  D.3). Pinned so that tightening ``probe`` by accident shows up as a
+  reviewed diff to a named test instead of a silent behaviour change.
 
 Why this tier: none of it needs Qdrant, a model, a network or uvicorn.
 ``_spawn_server`` is stubbed everywhere a spawn would happen — a test that
@@ -60,15 +72,18 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 from noesis.mcp import shim
 
@@ -237,6 +252,49 @@ def test_probe_is_false_for_a_non_200():
         assert shim.probe(port) is False
 
 
+def test_probe_accepts_any_service_that_answers_the_same_contract():
+    """A documented, accepted residual (issue #54 gap 3) — NOT a bug, and not
+    something this test is here to push anyone toward fixing.
+
+    ``probe`` (B9) requires HTTP 200 + a JSON object with ``status == "ok"``.
+    It deliberately does not also check ``assets``/``embedder_ready``: those
+    are a fail-loud *reporting* surface (ADR-77/78) whose values legitimately
+    include ``"unknown"``, and probe()'s own docstring records why checking
+    them was rejected — a false negative there is worse than this false
+    positive, because it would make the shim spawn a duplicate server onto a
+    port that is already served. The gap is recorded in
+    architecture-docs/code-indexer-expanded-architecture.md as risk register
+    row 18 and open question D.3, not left implicit.
+
+    So this body is not a malformed Noesis response — it is a plausible OTHER
+    service (a healthcheck for something else entirely) that happens to reply
+    in the same shape. ``probe`` accepts it, and that is current, intended
+    behaviour. This test pins it as a named regression: if ``probe`` is ever
+    tightened — accidentally or otherwise — this assertion flips, and the
+    flip is a reviewed diff to this test rather than a silent behaviour
+    change nobody notices until an agent gets proxied to the wrong service.
+
+    Non-vacuity first: a body with no ``status`` key at all must still be
+    refused over this exact same stub/probe path, so the True below cannot be
+    an artifact of ``_stub_health`` or ``probe`` always returning True."""
+    with _stub_health(json.dumps({"service": "impostor-healthcheck"}).encode()) as port:
+        assert shim.probe(port) is False, (
+            "the harness must be able to observe a refusal, or the True "
+            "below proves nothing"
+        )
+
+    imposter_body = json.dumps(
+        {"status": "ok", "service": "some-other-healthcheck"}
+    ).encode()
+    with _stub_health(imposter_body) as port:
+        assert shim.probe(port) is True, (
+            "probe() is documented to accept any {'status': 'ok'} JSON body, "
+            "not only a genuine Noesis one (B9's own docstring, risk register "
+            "row 18) — if this now fails, probe() has been tightened and "
+            "this pin needs a deliberate, reviewed update, not a quiet delete"
+        )
+
+
 # --------------------------------------------------------------------------
 # ensure_server: the election
 # --------------------------------------------------------------------------
@@ -380,6 +438,93 @@ def test_no_spawn_refuses_with_the_health_url_and_starts_nothing(tmp_path, monke
     assert not shim.lock_path(tmp_path).exists(), (
         "the refusal took the election lock on the way out"
     )
+
+
+_CHILD_LOCK_HOLDER = """
+import sys
+import time
+from pathlib import Path
+
+from filelock import FileLock
+
+lock_path, marker_path, hold_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+lock = FileLock(lock_path)
+lock.acquire(timeout=10)
+Path(marker_path).write_text("locked")
+time.sleep(hold_s)
+"""
+
+
+def test_a_killed_lock_holder_releases_the_election_lock(tmp_path):
+    """The property the module docstring names as the whole reason
+    ``filelock`` was chosen over a PID file: **the OS releases the advisory
+    lock when the holder dies**, so a killed starter cannot wedge every
+    future shim. Every other lock test in this file contends across threads
+    in one process; that proves the election serializes correctly, but says
+    nothing about OS-level release, because threads never held separate
+    open-file-descriptions in the first place. This is the first test
+    against a real second process — a fresh ``exec``'d child via
+    ``subprocess.Popen``, not ``multiprocessing`` (a fork could share the
+    parent's lock state in a way an unrelated crashed agent process never
+    would) — which is what "another agent's shim process died" actually is.
+
+    The child signals readiness by writing a marker file only *after* it
+    holds the lock, so the parent's poll loop cannot race ahead of the
+    acquire. Before trusting the SIGKILL, the parent independently confirms
+    the lock is genuinely held — a second ``FileLock`` with a short timeout
+    must itself raise ``Timeout`` — so this cannot pass because the two
+    processes never actually contended for anything.
+
+    Watched failing with the ``os.kill`` call skipped (child left running):
+    ``filelock.Timeout: The file lock '.../server.lock' could not be
+    acquired.`` on the final acquire, which had a 5s timeout — i.e. the lock
+    was still held and the fix under test does nothing without the kill.
+    Watched passing with it restored: the same acquire succeeded in well
+    under the 2s correctness bound below (a generous margin over what a
+    same-machine ``flock()`` release costs — this is not a performance
+    benchmark, just "promptly enough that no future shim would time out
+    behind a corpse")."""
+    runtime_dir = tmp_path
+    lock_file = shim.lock_path(runtime_dir)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    marker = tmp_path / "child_holds_lock"
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", _CHILD_LOCK_HOLDER, str(lock_file), str(marker), "60"]
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline, (
+                "child never signalled that it holds the lock"
+            )
+            time.sleep(0.02)
+
+        with pytest.raises(Timeout):
+            FileLock(str(lock_file), timeout=0.2).acquire()
+
+        os.kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=10)
+
+        assert lock_file.exists(), (
+            "the lock FILE must survive the holder's death — only the "
+            "OS-level lock is released, per the module docstring's claim"
+        )
+
+        started = time.monotonic()
+        reacquired = FileLock(str(lock_file), timeout=5)
+        reacquired.acquire()
+        elapsed = time.monotonic() - started
+        reacquired.release()
+
+        assert elapsed < 2.0, (
+            f"took {elapsed:.2f}s to acquire a lock whose holder was already "
+            f"dead — the OS is not releasing it promptly, or at all"
+        )
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
 
 
 # --------------------------------------------------------------------------
