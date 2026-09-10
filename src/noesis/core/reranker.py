@@ -190,10 +190,13 @@ class LocalCrossEncoderReranker:
         with self._lock:
             if self._generation == generation:
                 self._resolved_device = resolved
+        # The local, not the attribute: a load superseded mid-flight withholds
+        # the attribute (above), and reading it here logged "ready on None"
+        # for a load that in fact resolved and ran on a real device.
         logger.info(
             "reranker model %s ready on %s took=%.1fs",
             self._model_id,
-            self._resolved_device,
+            resolved,
             time.perf_counter() - started,
         )
         return model

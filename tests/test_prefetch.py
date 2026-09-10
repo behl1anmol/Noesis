@@ -326,3 +326,20 @@ def test_an_unreadable_config_does_not_stop_the_prefetch(monkeypatch):
     called = _patched_main(monkeypatch, [])
     assert called["model"] == "nomic-ai/CodeRankEmbed"
     assert called["reranker"] == "BAAI/bge-reranker-v2-m3"
+
+
+async def test_a_context_that_does_not_model_a_reranker_is_unknown_not_disabled():
+    """``"disabled"`` is a claim: the kill switch is off. A hand-built or
+    adapter context with no ``reranker`` attribute at all has not told us
+    anything, and collapsing that into ``"disabled"`` would make the very
+    distinction the sentinel exists for (issue #52 review) untrustworthy —
+    the health surfaces already have ``"unknown"`` for "cannot tell"."""
+    from noesis.prefetch import UNKNOWN_RERANKER
+
+    ctx_without_reranker = SimpleNamespace(embedder=SimpleNamespace(model_id=MODEL_ID))
+    with patch("noesis.prefetch.model_assets_ready") as probe:
+        assets, ready = await reranker_readiness(
+            getattr(ctx_without_reranker, "reranker", UNKNOWN_RERANKER)
+        )
+    assert (assets, ready) == ("unknown", "unknown")
+    probe.assert_not_called()

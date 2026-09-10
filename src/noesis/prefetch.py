@@ -128,6 +128,23 @@ async def model_readiness(model: object) -> tuple[str, bool | str]:
     return assets, model_ready
 
 
+class _UnknownReranker:
+    """Type of :data:`UNKNOWN_RERANKER` — a distinct type, not a bare
+    ``object()``, so the sentinel is legible in a traceback or a repr."""
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return "UNKNOWN_RERANKER"
+
+
+#: "This context does not model a reranker at all" — the value call sites pass
+#: as ``getattr(ctx, "reranker", UNKNOWN_RERANKER)``. Distinct from ``None``,
+#: which is a positive statement that the kill switch is off (issue #52
+#: review): collapsing the two would let the health surfaces answer
+#: ``"disabled"`` for a state they cannot actually see, which is exactly the
+#: trust the sentinel was chosen over an absent key to provide.
+UNKNOWN_RERANKER = _UnknownReranker()
+
+
 async def reranker_readiness(reranker: object | None) -> tuple[str, bool | str]:
     """``(reranker_assets, reranker_ready)`` for the health surfaces (issue
     #52). ``None`` is the ``reranker.enabled=false`` kill switch (§3.3, the
@@ -138,8 +155,15 @@ async def reranker_readiness(reranker: object | None) -> tuple[str, bool | str]:
     server does not report it". So the kill switch gets its own value and no
     HF-cache lookup happens at all.
 
+    :data:`UNKNOWN_RERANKER` is the third case: a duck-typed context (a test
+    or an adapter) that carries no ``reranker`` attribute has not told us the
+    switch is off, so it reports ``"unknown"`` — the value both surfaces
+    already use for "cannot tell".
+
     Lives here, next to the embedder half, rather than at the two call sites:
     ADR-82 had to unwind exactly that duplication once already."""
+    if reranker is UNKNOWN_RERANKER:
+        return "unknown", "unknown"
     if reranker is None:
         return "disabled", "disabled"
     return await model_readiness(reranker)

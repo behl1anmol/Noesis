@@ -202,10 +202,13 @@ class LocalSTEmbedder:
         with self._lock:
             if self._generation == generation:
                 self._resolved_device = resolved
+        # The local, not the attribute — see the note in reranker.py's mirror
+        # of this line: a superseded load withholds the attribute and would
+        # log "ready on None" for a load that ran on a real device.
         logger.info(
             "embedding model %s ready on %s took=%.1fs",
             self._model_id,
-            self._resolved_device,
+            resolved,
             time.perf_counter() - started,
         )
         return model

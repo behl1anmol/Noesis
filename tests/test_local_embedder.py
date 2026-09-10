@@ -7,6 +7,7 @@ suite never touches the network or downloads CodeRankEmbed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from unittest.mock import patch
@@ -274,7 +275,7 @@ def test_constructor_defaults():
     embedder.close()  # no worker ever started; must not hang
 
 
-async def test_a_superseded_load_does_not_publish_its_device():
+async def test_a_superseded_load_does_not_publish_its_device(caplog):
     """Companion to the reranker's identical test (issue #52 review). The two
     model boundaries are deliberate structural mirrors, so the same
     ``set_device``-during-load race lives here: an in-flight generation-0 load
@@ -283,6 +284,7 @@ async def test_a_superseded_load_does_not_publish_its_device():
     for a model the worker is about to drop and reload."""
     started = threading.Event()
     release = threading.Event()
+    caplog.set_level(logging.INFO, logger="noesis.core.embedder")
 
     class StubSentenceTransformer:
         def __init__(self, model_id: str, trust_remote_code: bool = True, device=None):
@@ -307,4 +309,10 @@ async def test_a_superseded_load_does_not_publish_its_device():
             "a superseded load published its device — health would report ready "
             "for a model the worker is about to reload"
         )
+        ready_lines = [
+            r.getMessage() for r in caplog.records if "ready on" in r.getMessage()
+        ]
+        assert ready_lines, "no completion log line at all"
+        assert "None" not in ready_lines[-1], ready_lines[-1]
+        assert "cpu" in ready_lines[-1]
         embedder.close()

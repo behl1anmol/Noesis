@@ -294,7 +294,7 @@ async def test_resolved_device_stays_none_after_failed_load():
         reranker.close()
 
 
-async def test_a_superseded_load_does_not_publish_its_device():
+async def test_a_superseded_load_does_not_publish_its_device(caplog):
     """PR review of issue #52: deferring the assignment until after the
     constructor returns opened a race with ``set_device`` (ADR-40).
 
@@ -307,6 +307,7 @@ async def test_a_superseded_load_does_not_publish_its_device():
     """
     started = threading.Event()
     release = threading.Event()
+    caplog.set_level(logging.INFO, logger="noesis.core.reranker")
 
     class StubCrossEncoder:
         def __init__(self, model_id: str, device=None):
@@ -332,4 +333,13 @@ async def test_a_superseded_load_does_not_publish_its_device():
             "a superseded load published its device — health would report ready "
             "for a model the worker is about to reload"
         )
+        # The completion log must still name the device the load actually ran
+        # on. Reading the (now correctly empty) attribute instead printed
+        # "ready on None", which reads like a load that resolved nothing.
+        ready_lines = [
+            r.getMessage() for r in caplog.records if "ready on" in r.getMessage()
+        ]
+        assert ready_lines, "no completion log line at all"
+        assert "None" not in ready_lines[-1], ready_lines[-1]
+        assert "cpu" in ready_lines[-1]
         reranker.close()

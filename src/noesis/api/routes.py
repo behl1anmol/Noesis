@@ -11,6 +11,7 @@ tests assert the two surfaces return identical bodies.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -95,11 +96,19 @@ async def healthz(request: Request) -> dict[str, Any]:
             "reranker_assets": "unknown",
             "reranker_ready": "unknown",
         }
-    from noesis.prefetch import model_readiness, reranker_readiness
+    from noesis.prefetch import UNKNOWN_RERANKER, model_readiness, reranker_readiness
 
-    assets, embedder_ready = await model_readiness(ctx.embedder)
-    reranker_assets, reranker_ready = await reranker_readiness(
-        getattr(ctx, "reranker", None)
+    # Gathered, not awaited one after the other: the two cache probes are
+    # independent, and a fully cached model costs ~9ms of real filesystem work
+    # (measured — five ``try_to_load_from_cache`` lookups against the HF cache
+    # layout), so serial probes double the blocking cost of an endpoint the
+    # shim polls on a 1s election budget.
+    # ``getattr`` with the sentinel, not ``None``: a duck-typed context that
+    # carries no reranker attribute has not said the kill switch is off, and
+    # a status field must not invent that (issue #52 review).
+    (assets, embedder_ready), (reranker_assets, reranker_ready) = await asyncio.gather(
+        model_readiness(ctx.embedder),
+        reranker_readiness(getattr(ctx, "reranker", UNKNOWN_RERANKER)),
     )
     return {
         "status": "ok",

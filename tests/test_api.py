@@ -334,9 +334,7 @@ def _saturate(ctx) -> "tuple[object, threading.Event]":
 
         await gate.run(block)
 
-    loop_thread = threading.Thread(
-        target=lambda: asyncio.run(occupy()), daemon=True
-    )
+    loop_thread = threading.Thread(target=lambda: asyncio.run(occupy()), daemon=True)
     loop_thread.start()
     assert admitted.wait(timeout=5), "the blocking job never started"
     return gate, release
@@ -479,3 +477,52 @@ async def test_healthz_checks_reranker_assets_off_the_event_loop_thread():
         assert thread != loop_thread, (
             f"the cache probe for {model_id} ran on the event-loop thread"
         )
+
+
+async def test_healthz_reports_unknown_for_a_context_without_a_reranker():
+    """A context that does not model a reranker has not said reranking is
+    off — it has said nothing. `"disabled"` there would be an invented
+    answer (issue #52 review)."""
+    from types import SimpleNamespace
+
+    from noesis.api.routes import healthz
+
+    ctx = SimpleNamespace(embedder=FakeEmbedder(dim=8))  # no `reranker` attribute
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+    body = await healthz(request)
+    assert body["reranker_assets"] == "unknown"
+    assert body["reranker_ready"] == "unknown"
+    # The embedder half is unaffected and still answers for real.
+    assert body["assets"] in ("ready", "missing")
+
+
+async def test_healthz_probes_both_models_concurrently():
+    """The two cache probes are independent, and on a warm cache each costs
+    real work — measured at ~9ms for a fully cached model (five
+    ``try_to_load_from_cache`` lookups against the real HF cache layout), so
+    running them one after the other doubles the blocking cost of every
+    ``/healthz``. The shim polls this endpoint on a 1s budget during its
+    election.
+
+    The barrier is the assertion: it needs both probes in flight at once to
+    release. Serial probes time it out and the test fails."""
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from noesis.api.routes import healthz
+
+    barrier = threading.Barrier(2, timeout=3.0)
+
+    def fake_ready(model_id: str) -> bool:
+        barrier.wait()
+        return True
+
+    ctx = SimpleNamespace(embedder=FakeEmbedder(dim=8), reranker=FakeReranker())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+
+    with patch("noesis.prefetch.model_assets_ready", fake_ready):
+        body = await healthz(request)
+
+    assert body["assets"] == "ready"
+    assert body["reranker_assets"] == "ready"

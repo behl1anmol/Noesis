@@ -76,6 +76,10 @@ def ctx(tmp_path):
     c.conn = conn
     c.store = store
     c.embedder = embedder
+    # What a real context with reranking off looks like: the attribute exists
+    # and is None (the kill switch), which is a different state from a context
+    # that does not model a reranker at all — see the "unknown" test below.
+    c.reranker = None
     return c
 
 
@@ -428,3 +432,17 @@ async def test_healthz_and_index_status_share_one_reranker_readiness(ctx, repo):
     assert rest_body["reranker_ready"] is True
     assert status["reranker_assets"] == "ready"
     assert status["reranker_ready"] is True
+
+
+async def test_index_status_reports_unknown_for_a_context_without_a_reranker(ctx, repo):
+    """``"disabled"`` says the kill switch is off. An adapter or test context
+    with no ``reranker`` attribute has said nothing, so the honest answer is
+    ``"unknown"`` — and it must still not raise (issue #52 review)."""
+    project_id, _ = await _index(ctx, repo)
+    delattr(ctx, "reranker")
+
+    status = await jobs.index_status(ctx, project_id)
+    assert status["reranker_assets"] == "unknown"
+    assert status["reranker_ready"] == "unknown"
+    # The embedder half still answers for real.
+    assert status["embedder_assets"] in ("ready", "missing")
