@@ -13,6 +13,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from noesis.prefetch import model_assets_ready, model_readiness, reranker_readiness
 
 MODEL_ID = "nomic-ai/CodeRankEmbed"
@@ -184,7 +186,14 @@ def test_a_local_model_directory_does_not_take_the_health_surface_down(tmp_path)
     """
     local_model = tmp_path / "coderank"
     local_model.mkdir()
-    assert model_assets_ready(str(local_model)) is True
+    # No exception is the property under test. The VERDICT for a directory was
+    # ADR-79's "the assets ARE that directory" — an empty one answered True —
+    # until issue #52's round-6 review: a half-copied directory then reported
+    # `ready` on a surface that had begun promising config + weights +
+    # vocabulary. It is now held to the same three requirements as a cached
+    # hub repo (see the local-directory tests below), so this bare directory
+    # answers False.
+    assert model_assets_ready(str(local_model)) is False
 
     # A path that is not there is "missing", not a crash and not a false ready.
     assert model_assets_ready(str(tmp_path / "absent")) is False
@@ -524,3 +533,75 @@ def test_a_llama_family_sentencepiece_vocab_counts():
         ),
     ):
         assert model_assets_ready(MODEL_ID) is True
+
+
+# --- a local model directory is held to the same contract (round 6) ----------
+#
+# `[embedder] model` / `[reranker] model` are free text and
+# sentence-transformers accepts a directory. ADR-79 answered that case with
+# "the assets ARE that directory" — which was true enough when the only
+# question was whether a hub repo had been fetched, and false the moment the
+# function started promising config + weights + vocabulary. An empty or
+# half-copied directory reported `ready`, and the plugin healthcheck printed
+# [ OK ] for it (issue #52 review round 6).
+
+
+def test_an_empty_local_model_directory_is_not_ready(tmp_path):
+    empty = tmp_path / "half-copied-model"
+    empty.mkdir()
+    assert model_assets_ready(str(empty)) is False
+
+
+def test_a_local_directory_missing_its_vocabulary_is_not_ready(tmp_path):
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "model.safetensors").write_bytes(b"\x00")
+    assert model_assets_ready(str(d)) is False
+
+
+def test_a_complete_local_model_directory_is_ready(tmp_path):
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "model.safetensors").write_bytes(b"\x00")
+    (d / "tokenizer.json").write_text("{}")
+    assert model_assets_ready(str(d)) is True
+
+
+def test_a_path_that_is_not_a_directory_is_not_ready(tmp_path):
+    assert model_assets_ready(str(tmp_path / "nope")) is False
+
+
+# --- the config is read only when an id is actually needed (round 6) ---------
+
+
+def test_help_does_not_read_the_config(monkeypatch, capsys):
+    """`--help` printed the config-parse error above the usage text, because
+    the ids were resolved before argparse ran. Nothing that only prints help
+    should touch config.toml."""
+    import noesis.prefetch as prefetch
+
+    def explode():
+        raise ValueError("bad config")
+
+    monkeypatch.setattr("noesis.core.config.load_settings", explode)
+    monkeypatch.setattr("sys.argv", ["prefetch", "--help"])
+    with pytest.raises(SystemExit) as exit_info:
+        prefetch.main()
+    assert exit_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "bad config" not in captured.out + captured.err
+
+
+def test_skipping_the_models_does_not_read_the_config(monkeypatch, capsys):
+    # --skip-model skips the reranker too, so no id is needed and a broken
+    # config is none of this run's business: clean exit, nothing printed.
+    def explode():
+        raise ValueError("bad config")
+
+    monkeypatch.setattr("noesis.core.config.load_settings", explode)
+    code, called = _patched_main(monkeypatch, ["--skip-model"], expect_zero=False)
+    assert code == 0
+    assert called == {}
+    assert "bad config" not in capsys.readouterr().err

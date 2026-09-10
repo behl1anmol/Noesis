@@ -20,6 +20,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 # fastembed defaults its cache to the system tmp dir, which evaporates on
 # reboot and would trigger a re-download at runtime. Pin it somewhere
@@ -118,7 +119,25 @@ def model_assets_ready(model_id: str) -> bool:
         if not cached("config.json"):
             return False
     except HFValidationError:
-        return Path(model_id).expanduser().is_dir()
+        # A local directory, not a hub repo id. ADR-79 answered this with "the
+        # assets ARE that directory" — true enough when the only question was
+        # whether a repo had been fetched, and false once this function started
+        # promising config + weights + vocabulary: an empty or half-copied
+        # directory reported ready, and the plugin healthcheck printed [ OK ]
+        # for it (issue #52 review round 6). Same three requirements, asked of
+        # the directory instead of the cache.
+        directory = Path(model_id).expanduser()
+        if not directory.is_dir():
+            return False
+        return _has_required_files(lambda name: (directory / name).is_file())
+    return _has_required_files(cached)
+
+
+def _has_required_files(present: Callable[[str], bool]) -> bool:
+    """The weight + vocabulary half of :func:`model_assets_ready`, over any
+    "is this file there?" predicate — the HF cache for a hub repo id, plain
+    ``is_file()`` for a local model directory. One implementation so the two
+    cannot promise different contracts (issue #52 review round 6)."""
     weight_files = (
         "model.safetensors",
         "pytorch_model.bin",
@@ -142,10 +161,10 @@ def model_assets_ready(model_id: str) -> bool:
     # are rules with nothing to apply them to, and the vocab cannot be merged
     # without them.
     byte_level_bpe = ("vocab.json", "merges.txt")
-    if not any(cached(f) for f in weight_files):
+    if not any(present(f) for f in weight_files):
         return False
-    return any(cached(f) for f in tokenizer_files) or all(
-        cached(f) for f in byte_level_bpe
+    return any(present(f) for f in tokenizer_files) or all(
+        present(f) for f in byte_level_bpe
     )
 
 
@@ -318,20 +337,14 @@ def configured_model_ids() -> tuple[str, str] | None:
 
 def main() -> int:
     os.environ.setdefault(FASTEMBED_CACHE_ENV, default_fastembed_cache())
-    # None on both when the config is unreadable: argparse then leaves the
-    # model ids as None and the steps below skip, rather than silently
-    # fetching a default the service may not load.
-    configured = configured_model_ids()
-    default_model = configured[0] if configured else None
-    default_reranker_model = configured[1] if configured else None
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--skip-model", action="store_true", help="grammars only, no model weights"
     )
     parser.add_argument(
         "--model",
-        default=default_model,
-        help=f"embedding model to fetch (default: {default_model or 'from config.toml'})",
+        default=None,
+        help="embedding model to fetch (default: whatever config.toml names)",
     )
     parser.add_argument(
         "--skip-reranker",
@@ -340,10 +353,27 @@ def main() -> int:
     )
     parser.add_argument(
         "--reranker-model",
-        default=default_reranker_model,
-        help=f"reranker model to fetch (default: {default_reranker_model or 'from config.toml'})",
+        default=None,
+        help="reranker model to fetch (default: whatever config.toml names)",
     )
     args = parser.parse_args()
+
+    # Resolved AFTER parsing, and only when a step actually needs an id: the
+    # config was read before argparse ran, so `--help` printed a config-parse
+    # error above the usage text, and `--skip-model` complained about a file it
+    # was never going to consult (issue #52 review round 6). `None` survives
+    # here when the config cannot be read, and the steps below skip.
+    wants_embedder = not args.skip_model and args.model is None
+    wants_reranker = (
+        not (args.skip_model or args.skip_reranker) and args.reranker_model is None
+    )
+    if wants_embedder or wants_reranker:
+        configured = configured_model_ids()
+        if configured is not None:
+            if args.model is None:
+                args.model = configured[0]
+            if args.reranker_model is None:
+                args.reranker_model = configured[1]
 
     failed = prefetch_grammars()
     prefetch_bm25()

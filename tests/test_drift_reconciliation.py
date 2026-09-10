@@ -366,9 +366,10 @@ async def test_drift_self_heal_with_git_fast_path(ctx, repo):
 # ADR-81's reason for putting the embedder pair here applies unchanged to the
 # reranker: a pure-stdio MCP agent has no /healthz to poll, so without these
 # fields it has no way to learn that a reranked search is about to block on a
-# ~2.3GB load. The ctx fixture in this file is a bare object with no
-# `reranker` attribute at all — index_status must read it defensively, the
-# same way it already tolerates a duck-typed embedder.
+# ~2.2GB load. The ctx fixture in this file sets `reranker = None`, which is
+# what a real context with the kill switch off looks like; the separate
+# `delattr` test below covers a context that does not model a reranker at all,
+# which index_status must also tolerate rather than 500 on.
 
 
 async def test_index_status_reports_reranker_disabled_by_default(ctx, repo):
