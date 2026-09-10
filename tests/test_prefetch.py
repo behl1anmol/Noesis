@@ -451,3 +451,38 @@ def test_tokenizer_config_alone_is_not_a_tokenizer():
         ),
     ):
         assert model_assets_ready(MODEL_ID) is False
+
+
+def test_bpe_merges_without_a_vocab_is_not_ready():
+    """``merges.txt`` holds BPE merge RULES; the vocabulary it merges over
+    lives in ``vocab.json``. A cache with the weights and merges but no vocab
+    is the same false-``ready`` round 4 removed for ``tokenizer_config.json``
+    — and listing it was a self-contradiction with the docstring's own "every
+    entry carries a vocabulary" (issue #52 review round 5)."""
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "merges.txt": "/cache/merges.txt",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is False
+
+
+def test_a_byte_level_bpe_vocab_is_ready():
+    # The other half of the pair: vocab.json IS a vocabulary, with or without
+    # merges.txt beside it in the cache yet.
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "vocab.json": "/cache/vocab.json",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is True

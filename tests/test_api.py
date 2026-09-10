@@ -499,7 +499,7 @@ async def test_healthz_reports_unknown_for_a_context_without_a_reranker():
 async def test_healthz_probes_both_models_concurrently():
     """The two cache probes are independent, so ``/healthz`` runs them
     together rather than one after the other. Each is cheap — measured against
-    a real HF cache at 0.12ms cached and 0.01ms uncached — so this pins a
+    a real HF cache at ~0.07ms cached and ~0.006ms uncached — so this pins a
     structural property, not a performance fix, and the docstring says so
     rather than repeating the ~9ms figure an earlier version of it quoted
     (that was the one-off ``huggingface_hub`` import amortised over the timing

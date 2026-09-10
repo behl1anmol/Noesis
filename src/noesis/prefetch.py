@@ -130,8 +130,11 @@ def model_assets_ready(model_id: str) -> bool:
         "spiece.model",  # T5/ALBERT family
         "vocab.txt",  # wordpiece, e.g. CodeRankEmbed
         "vocab.json",  # byte-level BPE
-        "merges.txt",  # the BPE half of the pair above
     )
+    # `merges.txt` is deliberately absent for the same reason as
+    # `tokenizer_config.json`: it holds BPE merge RULES, and the vocabulary
+    # they merge over lives in `vocab.json`. Listing it would accept a cache
+    # that has the rules but nothing to apply them to.
     return any(cached(f) for f in weight_files) and any(
         cached(f) for f in tokenizer_files
     )

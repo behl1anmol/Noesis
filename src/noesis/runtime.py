@@ -264,7 +264,8 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
 
     async def _warm_up_reranker() -> None:
         # Issue #52: ADR-77's argument applies unchanged to the reranker, only
-        # more so — its model is ~2.3GB against the embedder's ~570MB, and
+        # more so — its weights are ~2.2GB against the embedder's ~520MB (both
+        # measured off a real HF cache), and
         # with `reranker.enabled=true` every search reranks by default
         # (ADR-34), so the first search pays that load in full.
         #
