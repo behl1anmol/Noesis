@@ -560,6 +560,19 @@ def test_a_local_directory_missing_its_vocabulary_is_not_ready(tmp_path):
     assert model_assets_ready(str(d)) is False
 
 
+def test_a_local_directory_missing_its_config_is_not_ready(tmp_path):
+    """The third requirement, which round 6 first left out of the directory
+    path: ``config.json`` was checked on the hub-cache branch only, so a
+    directory copy interrupted before it reported ``ready`` and the first
+    ``search_code`` then failed inside ``SentenceTransformer(...)`` (issue #52
+    review round 7)."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "model.safetensors").write_bytes(b"\x00")
+    (d / "tokenizer.json").write_text("{}")
+    assert model_assets_ready(str(d)) is False
+
+
 def test_a_complete_local_model_directory_is_ready(tmp_path):
     d = tmp_path / "model"
     d.mkdir()

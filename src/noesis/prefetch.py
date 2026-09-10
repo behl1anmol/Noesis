@@ -107,37 +107,41 @@ def model_assets_ready(model_id: str) -> bool:
 
     # ``[embedder] model`` (and ``[reranker] model``) is free text and
     # sentence-transformers accepts a local directory, which is not a hub repo
-    # id — the hub call raises HFValidationError for it. Unguarded, that propagated out of /healthz,
-    # GET /projects/{id}/status and the get_index_status MCP tool, so a
-    # locally-pinned model took down the very surface ADR-78 added to keep
-    # the health check honest. For a real directory the answer is knowable
-    # without the hub at all: the assets ARE that directory. Anything else
-    # malformed falls through to "missing", the fail-safe direction ADR-79
-    # already chose (a false "missing" costs a redundant prefetch; a false
-    # "ready" is the bug).
+    # id — the hub call raises HFValidationError for it. Unguarded, that
+    # propagated out of /healthz, GET /projects/{id}/status and the
+    # get_index_status MCP tool, so a locally-pinned model took down the very
+    # surface ADR-78 added to keep the health check honest (ADR-79).
+    #
+    # The try wraps the WHOLE check, so the fallback swaps only the LOOKUP —
+    # filesystem instead of hub cache — never the contract. ADR-79 answered a
+    # directory with "the assets ARE that directory", which held while the
+    # only question was whether a repo had been fetched and stopped holding
+    # once this function promised config + weights + vocabulary: an empty or
+    # half-copied directory reported ready and the plugin healthcheck printed
+    # [ OK ] for it (round 6). Guarding one probe instead of the whole check
+    # then left `config.json` unasked on the directory path (round 7).
+    #
+    # Anything else malformed falls through to "missing", the fail-safe
+    # direction ADR-79 chose: a false "missing" costs a redundant prefetch, a
+    # false "ready" is the bug.
     try:
-        if not cached("config.json"):
-            return False
+        return _has_required_files(cached)
     except HFValidationError:
-        # A local directory, not a hub repo id. ADR-79 answered this with "the
-        # assets ARE that directory" — true enough when the only question was
-        # whether a repo had been fetched, and false once this function started
-        # promising config + weights + vocabulary: an empty or half-copied
-        # directory reported ready, and the plugin healthcheck printed [ OK ]
-        # for it (issue #52 review round 6). Same three requirements, asked of
-        # the directory instead of the cache.
         directory = Path(model_id).expanduser()
         if not directory.is_dir():
             return False
         return _has_required_files(lambda name: (directory / name).is_file())
-    return _has_required_files(cached)
 
 
 def _has_required_files(present: Callable[[str], bool]) -> bool:
-    """The weight + vocabulary half of :func:`model_assets_ready`, over any
-    "is this file there?" predicate — the HF cache for a hub repo id, plain
-    ``is_file()`` for a local model directory. One implementation so the two
-    cannot promise different contracts (issue #52 review round 6)."""
+    """:func:`model_assets_ready`'s whole contract — config, weights and a
+    vocabulary — over any "is this file there?" predicate: the HF cache for a
+    hub repo id, plain ``is_file()`` for a local model directory. One
+    implementation so the two cannot promise different contracts (issue #52
+    review rounds 6 and 7: the first cut left the ``config.json`` check
+    outside this helper, and the directory path silently skipped it)."""
+    if not present("config.json"):
+        return False
     weight_files = (
         "model.safetensors",
         "pytorch_model.bin",
