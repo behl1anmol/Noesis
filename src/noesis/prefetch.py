@@ -500,6 +500,26 @@ async def _run_job(ctx: Any, job: dict[str, Any]) -> None:
             steps["reranker"]["status"] = "done"
             steps["reranker"]["detail"] = reranker_model
         job["status"] = "done"
+    except asyncio.CancelledError:
+        # Not an Exception subclass (a direct BaseException since Python
+        # 3.8), so the clause below never sees it — a job cancelled at
+        # teardown (close_runtime_context, e.g. server shutdown mid-download)
+        # left ``status`` stuck "running" forever: ``finished_at`` still got
+        # stamped by the ``finally`` below, but ``status``/``error`` never
+        # did, an internally inconsistent state no poller could resolve
+        # (code review finding). Mirrors indexer.execute_run's identical
+        # ``except BaseException`` handling for the identical scenario — no
+        # exception-level log here, since a shutdown-triggered cancellation
+        # is not a crash, and it is RE-RAISED (never swallowed): the caller
+        # awaiting/gathering this task, close_runtime_context included,
+        # still needs to see the cancellation complete.
+        for step in steps.values():
+            if step["status"] == "running":
+                step["status"] = "failed"
+                step["detail"] = "cancelled"
+        job["status"] = "failed"
+        job["error"] = "cancelled"
+        raise
     except Exception as exc:
         logger.exception("dashboard model prefetch failed")
         for step in steps.values():

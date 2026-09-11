@@ -11,6 +11,7 @@ claim in its name to be about the embedder.
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -895,3 +896,51 @@ async def test_an_unreadable_config_skips_model_and_reranker_steps(monkeypatch):
     # both applicable (non-skipped) steps finished, so this is a clean 100%,
     # not a report that half the job is missing.
     assert status["percent"] == 100.0
+
+
+async def test_a_cancelled_job_is_marked_failed_not_left_running_forever(monkeypatch):
+    """Code-review finding: ``_run_job``'s ``except Exception`` never sees
+    ``asyncio.CancelledError`` (a direct ``BaseException`` subclass since
+    Python 3.8), so a job cancelled at teardown (``close_runtime_context``,
+    e.g. server shutdown mid-download) left ``status`` stuck ``"running"``
+    forever — ``finished_at`` got stamped by the ``finally`` block but
+    ``status``/``error`` never did, an internally inconsistent state no
+    poller could ever resolve. Mirrors ``indexer.execute_run``'s own
+    ``except BaseException`` handling for the identical scenario ("must
+    also mark the run failed, or it would sit 'running' forever")."""
+    from noesis.prefetch import job_status, start_job
+
+    gate = threading.Event()
+    _stub_prefetch_steps(monkeypatch, grammars=lambda: gate.wait(timeout=5) and [])
+
+    ctx = SimpleNamespace()
+    start_job(ctx)
+    task = ctx.prefetch_task
+
+    # Let the task actually start and reach the blocking grammars step
+    # before cancelling: a task cancelled before it has run even once has
+    # CancelledError thrown before its body — and this function's own
+    # try/except — ever executes at all (a coroutine .throw()n before its
+    # first .send() raises at the call site without running any of the
+    # coroutine's code), which is a different, uninteresting case from the
+    # one under test here: a task cancelled while genuinely in-flight, the
+    # real close_runtime_context/shutdown scenario.
+    deadline = asyncio.get_event_loop().time() + 2
+    while job_status(ctx)["steps"]["grammars"]["status"] != "running":
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError("job never reached the grammars step")
+        await asyncio.sleep(0.01)
+
+    # Cancellation is only DELIVERED once the blocked thread's call returns
+    # (asyncio.to_thread cannot interrupt a running thread) — release it
+    # after requesting cancellation so the coroutine actually resumes and
+    # gets the chance to (mis)handle CancelledError.
+    task.cancel()
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    status = job_status(ctx)
+    assert status["status"] == "failed"
+    assert status["finished_at"] is not None
+    assert status["steps"]["grammars"]["status"] == "failed"
