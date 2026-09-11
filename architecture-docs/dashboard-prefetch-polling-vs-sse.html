@@ -1,0 +1,334 @@
+<title>Polling vs. SSE</title>
+<style>
+  :root{
+    --bg:#eef1f3; --bg-2:#e4e9ec; --surface:#ffffff; --surface-2:#f5f7f8;
+    --ink:#1b2430; --ink-2:#4a5568; --muted:#79828e;
+    --border:#d7dee2; --border-strong:#c2ccd2;
+    --poll:#1f7a68; --poll-bg:#e3f2ee; --poll-ink:#0f4a3e;
+    --sse:#b1522f; --sse-bg:#f7e9e2; --sse-ink:#7a3419;
+    --accent:#1f7a68; --accent-ink:#0f4a3e;
+    --warn:#a5690f; --warn-bg:#faf0dd;
+    --code-bg:#eef2f2; --code-ink:#1b2430;
+    --shadow: 0 1px 2px rgba(20,30,40,.05), 0 8px 24px rgba(20,30,40,.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#161b22; --bg-2:#12161c; --surface:#1c222b; --surface-2:#20262f;
+      --ink:#e7ecf1; --ink-2:#b7c1cc; --muted:#8b96a3;
+      --border:#2c343e; --border-strong:#3a4451;
+      --poll:#4fb99f; --poll-bg:#193230; --poll-ink:#8fd9c4;
+      --sse:#e08a63; --sse-bg:#33241d; --sse-ink:#f0b393;
+      --accent:#4fb99f; --accent-ink:#8fd9c4;
+      --warn:#e0a94a; --warn-bg:#332a17;
+      --code-bg:#12161c; --code-ink:#dbe2e8;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 28px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#161b22; --bg-2:#12161c; --surface:#1c222b; --surface-2:#20262f;
+    --ink:#e7ecf1; --ink-2:#b7c1cc; --muted:#8b96a3;
+    --border:#2c343e; --border-strong:#3a4451;
+    --poll:#4fb99f; --poll-bg:#193230; --poll-ink:#8fd9c4;
+    --sse:#e08a63; --sse-bg:#33241d; --sse-ink:#f0b393;
+    --accent:#4fb99f; --accent-ink:#8fd9c4;
+    --warn:#e0a94a; --warn-bg:#332a17;
+    --code-bg:#12161c; --code-ink:#dbe2e8;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 28px rgba(0,0,0,.35);
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    background:var(--bg); color:var(--ink); margin:0;
+    font-family:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size:16px; line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:920px; margin:0 auto; padding:56px 20px 90px;}
+  h1,h2,h3{font-family:"Fraunces", Georgia, serif; text-wrap:balance; color:var(--ink); font-weight:600;}
+  code, .mono{font-family:"IBM Plex Mono", ui-monospace, monospace;}
+  p{color:var(--ink-2); max-width:68ch;}
+  a{color:var(--accent);}
+
+  .eyebrow{
+    font:600 12px/1 "IBM Plex Mono", monospace; text-transform:uppercase; letter-spacing:.11em;
+    color:var(--muted); margin:0 0 10px;
+  }
+  header.hero{margin-bottom:40px;}
+  header.hero h1{font-size:clamp(32px, 5vw, 46px); margin:0 0 10px; letter-spacing:-.01em;}
+  header.hero .sub{font-size:17px; color:var(--ink-2); max-width:62ch; margin:0;}
+
+  /* ---- recommendation card ---- */
+  .rec{
+    background:var(--surface); border:1px solid var(--border); border-radius:14px;
+    box-shadow:var(--shadow); padding:26px 28px; margin:0 0 48px;
+    border-left:5px solid var(--poll);
+    display:grid; grid-template-columns:auto 1fr; gap:18px 22px; align-items:start;
+  }
+  .rec .badge{
+    font:700 11px/1 "IBM Plex Mono", monospace; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--poll-ink); background:var(--poll-bg); border:1px solid var(--poll);
+    border-radius:999px; padding:6px 12px; white-space:nowrap; align-self:start;
+  }
+  .rec h2{font-size:22px; margin:0 0 8px;}
+  .rec p{margin:0 0 6px; max-width:none;}
+  .rec ul{margin:12px 0 0; padding-left:20px; color:var(--ink-2);}
+  .rec li{margin-bottom:5px;}
+
+  section{margin:56px 0;}
+  section > h2{font-size:26px; margin:0 0 6px;}
+  section > .lede{margin:0 0 26px;}
+
+  /* ---- side by side diagrams ---- */
+  .compare{display:grid; grid-template-columns:1fr 1fr; gap:22px;}
+  @media (max-width:760px){ .compare{grid-template-columns:1fr;} }
+  .approach{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:20px 20px 8px; box-shadow:var(--shadow);
+  }
+  .approach.sse{ }
+  .approach .tag{
+    display:inline-flex; align-items:center; gap:7px;
+    font:700 12px/1 "IBM Plex Mono", monospace; text-transform:uppercase; letter-spacing:.06em;
+    border-radius:999px; padding:6px 12px; margin-bottom:12px;
+  }
+  .approach.poll .tag{ color:var(--poll-ink); background:var(--poll-bg); }
+  .approach.sse .tag{ color:var(--sse-ink); background:var(--sse-bg); }
+  .approach h3{font-size:19px; margin:0 0 8px;}
+  .approach p{font-size:14.5px; margin:0 0 14px;}
+  .approach pre.mermaid{
+    background:var(--surface-2); border:1px solid var(--border); border-radius:8px;
+    padding:10px; margin:0 0 4px; overflow-x:auto;
+  }
+
+  /* ---- comparison table ---- */
+  .table-wrap{overflow-x:auto; border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow);}
+  table{width:100%; border-collapse:collapse; background:var(--surface); font-size:14.5px;}
+  th, td{padding:13px 16px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top;}
+  thead th{
+    font:700 11px/1 "IBM Plex Mono", monospace; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--border-strong);
+  }
+  tbody tr:last-child td{border-bottom:none;}
+  td.trait{font-weight:600; color:var(--ink); width:19%;}
+  td.poll-col{border-left:3px solid var(--poll);}
+  td.sse-col{border-left:3px solid var(--sse);}
+  .win{
+    display:inline-block; font:700 10px/1 "IBM Plex Mono", monospace; letter-spacing:.05em;
+    text-transform:uppercase; color:var(--poll-ink); background:var(--poll-bg);
+    border-radius:5px; padding:3px 7px; margin-left:7px; vertical-align:1px;
+  }
+
+  /* ---- cost worked example ---- */
+  .worked{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    box-shadow:var(--shadow); padding:22px 24px; margin-top:24px;
+  }
+  .worked h3{font-size:16px; margin:0 0 12px;}
+  .sum-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:14px; margin:14px 0 16px;}
+  .sum-tile{background:var(--surface-2); border:1px solid var(--border); border-radius:9px; padding:13px 15px;}
+  .sum-tile .n{font:700 22px/1.1 "Fraunces", serif; color:var(--poll-ink); font-variant-numeric:tabular-nums;}
+  .sum-tile .l{font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-top:4px;}
+
+  /* ---- codebase grounding ---- */
+  .grounding{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    box-shadow:var(--shadow); padding:22px 26px;
+  }
+  .grounding .row{display:flex; gap:14px; padding:12px 0; border-bottom:1px solid var(--border);}
+  .grounding .row:last-child{border-bottom:none;}
+  .grounding .row .path{flex:0 0 auto; font-size:13px; padding-top:1px;}
+  .grounding .row .desc{font-size:14.5px; color:var(--ink-2);}
+  .codebox{
+    background:var(--code-bg); color:var(--code-ink); border:1px solid var(--border); border-radius:6px;
+    padding:2px 7px; font-size:13px; white-space:nowrap;
+  }
+
+  .callout{
+    background:var(--warn-bg); border:1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+    border-radius:10px; padding:16px 20px; font-size:14.5px; color:var(--ink);
+  }
+  .callout strong{color:var(--warn);}
+
+  footer{margin-top:60px; padding-top:22px; border-top:1px solid var(--border); font-size:13px; color:var(--muted);}
+  footer .mono{color:var(--ink-2);}
+
+  ::selection{background:var(--poll-bg); color:var(--poll-ink);}
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">Noesis dashboard · issue #51 · model-prefetch progress</p>
+    <h1>Polling vs. SSE, for one button</h1>
+    <p class="sub">The "Download models" button needs a progress bar. Two ways to move that progress from the server to the browser — compared against what Noesis already does, not in the abstract.</p>
+  </header>
+
+  <div class="rec">
+    <span class="badge">Recommendation</span>
+    <div>
+      <h2>Use polling.</h2>
+      <p>Not because SSE is worse in general — because Noesis already has a live-progress mechanism, built for the index-run progress bars, and this job is small enough that reusing it costs nothing and building a second one buys nothing.</p>
+      <ul>
+        <li>The dashboard already polls a JSON status endpoint every 2–8s for the index-run progress bar. This reuses that exact loop instead of adding a second, different one.</li>
+        <li>The download only has 4 checkpoints (grammars → tokenizer assets → model → reranker). SSE can't report progress any smoother than that — there's nothing finer-grained to push.</li>
+        <li>Zero new moving parts: no open connection to manage, no reconnect logic, no proxy-buffering edge cases.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section>
+    <h2>How each one actually moves the bar</h2>
+    <p class="lede">Same goal — the browser learns "grammars done, downloading the model now, 3 of 4 steps" — two different plumbing choices.</p>
+
+    <div class="compare">
+      <div class="approach poll">
+        <span class="tag">① Polling — chosen</span>
+        <h3>Browser asks, server answers</h3>
+        <p>The browser asks "how's it going?" every couple of seconds. The server just reads a status it's already keeping in memory and replies. No request is ever left open.</p>
+        <pre class="mermaid">
+sequenceDiagram
+    participant B as Browser
+    participant S as Server
+
+    B->>S: click "Download models"
+    S-->>B: 202 accepted
+    Note over S: background job starts<br/>(grammars → tokenizer → model → reranker)
+
+    loop every 2s while busy, 8s once idle
+        B->>S: GET /api/prefetch
+        S-->>B: {status, percent, steps}
+        Note over B: repaint progress bar
+    end
+
+    B->>S: GET /api/prefetch
+    S-->>B: {status: "done", percent: 100}
+        </pre>
+      </div>
+
+      <div class="approach sse">
+        <span class="tag">② SSE — not chosen</span>
+        <h3>Server keeps a line open</h3>
+        <p>The browser opens one connection and leaves it open. The server pushes an update down that same pipe the moment something changes, instead of waiting to be asked.</p>
+        <pre class="mermaid">
+sequenceDiagram
+    participant B as Browser
+    participant S as Server
+
+    B->>S: click "Download models"
+    S-->>B: 202 accepted
+    B->>S: GET /api/prefetch/stream
+    Note over B,S: connection held open
+
+    S--)B: event: grammars done
+    S--)B: event: tokenizer done
+    S--)B: event: model downloading… 40%
+    S--)B: event: model done
+    S--)B: event: reranker done
+
+    S--)B: event: complete
+    Note over B,S: connection closes
+        </pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Side by side</h2>
+    <p class="lede">Where they actually differ, for a local, single-operator admin control — not for a chat app or a stock ticker, which is the use case SSE is usually sold on.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Trait</th><th>① Polling</th><th>② SSE</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="trait">New server code</td>
+            <td class="poll-col">One plain JSON GET route. Same shape as the five other status endpoints the dashboard already has.<span class="win">Simpler</span></td>
+            <td class="sse-col">A streaming response the connection stays inside of — a different code path from every other route in the app.</td>
+          </tr>
+          <tr>
+            <td class="trait">New client code</td>
+            <td class="poll-col">One more branch in the polling loop that already exists (<code class="mono">app.js</code>'s <code class="mono">poll()</code>).<span class="win">Reused</span></td>
+            <td class="sse-col"><code class="mono">EventSource</code>, its own reconnect-on-drop handling, a second live-update code path next to the polling one that still runs the rest of the page.</td>
+          </tr>
+          <tr>
+            <td class="trait">Update granularity</td>
+            <td class="poll-col">Learns about a finished step within 2–8s.</td>
+            <td class="sse-col">Learns instantly — but the download itself only reports 4 checkpoints, so "instant" delivers the same 4 numbers, just sooner.</td>
+          </tr>
+          <tr>
+            <td class="trait">Cost per update</td>
+            <td class="poll-col">One small request/response, ~40–60 of them over a typical download.<span class="win">Negligible</span></td>
+            <td class="sse-col">One open socket for the whole download's duration, held by the server the entire time.</td>
+          </tr>
+          <tr>
+            <td class="trait">If the tab is backgrounded</td>
+            <td class="poll-col">Loop already pauses on a hidden tab and resumes on return — built in.</td>
+            <td class="sse-col">Connection either idles open (wasted) or the browser throttles it — needs its own handling either way.</td>
+          </tr>
+          <tr>
+            <td class="trait">Debuggability</td>
+            <td class="poll-col"><code class="mono">curl localhost:8000/api/prefetch</code> — that's the whole surface.<span class="win">Simplest</span></td>
+            <td class="sse-col">Needs an SSE-aware client or browser dev tools' network-stream view to inspect.</td>
+          </tr>
+          <tr>
+            <td class="trait">Failure recovery</td>
+            <td class="poll-col">A dropped request just retries on the next tick — no special case.<span class="win">No special case</span></td>
+            <td class="sse-col">A dropped connection needs explicit reconnect logic, or progress silently stops updating.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="worked">
+      <h3>Does polling every 2s actually add up to "a lot of requests"?</h3>
+      <p style="margin-bottom:14px;">Worked against a real download this size — run end-to-end while building this: 22 grammars (seconds), the BM25 tokenizer files (seconds), and the ~550&nbsp;MB embedding model (~20s on this connection).</p>
+      <div class="sum-grid">
+        <div class="sum-tile"><div class="n">~45s</div><div class="l">typical total download time</div></div>
+        <div class="sum-tile"><div class="n">≈20</div><div class="l">poll requests, at 2s while busy</div></div>
+        <div class="sum-tile"><div class="n">~250&nbsp;B</div><div class="l">response size per poll</div></div>
+        <div class="sum-tile"><div class="n">~5&nbsp;KB</div><div class="l">total traffic for the whole bar</div></div>
+      </div>
+      <p style="margin:0;">Each poll is a dictionary read already sitting in memory — no disk, no database, no Qdrant round-trip. On a single-operator local dashboard this is not the "multiple requests = overkill" case that polling earns its bad reputation from; that reputation comes from polling a slow or rate-limited <em>external</em> API at high frequency from many clients, which this is not.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why this isn't a fresh decision</h2>
+    <p class="lede">Noesis already answered this question once, for index-run progress, and answered it with polling. This reuses that answer rather than re-opening it.</p>
+    <div class="grounding">
+      <div class="row">
+        <span class="path"><span class="codebox">ctx.progress</span></span>
+        <span class="desc">In-memory dict already tracking live progress for index runs — the new job reuses the identical shape (<span class="codebox">ctx.prefetch_job</span>) instead of inventing a second kind of live state.</span>
+      </div>
+      <div class="row">
+        <span class="path"><span class="codebox">GET /runs/{'{'}run_id{'}'}</span></span>
+        <span class="desc">The existing polled status endpoint for a running index — same pattern the new <span class="codebox">GET /api/prefetch</span> follows.</span>
+      </div>
+      <div class="row">
+        <span class="path"><span class="codebox">app.js → poll()</span></span>
+        <span class="desc">The dashboard's one polling loop, backing off 2s → 8s and pausing on a hidden tab — extended with one more condition rather than duplicated.</span>
+      </div>
+      <div class="row">
+        <span class="path"><span class="codebox">§4.12 design principle</span></span>
+        <span class="desc">Server-rendered pages, no SPA tooling, no build step. Polling fits that directly; SSE would be the first long-lived connection anywhere in the codebase.</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>When SSE would actually be worth it</h2>
+    <p class="lede">Not "never" — just not for this. It earns its cost when either is true:</p>
+    <div class="callout">
+      <strong>Sub-second freshness genuinely matters</strong> — a live chat, a stock ticker, a collaborative cursor — where a 2s lag is visibly wrong, not just slightly stale. <strong>Or</strong> the underlying work reports far more granular progress than 4 checkpoints, so streaming would show something polling structurally can't. Model-prefetch progress is neither: it's an admin button clicked rarely, tracking a handful of coarse steps, on a dashboard nobody is staring at frame-by-frame.
+    </div>
+  </section>
+
+  <footer>
+    <p style="max-width:none;">Implemented as <span class="mono">GET</span>/<span class="mono">POST /api/prefetch</span>, decision recorded as ADR row 95 (<span class="mono">docs/project/decisions.md</span>, <span class="mono">architecture-docs/code-indexer-expanded-architecture.md</span> Appendix A) — issue <span class="mono">#51</span>.</p>
+  </footer>
+
+</div>
