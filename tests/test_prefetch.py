@@ -692,3 +692,30 @@ def test_an_unusable_path_pin_reports_missing_instead_of_raising():
     # so a TOML integer reaches here as an int and `Path(123)` raises TypeError
     # (issue #52 review round 10). Same contract: unusable pin, "missing".
     assert model_assets_ready(123) is False
+
+
+def test_a_tilde_pin_is_not_expanded_because_the_loader_does_not_expand_it(
+    tmp_path, monkeypatch
+):
+    """``sentence_transformers`` tests the LITERAL string with
+    ``os.path.exists``: ``CrossEncoder("~/models/mymodel")`` raises
+    ``FileNotFoundError: Path ~/models/mymodel not found`` even when that
+    directory exists and is complete (measured). Expanding ``~`` here therefore
+    produced a false READY — health green, plugin healthcheck exit 0, and the
+    load failing outright — which is the one direction this check must never
+    get wrong (issue #52 review round 11).
+
+    Reporting "missing" is both fail-safe AND accurate: the pin as written does
+    not load.
+    """
+    home = tmp_path / "home"
+    model = home / "models" / "mymodel"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text("{}")
+    (model / "model.safetensors").write_bytes(b"\x00")
+    (model / "tokenizer.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(home))
+
+    assert model_assets_ready("~/models/mymodel") is False
+    # The same directory named the way the loader can actually open it.
+    assert model_assets_ready(str(model)) is True

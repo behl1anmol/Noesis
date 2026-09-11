@@ -124,26 +124,28 @@ def model_assets_ready(model_id: str) -> bool:
     # falls through to "missing", the fail-safe direction ADR-79 chose: a false
     # "missing" costs a redundant prefetch, a false "ready" is the bug.
     try:
-        directory = Path(model_id).expanduser()
+        # The LITERAL string, deliberately not ``expanduser()``'d: the loaders
+        # test the pin as written, so ``CrossEncoder("~/models/m")`` raises
+        # ``FileNotFoundError: Path ~/models/m not found`` even when that
+        # directory exists and is complete (measured). Expanding here reported
+        # "ready" for a pin that cannot load — a false READY, the one direction
+        # this check must never get wrong (issue #52 review round 11).
+        directory = Path(model_id)
         if directory.is_dir():
             return _has_required_files(lambda name: (directory / name).is_file())
-    except (OSError, RuntimeError, TypeError):
-        # The path itself is unusable, not merely absent: `~nosuchuser/model`
-        # raises RuntimeError("Could not determine home directory") from
-        # expanduser, and a segment past NAME_MAX raises OSError(ENAMETOOLONG)
-        # from is_dir, and a non-string pin (`[embedder] model = 123`, which
-        # load_settings does not type-check) raises TypeError from Path()
-        # itself — none of which pathlib swallows. Escaping here means
+    except (OSError, TypeError):
+        # The pin is unusable, not merely absent: a segment past NAME_MAX
+        # raises OSError(ENAMETOOLONG) from is_dir, and a non-string pin
+        # (`[embedder] model = 123`, which load_settings does not type-check)
+        # raises TypeError from Path() itself — neither of which pathlib
+        # swallows. (RuntimeError sat here for `~nosuchuser/...`, which
+        # expanduser raised; dropping the expansion dropped that source with
+        # it — such a pin is now simply not a directory.) Escaping here means
         # /healthz, GET /projects/{id}/status and get_index_status all 500 on a
         # typo'd pin, which is the failure ADR-79's guard exists to prevent
         # (issue #52 review round 9). "missing" is the answer: nothing readable
         # is there, and no hub id can be built from it either.
         return False
-    # Not a directory: a hub repo id, or malformed. ``try_to_load_from_cache``
-    # raises HFValidationError for the malformed case, which must not escape —
-    # it used to propagate out of /healthz, GET /projects/{id}/status and the
-    # get_index_status MCP tool, taking down the very surface ADR-78 added to
-    # keep the health check honest (ADR-79).
     try:
         return _has_required_files(cached)
     except HFValidationError:
@@ -351,7 +353,7 @@ def configured_model_ids() -> tuple[str, str] | None:
     shipped defaults, which is exactly right for a fresh install. A config
     that exists but will not parse is different: it means the operator
     configured something and we cannot see what, so ``None`` comes back and
-    the caller skips the model downloads rather than fetching up to ~4.5 GB of
+    the caller skips the model downloads rather than fetching ~2.9 GB of
     defaults the service may never load (ADR-90). The config-independent
     assets — grammars, BM25 — still come down."""
     from noesis.core.config import load_settings

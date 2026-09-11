@@ -113,8 +113,10 @@ def main() -> None:
             print(
                 f"  [FAIL] {label} model assets not found in the local cache — "
                 f"{consequence}.\n"
-                f"         Fetch them now: uv run python -m noesis.prefetch"
-                f"{extra}"
+                f"         Fetch them now: uv run python -m noesis.prefetch\n"
+                f"         (run it with the same NOESIS_CONFIG / working "
+                f"directory as the service — prefetch reads the model ids from "
+                f"whichever config IT resolves){extra}"
             )
             return 1
         if assets == "ready":
