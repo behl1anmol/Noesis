@@ -123,6 +123,18 @@ def model_assets_ready(model_id: str) -> bool:
     # Only the lookup changes. An unparseable id that is also not a directory
     # falls through to "missing", the fail-safe direction ADR-79 chose: a false
     # "missing" costs a redundant prefetch, a false "ready" is the bug.
+    # A blank pin is malformed, not "the current directory" — but
+    # ``Path("").is_dir()`` IS True (it means cwd), and ``load_settings``
+    # does not reject an empty ``[embedder]``/``[reranker] model``. Left
+    # unguarded, a fresh install run from inside a model directory (or any
+    # cwd that happens to hold matching filenames) reported "ready" for a pin
+    # that was never actually set — probing the service's cwd instead of
+    # answering "missing" (issue #52 review round 12). An empty repo id is
+    # also rejected by ``huggingface_hub``'s own validation
+    # (``HFValidationError``), so "missing" is the same verdict the hub-lookup
+    # path below would give if this didn't intercept first.
+    if isinstance(model_id, str) and not model_id.strip():
+        return False
     try:
         # The LITERAL string, deliberately not ``expanduser()``'d: the loaders
         # test the pin as written, so ``CrossEncoder("~/models/m")`` raises

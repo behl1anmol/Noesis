@@ -719,3 +719,24 @@ def test_a_tilde_pin_is_not_expanded_because_the_loader_does_not_expand_it(
     assert model_assets_ready("~/models/mymodel") is False
     # The same directory named the way the loader can actually open it.
     assert model_assets_ready(str(model)) is True
+
+
+def test_an_empty_pin_does_not_probe_the_working_directory(tmp_path, monkeypatch):
+    """``Path("").is_dir()`` is True — it means "the current directory" — so
+    an unset-but-present ``[embedder] model = ""`` (``load_settings`` does not
+    reject an empty string) probed the SERVICE's cwd instead of answering
+    "missing" for the malformed pin. Reproduced: a cwd that happens to hold
+    ``config.json`` + a weight file + a tokenizer file (a fresh install run
+    from inside a model directory, say) made this read ``True`` (issue #52
+    review round 12). An empty repo id is also rejected by
+    ``huggingface_hub``'s own validation (``HFValidationError``), so "missing"
+    is the answer the hub-lookup path would already give if the directory
+    check did not intercept it first — this closes that interception, it does
+    not invent a new verdict."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "model.safetensors").write_bytes(b"\x00")
+    (tmp_path / "tokenizer.json").write_text("{}")
+
+    assert model_assets_ready("") is False
+    assert model_assets_ready("   ") is False
