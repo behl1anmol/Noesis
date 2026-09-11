@@ -116,6 +116,12 @@ def _project_summary(ctx: Any, project: sqlite3.Row) -> dict[str, Any]:
 def overview(ctx: Any) -> dict[str, Any]:
     """The GET / read model: every project's health at a glance."""
     projects = [_project_summary(ctx, row) for row in state.list_projects(ctx.conn)]
+    # Local import, matching jobs.py's existing convention for reaching into
+    # noesis.prefetch (index_status imports model_readiness/reranker_readiness
+    # the same way) — prefetch.py lives outside core/ on purpose (its own
+    # module docstring), and job_status only reads an in-memory dict, no I/O.
+    from noesis.prefetch import job_status
+
     return {
         "projects": projects,
         "totals": {
@@ -130,6 +136,9 @@ def overview(ctx: Any) -> dict[str, Any]:
             ),
         },
         "device": device_info(ctx),
+        # Issue #51: the dashboard's "Download models" progress, process-wide
+        # rather than per-project (see runtime.AppContext.prefetch_job).
+        "prefetch": job_status(ctx),
     }
 
 

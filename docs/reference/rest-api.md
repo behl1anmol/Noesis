@@ -83,6 +83,7 @@ Server-rendered pages (excluded from the OpenAPI schema) and the JSON they poll 
 | `GET` | `/api/state` | overview JSON (polled for live progress/badges) |
 | `GET` | `/api/projects/{id}/state` | project-detail JSON |
 | `GET` | `/api/usage?days=30` | usage JSON |
+| `GET` | `/api/prefetch` | model-prefetch job status (polled; folded into `/api/state`'s `prefetch` field too) |
 
 ### Actions (all require local origin)
 
@@ -92,6 +93,24 @@ Server-rendered pages (excluded from the OpenAPI schema) and the JSON they poll 
 | `POST` | `/api/projects/{id}/reindex-pending` | index only the watcher's pending changes | 202 / 400 / 404 / 409 / 429 |
 | `POST` | `/api/settings/device` | set compute device (`auto`/`cuda`/`mps`/`cpu`), hot-reloads models | 200 / 400 |
 | `DELETE` | `/api/projects/{id}` | delete a project's index entirely (chunks, runs, pending) — source files untouched | 200 / 404 |
+| `POST` | `/api/prefetch` | start the "Download models" background job ([ADR row 95](../project/decisions.md)) | 202 |
+
+### `GET` / `POST` `/api/prefetch` ([ADR row 95](../project/decisions.md))
+
+The dashboard's "Download models" button, backed by the same functions `uv run python -m noesis.prefetch` runs from a terminal (grammars, BM25 tokenizer assets, the configured embedding model, the configured reranker model) — no separate download path, just a UI trigger over the existing one. One job at a time, process-wide (not per-project): a second `POST` while a job is running answers `{"status": "already_running"}` instead of launching a concurrent download.
+
+```json
+{"status": "running", "started_at": "2026-09-11T12:00:00+00:00", "finished_at": null,
+ "error": null, "percent": null,
+ "steps": {
+   "grammars": {"status": "done", "detail": null},
+   "bm25": {"status": "done", "detail": null},
+   "model": {"status": "running", "detail": null},
+   "reranker": {"status": "pending", "detail": null}
+ }}
+```
+
+`status` is `idle` (never triggered), `running`, `done`, or `failed`. `percent` is `null` while running — the underlying functions report no sub-step progress, so this is an honest "step N of M is in flight" rather than a fabricated fraction (same "no smoothing pretence" as `GET /runs/{run_id}`'s `progress.eta_s`) — and becomes the percentage of applicable steps that finished `done` once the job stops running (100 on success; partial if it failed part-way; a `skipped` step, e.g. the model/reranker pair when `config.toml` cannot be read, counts toward neither the numerator nor the denominator). A hard failure stops the remaining steps rather than attempting them (a broken network fails every later step the same way).
 
 ### Registration flow ([ADR-42](../project/decisions.md))
 

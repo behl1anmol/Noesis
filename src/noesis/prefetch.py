@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # fastembed defaults its cache to the system tmp dir, which evaporates on
 # reboot and would trigger a re-download at runtime. Pin it somewhere
@@ -376,6 +380,171 @@ def configured_model_ids() -> tuple[str, str] | None:
         print(f"could not read config: {exc}", file=sys.stderr)
         return None
     return cfg.embedder.model, cfg.reranker.model
+
+
+# -- dashboard-triggered background job (issue #51) --------------------------
+#
+# The dashboard's "Download models" button, backed by a REST trigger + a
+# polled status endpoint (ADR row recorded via /adr — polling chosen over
+# SSE: this mirrors jobs.py's existing ctx.progress/run_progress pattern for
+# index runs exactly, so the dashboard gains a second live-progress surface
+# built the same way as the first instead of a second mechanism). No new
+# download code: this sequences the SAME four functions main() calls, in the
+# SAME order, with the SAME default of fetching the reranker unless the
+# config cannot be read (ADR-91 — a disabled-but-fetched reranker is #58,
+# deliberately not fixed here).
+#
+# One job at a time, process-wide (not per-project — there is nothing to
+# scope a model download to). Tracked on ctx (AppContext, defined in
+# runtime.py — this module never imports it, to avoid a cycle) as a plain
+# dict rather than a dataclass, matching ctx.progress's own shape: it is
+# read by prefetch_status/job_status, mutated only from _run_job's single
+# background task, and never persisted (a stale "running" from a killed
+# process is meaningless, exactly the argument ctx.progress's own comment
+# makes for index runs).
+PREFETCH_STEPS: tuple[str, ...] = ("grammars", "bm25", "model", "reranker")
+
+
+def _idle_steps() -> dict[str, dict[str, Any]]:
+    return {name: {"status": "pending", "detail": None} for name in PREFETCH_STEPS}
+
+
+def job_status(ctx: Any) -> dict[str, Any]:
+    """Dashboard read model for the prefetch progress bar — the same shape
+    whether or not a job has ever run, so the template/JS never special-case
+    "no job yet" versus "one finished a while ago".
+
+    ``percent`` is ``None`` (indeterminate — ADR-79's "no smoothing
+    pretence", same as jobs.run_progress) while a job is actively running:
+    prefetch's functions report no sub-step progress (deliberately —
+    reusing them without touching their internals is the whole point, see
+    the module docstring above), so the honest signal is "step N of M is in
+    flight", not a fabricated percentage. Once the job stops running,
+    ``percent`` becomes the fraction of applicable steps that finished
+    ``done`` — 100 on success, partial on a failure part-way through.
+    "Skipped" steps (config unreadable, ADR-91) are excluded from both the
+    numerator and denominator, matching main()'s own "skipped is not the
+    same as failed" distinction."""
+    job = getattr(ctx, "prefetch_job", None)
+    if job is None:
+        return {
+            "status": "idle",
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "percent": None,
+            "steps": _idle_steps(),
+        }
+    steps = {name: dict(job["steps"][name]) for name in PREFETCH_STEPS}
+    percent = None
+    if job["status"] != "running":
+        applicable = [s for s in steps.values() if s["status"] != "skipped"]
+        if applicable:
+            done = sum(1 for s in applicable if s["status"] == "done")
+            percent = round(done / len(applicable) * 100.0, 1)
+    return {
+        "status": job["status"],
+        "started_at": job["started_at"],
+        "finished_at": job["finished_at"],
+        "error": job["error"],
+        "percent": percent,
+        "steps": steps,
+    }
+
+
+async def _run_job(ctx: Any, job: dict[str, Any]) -> None:
+    """Runs grammars → bm25 → model → reranker sequentially, each through
+    ``asyncio.to_thread`` (they are blocking network/disk calls — the same
+    reason ``jobs.py``'s index runs never call ``execute_run`` inline).
+    Stops at the first hard failure rather than attempting the remaining
+    steps: a failed bm25/model fetch is almost always "no network" or "disk
+    full", and every later step would fail the same way, so continuing would
+    only burn more time before reporting the one thing the operator needs to
+    know. ``prefetch_grammars`` is the one exception baked into its own
+    return contract — a missing grammar is degraded, not fatal (module
+    docstring) — so a partial grammar failure still counts that step
+    ``done`` with the failure list in ``detail``, exactly like the CLI's
+    stderr line."""
+    steps = job["steps"]
+    try:
+        steps["grammars"]["status"] = "running"
+        failed = await asyncio.to_thread(prefetch_grammars)
+        steps["grammars"]["status"] = "done"
+        if failed:
+            steps["grammars"]["detail"] = (
+                f"{len(failed)} grammar(s) failed: {', '.join(failed)}"
+            )
+
+        steps["bm25"]["status"] = "running"
+        await asyncio.to_thread(prefetch_bm25)
+        steps["bm25"]["status"] = "done"
+
+        # Same resolution as main()'s default run (no --skip-model/
+        # --skip-reranker/--model/--reranker-model): whatever config.toml
+        # names, or skip the model steps if it cannot be read (ADR-90/91).
+        configured = configured_model_ids()
+        if configured is None:
+            steps["model"]["status"] = "skipped"
+            steps["model"]["detail"] = "config.toml could not be read"
+            steps["reranker"]["status"] = "skipped"
+            steps["reranker"]["detail"] = "config.toml could not be read"
+        else:
+            embedder_model, reranker_model = configured
+            steps["model"]["status"] = "running"
+            await asyncio.to_thread(prefetch_model, embedder_model)
+            steps["model"]["status"] = "done"
+            steps["model"]["detail"] = embedder_model
+
+            steps["reranker"]["status"] = "running"
+            await asyncio.to_thread(prefetch_reranker, reranker_model)
+            steps["reranker"]["status"] = "done"
+            steps["reranker"]["detail"] = reranker_model
+        job["status"] = "done"
+    except Exception as exc:
+        logger.exception("dashboard model prefetch failed")
+        for step in steps.values():
+            if step["status"] == "running":
+                step["status"] = "failed"
+                step["detail"] = str(exc)
+        job["status"] = "failed"
+        job["error"] = str(exc)
+    finally:
+        job["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def start_job(ctx: Any) -> dict[str, Any]:
+    """Dashboard action: kick off the background job above. Returns the
+    202-style acceptance body the REST route forwards verbatim.
+
+    Only one job runs at a time — a second click while one is in flight
+    returns ``already_running`` rather than launching a concurrent download
+    (mirrors ``jobs.launch_index_run``'s identical guard for index runs, for
+    the identical reason: two overlapping downloads into the same HF cache
+    directory buy nothing and only contend for bandwidth/disk).
+
+    No atomic-transaction dance here unlike ``launch_index_run`` — that one
+    guards against two *processes* (HTTP + stdio MCP) racing the same
+    SQLite-backed launch; this job is REST-only (issue #51 gave it no MCP
+    tool) and the check-then-launch below runs to completion on one event
+    loop before any await, so there is no window for a second call to see a
+    stale "not running" state."""
+    existing = getattr(ctx, "prefetch_job", None)
+    if existing is not None and existing["status"] == "running":
+        return {"status": "already_running"}
+    job: dict[str, Any] = {
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "error": None,
+        "steps": _idle_steps(),
+    }
+    ctx.prefetch_job = job
+    # Reference retained on ctx (not just fired-and-forgotten): an
+    # unreferenced asyncio.Task can be garbage-collected mid-flight, and
+    # close_runtime_context needs it to cancel/await this job at teardown
+    # like the embedder/reranker warm-ups (runtime.py).
+    ctx.prefetch_task = asyncio.create_task(_run_job(ctx, job))
+    return {"status": "accepted"}
 
 
 def main() -> int:

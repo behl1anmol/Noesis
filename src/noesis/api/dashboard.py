@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from noesis import prefetch
 from noesis.api.security import verify_local_origin
 from noesis.core import dashboard as core_dashboard
 from noesis.core.state import IndexCapacityReached, MixedModelError
@@ -155,7 +156,34 @@ async def api_usage(request: Request, days: int = 30) -> dict[str, Any]:
     return core_dashboard.usage(request.app.state.ctx, days=max(1, min(days, 365)))
 
 
+@dashboard_router.get("/api/prefetch")
+async def api_prefetch_status(request: Request) -> dict[str, Any]:
+    """Issue #51 — polled by the dashboard's "Download models" progress bar,
+    same cadence convention as every other live surface here (app.js's
+    poll())."""
+    return prefetch.job_status(request.app.state.ctx)
+
+
 # -- actions ------------------------------------------------------------------
+
+
+@dashboard_router.post(
+    "/api/prefetch", status_code=202, dependencies=[Depends(verify_local_origin)]
+)
+async def api_prefetch_start(request: Request) -> dict[str, Any]:
+    """Issue #51 — the "Download models" button. Kicks off the SAME
+    functions ``uv run python -m noesis.prefetch`` runs (module docstring of
+    ``noesis.prefetch``), in a background task the dashboard polls via
+    ``GET /api/prefetch``.
+
+    Guarded by ``verify_local_origin`` like every other mutating dashboard
+    action (register, reindex, delete, device) — the issue's own "blast
+    radius" question is answered the same way this codebase already answers
+    it for reindex/delete: bind 127.0.0.1 + the Origin/Referer check is the
+    whole auth model for this local-only surface (ADR-25), and a model
+    download is strictly lower blast radius than either of those (purely
+    additive cache population; it cannot corrupt or delete index state)."""
+    return prefetch.start_job(request.app.state.ctx)
 
 
 @dashboard_router.post(
