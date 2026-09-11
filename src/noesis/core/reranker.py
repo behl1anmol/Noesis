@@ -28,6 +28,8 @@ import threading
 import time
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from .model_worker import _DeviceGenerationTracker
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,7 +98,7 @@ _JOB = 0
 _SHUTDOWN = 1
 
 
-class LocalCrossEncoderReranker:
+class LocalCrossEncoderReranker(_DeviceGenerationTracker):
     """Default local Reranker: bge-reranker-v2-m3 via sentence-transformers.
 
     One dedicated single worker thread owns the model — forward passes are
@@ -120,8 +122,6 @@ class LocalCrossEncoderReranker:
         _load_model: Callable[[], Any] | None = None,
     ) -> None:
         self._model_id = model_id
-        self._device = device
-        self._resolved_device: str | None = None  # set at model load
         self._batch_size = batch_size
         self._load_model = _load_model or self._default_load
         self._queue: queue.Queue[
@@ -130,13 +130,9 @@ class LocalCrossEncoderReranker:
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._closed = False
-        # Bumped by set_device (ADR-40): the worker reloads the model when
-        # its loaded generation falls behind.
-        self._generation = 0
-        # (generation, device) for the load currently in flight — written by
-        # the worker loop before it calls the loader, read by _default_load.
-        # Both happen on the worker thread, so the pair cannot be torn.
-        self._load_target: tuple[int, str | None] = (0, device)
+        # set_device/_generation/_load_target/_resolved_device (ADR-40, issue
+        # #61): shared with embedder.py via model_worker._DeviceGenerationTracker.
+        self._init_device_generation(device)
 
     @property
     def model_id(self) -> str:
@@ -168,12 +164,13 @@ class LocalCrossEncoderReranker:
         # stay truthy if it raises. ADR-79 fixed the identical pattern in
         # embedder.py and explicitly declined to fix it here because nothing
         # read it then; reading it is exactly what issue #52 adds.
-        # The worker loop's snapshot, not a fresh read: it is the (generation,
-        # device) pair THIS load is for. Publishing `_resolved_device` below is
-        # conditional on that generation still being current — a `set_device`
-        # (ADR-40) landing mid-load must not have its None overwritten by the
-        # superseded load, or the health surface reports ready for a model the
-        # worker is about to drop and reload (issue #52 review).
+        # The worker loop's snapshot (_snapshot_load_target, issue #61), not a
+        # fresh read: it is the (generation, device) pair THIS load is for.
+        # _publish_resolved_device below is conditional on that generation
+        # still being current — a `set_device` (ADR-40) landing mid-load must
+        # not have its None overwritten by the superseded load, or the health
+        # surface reports ready for a model the worker is about to drop and
+        # reload (issue #52 review).
         generation, device = self._load_target
         resolved = resolve_device(device)
         # Frame the load like the embedder: the cross-encoder is ~2.3GB and on
@@ -187,11 +184,9 @@ class LocalCrossEncoderReranker:
         )
         started = time.perf_counter()
         model = CrossEncoder(self._model_id, device=resolved)
-        with self._lock:
-            if self._generation == generation:
-                self._resolved_device = resolved
+        self._publish_resolved_device(generation, resolved)
         # The local, not the attribute: a load superseded mid-flight withholds
-        # the attribute (above), and reading it here logged "ready on None"
+        # the attribute (above), and reading it here would log "ready on None"
         # for a load that in fact resolved and ran on a real device.
         logger.info(
             "reranker model %s ready on %s took=%.1fs",
@@ -212,17 +207,9 @@ class LocalCrossEncoderReranker:
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                # Snapshot the generation AND the device it belongs to in one
-                # locked read, and hand them to the loader (below) instead of
-                # letting it read them again: a `set_device` landing between
-                # the worker's read and a second read inside the loader made
-                # the loader publish under the NEW generation while this loop
-                # recorded the OLD one — so the freshly loaded, already-correct
-                # model was discarded and reloaded on the next job, with health
-                # reporting ready throughout (issue #52 review round 3).
-                with self._lock:
-                    generation = self._generation
-                    self._load_target = (generation, self._device)
+                # See model_worker._DeviceGenerationTracker._snapshot_load_target
+                # (issue #61) for why this must be one locked read, not two.
+                generation = self._snapshot_load_target()
                 if model is None or loaded_generation != generation:
                     model = None  # drop the old model before loading the new
                     model = self._load_model()
@@ -231,16 +218,7 @@ class LocalCrossEncoderReranker:
             except BaseException as exc:  # noqa: BLE001 — propagate to caller,
                 future.set_exception(exc)  # never kill the worker thread.
 
-    def set_device(self, device: str | None) -> None:
-        """Retarget the model's device (dashboard setting, ADR-40); None
-        re-enables auto-detect. Same generation mechanism as the embedder —
-        the single worker thread owns the model, so the swap is race-free."""
-        with self._lock:
-            if device == self._device:
-                return
-            self._device = device
-            self._generation += 1
-            self._resolved_device = None  # unknown until the reload happens
+    # set_device is inherited from _DeviceGenerationTracker (issue #61).
 
     def _submit(self, fn: Callable[[Any], Any]) -> concurrent.futures.Future:
         future: concurrent.futures.Future = concurrent.futures.Future()
