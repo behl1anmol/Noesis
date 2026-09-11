@@ -64,8 +64,8 @@ uv run python -m noesis.prefetch
 |---|---|---|
 | Tree-sitter grammars (all 23 mapped languages) | small | — |
 | BM25 sparse-model assets (`Qdrant/bm25`) | ~100 KB | — |
-| Embedding model (`nomic-ai/CodeRankEmbed`) | ~520 MB | `--skip-model` |
-| Reranker (`BAAI/bge-reranker-v2-m3`) | ~2.2 GB | `--skip-reranker` |
+| Embedding model (`nomic-ai/CodeRankEmbed`) | ~550 MB | `--skip-model` |
+| Reranker (`BAAI/bge-reranker-v2-m3`) | ~2.3 GB | `--skip-reranker` |
 
 The reranker ships **disabled by default** (see [GPU and devices](gpu.md) and the [evaluation results](../internals/evaluation.md) for why). If you never enable it, skip its weights:
 

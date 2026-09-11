@@ -262,10 +262,11 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
 
     ctx.embedder_warmup = asyncio.create_task(_warm_up_embedder())
 
-    async def _warm_up_reranker() -> None:
+    async def _warm_up_reranker(model: LocalCrossEncoderReranker) -> None:
         # Issue #52: ADR-77's argument applies unchanged to the reranker, only
-        # more so — its weights are ~2.2GB against the embedder's ~520MB (both
-        # measured off a real HF cache), and
+        # more so — its weights are ~2.3 GB against the embedder's ~550 MB
+        # (measured off a real HF cache: 2,271,071,852 and 546,938,168 bytes;
+        # decimal GB/MB, the convention download sizes are quoted in), and
         # with `reranker.enabled=true` every search reranks by default
         # (ADR-34), so the first search pays that load in full.
         #
@@ -288,7 +289,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         if ctx.embedder_warmup is not None:
             await asyncio.wait([ctx.embedder_warmup])
         try:
-            await reranker.preload()
+            await model.preload()
             log.info("reranker warm-up complete")
         except Exception:
             log.exception(
@@ -296,9 +297,13 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
             )
 
     # Nothing to warm when the kill switch is off, and nothing left to warm
-    # when `reranker.preload=true` already awaited the load above.
+    # when `reranker.preload=true` already awaited the load above. The model
+    # is passed in rather than closed over so its type is the concrete
+    # reranker, not the `| None` the enclosing scope carries — the guard
+    # below is what makes it non-None, and a type checker cannot see that
+    # through a closure.
     if reranker is not None and not cfg.reranker.preload:
-        ctx.reranker_warmup = asyncio.create_task(_warm_up_reranker())
+        ctx.reranker_warmup = asyncio.create_task(_warm_up_reranker(reranker))
     log.info("runtime ready")
     return ctx
 

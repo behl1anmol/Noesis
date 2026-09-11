@@ -351,7 +351,7 @@ async def test_a_device_switch_racing_the_load_does_not_cost_a_second_load():
     ``set_device`` landing between the two made the loader publish under the
     NEW generation while the worker recorded the OLD one — so the freshly
     loaded, already-correct model was thrown away and reloaded from scratch on
-    the very next embed (minutes, for ~570MB on a cold cache), while ``/healthz`` reported
+    the very next embed (minutes, for ~550 MB on a cold cache), while ``/healthz`` reported
     ready throughout. One snapshot, taken once by the worker, removes the
     second read entirely: pre-fix this test sees two loads, post-fix one."""
     loads: list[str] = []

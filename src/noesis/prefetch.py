@@ -105,32 +105,36 @@ def model_assets_ready(model_id: str) -> bool:
     def cached(filename: str) -> bool:
         return isinstance(try_to_load_from_cache(model_id, filename), str)
 
-    # ``[embedder] model`` (and ``[reranker] model``) is free text and
-    # sentence-transformers accepts a local directory, which is not a hub repo
-    # id — the hub call raises HFValidationError for it. Unguarded, that
-    # propagated out of /healthz, GET /projects/{id}/status and the
-    # get_index_status MCP tool, so a locally-pinned model took down the very
-    # surface ADR-78 added to keep the health check honest (ADR-79).
+    # ``[embedder] model`` (and ``[reranker] model``) is free text, and
+    # sentence-transformers accepts a local directory as readily as a hub repo
+    # id. The filesystem is asked FIRST because that is what the loader itself
+    # does: with an incomplete ``./BAAI/bge-reranker-v2-m3/`` in the working
+    # directory beside a fully cached copy of that hub repo, ``CrossEncoder``
+    # failed on the LOCAL one (measured) — the directory wins.
     #
-    # The try wraps the WHOLE check, so the fallback swaps only the LOOKUP —
-    # filesystem instead of hub cache — never the contract. ADR-79 answered a
-    # directory with "the assets ARE that directory", which held while the
-    # only question was whether a repo had been fetched and stopped holding
-    # once this function promised config + weights + vocabulary: an empty or
-    # half-copied directory reported ready and the plugin healthcheck printed
-    # [ OK ] for it (round 6). Guarding one probe instead of the whole check
-    # then left `config.json` unasked on the directory path (round 7).
+    # Ordering by the exception instead was wrong for a whole class of pins:
+    # ``models/bge-reranker`` is a valid hub repo id AND a relative directory,
+    # so it never reached the fallback and answered "missing" forever while the
+    # model loaded fine from disk — which, now that a missing reranker exits 1
+    # from the plugin healthcheck, is a permanent red whose remedy (run
+    # prefetch) can never clear it (issue #52 review round 8).
     #
-    # Anything else malformed falls through to "missing", the fail-safe
-    # direction ADR-79 chose: a false "missing" costs a redundant prefetch, a
-    # false "ready" is the bug.
+    # Either way the CONTRACT is the same: config, weights and a vocabulary.
+    # Only the lookup changes. An unparseable id that is also not a directory
+    # falls through to "missing", the fail-safe direction ADR-79 chose: a false
+    # "missing" costs a redundant prefetch, a false "ready" is the bug.
+    directory = Path(model_id).expanduser()
+    if directory.is_dir():
+        return _has_required_files(lambda name: (directory / name).is_file())
+    # Not a directory: a hub repo id, or malformed. ``try_to_load_from_cache``
+    # raises HFValidationError for the malformed case, which must not escape —
+    # it used to propagate out of /healthz, GET /projects/{id}/status and the
+    # get_index_status MCP tool, taking down the very surface ADR-78 added to
+    # keep the health check honest (ADR-79).
     try:
         return _has_required_files(cached)
     except HFValidationError:
-        directory = Path(model_id).expanduser()
-        if not directory.is_dir():
-            return False
-        return _has_required_files(lambda name: (directory / name).is_file())
+        return False
 
 
 def _has_required_files(present: Callable[[str], bool]) -> bool:

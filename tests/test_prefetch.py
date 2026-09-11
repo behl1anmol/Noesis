@@ -618,3 +618,59 @@ def test_skipping_the_models_does_not_read_the_config(monkeypatch, capsys):
     assert code == 0
     assert called == {}
     assert "bad config" not in capsys.readouterr().err
+
+
+def test_a_relative_directory_shaped_like_a_repo_id_is_read_from_disk(
+    tmp_path, monkeypatch
+):
+    """``models/bge-reranker`` is BOTH a valid hub repo id and a relative
+    directory, so the ``HFValidationError`` fallback never fired for it and it
+    answered ``missing`` forever while the model loaded fine from disk —
+    turning the plugin healthcheck into a permanent ``exit 1`` whose remedy
+    (run prefetch) can never clear it (issue #52 review round 8).
+
+    Both halves were measured, not reasoned about:
+    ``validate_repo_id("models/bge-reranker")`` does not raise, and with an
+    empty HF cache and ``HF_HUB_OFFLINE=1`` a ``CrossEncoder`` pointed at such
+    a directory loaded and scored 0.965 while this function said ``missing``.
+    A local directory also WINS over a cached hub repo of the same name (an
+    incomplete ``./BAAI/bge-reranker-v2-m3/`` beside a fully cached one made
+    the load fail on the local copy), so asking the filesystem first is what
+    the loader itself does.
+    """
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "models" / "bge-local"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}")
+    (d / "model.safetensors").write_bytes(b"\x00")
+    (d / "tokenizer.json").write_text("{}")
+
+    assert model_assets_ready("models/bge-local") is True
+
+
+def test_an_incomplete_relative_directory_still_reports_missing(tmp_path, monkeypatch):
+    # The directory answer is the same contract, not a free pass.
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "models" / "bge-local"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}")
+
+    assert model_assets_ready("models/bge-local") is False
+
+
+def test_a_hub_repo_id_with_no_such_directory_still_asks_the_cache(
+    tmp_path, monkeypatch
+):
+    # Nothing on disk called "nomic-ai/CodeRankEmbed", so the cache decides.
+    monkeypatch.chdir(tmp_path)
+    with patch(
+        "huggingface_hub.try_to_load_from_cache",
+        _cache_fake(
+            present={
+                "config.json": "/cache/config.json",
+                "model.safetensors": "/cache/model.safetensors",
+                "tokenizer.json": "/cache/tokenizer.json",
+            }
+        ),
+    ):
+        assert model_assets_ready(MODEL_ID) is True

@@ -79,57 +79,83 @@ def main() -> None:
     print("  [ OK ] service is up (/healthz ok)")
     print(f"         MCP endpoint: {base_url}/mcp/")
 
-    assets = payload.get("assets")
-    if assets == "missing":
-        print(
-            "  [FAIL] embedding model assets not found in the local cache — "
-            "the next search_code call will block for minutes downloading them.\n"
-            "         Fetch them now: uv run python -m noesis.prefetch"
-        )
-        sys.exit(1)
-    elif assets == "ready":
-        print("  [ OK ] embedding model assets are cached")
-    # "unknown" (bare app, no lifespan wired): not actionable, say nothing.
+    # Asset problems are COLLECTED, not exited on. This script is a
+    # diagnostic: an operator running it wants the whole picture, and exiting
+    # at the first missing model dropped the project listing below — the other
+    # half of what they ran it for — and hid a second missing model behind the
+    # first (issue #52 review round 8). The exit code is decided at the end.
+    problems = 0
 
-    # Same check for the optional reranker (issue #52). Only "missing" and
-    # "ready" are reported on. "disabled" (the kill switch is off — the
-    # shipped default) and an absent field (a service predating this, or one
-    # behind a proxy that strips it) both stay silent: neither is something an
-    # operator can act on, and warning about a feature nobody turned on is a
-    # false alarm.
-    reranker_assets = payload.get("reranker_assets")
-    if reranker_assets == "missing":
-        print(
-            "  [FAIL] reranking is enabled but the reranker model's assets are "
-            "not in the local cache —\n"
-            "         the next reranked search will block for minutes "
-            "downloading ~2.3 GB.\n"
-            "         Fetch them now: uv run python -m noesis.prefetch  "
-            "(or turn reranking off in config.toml)"
-        )
-        sys.exit(1)
-    elif reranker_assets == "ready":
-        print("  [ OK ] reranker model assets are cached")
+    def report(
+        label: str, assets, ready, size: str, next_call: str, extra: str = ""
+    ) -> int:
+        """One model's asset verdict. Only "missing" and "ready" are reported
+        on: "disabled" (the reranker kill switch, off by default), "unknown"
+        (a bare app with no lifespan wired) and an absent field (an older
+        service, or a proxy that strips it) are all things an operator cannot
+        act on, and warning about a feature nobody turned on is a false
+        alarm."""
+        if assets == "missing":
+            # `ready is True` means the running process already holds the
+            # model, so nothing is about to block — but the weights really are
+            # gone from the cache and the next RESTART re-downloads them, so
+            # this is still a failure, just not the one the other branch
+            # describes.
+            consequence = (
+                f"the model is already loaded in the running service, but the "
+                f"cache is empty — a restart re-downloads {size}"
+                if ready is True
+                else f"the next {next_call} will block for minutes "
+                f"downloading {size}"
+            )
+            print(
+                f"  [FAIL] {label} model assets not found in the local cache — "
+                f"{consequence}.\n"
+                f"         Fetch them now: uv run python -m noesis.prefetch{extra}"
+            )
+            return 1
+        if assets == "ready":
+            print(f"  [ OK ] {label} model assets are cached")
+        return 0
+
+    problems += report(
+        "embedding",
+        payload.get("assets"),
+        payload.get("embedder_ready"),
+        "~550 MB",
+        "search_code call",
+    )
+    problems += report(
+        "reranker",
+        payload.get("reranker_assets"),
+        payload.get("reranker_ready"),
+        "~2.3 GB",
+        "reranked search",
+        extra="  (or turn reranking off in config.toml)",
+    )
 
     # 2. /projects
     try:
         _, projects = _get(f"{base_url}/projects", args.timeout)
     except urllib.error.URLError as exc:
         print(f"  [WARN] could not list projects: {exc.reason}")
-        sys.exit(0)
+        sys.exit(1 if problems else 0)
 
     if not projects:
         print("  [WARN] no projects registered.")
         print(
             "         Register one: scripts/register_project.py <abs-repo-path> --wait"
         )
-        sys.exit(0)
+        sys.exit(1 if problems else 0)
 
     print(f"  [ OK ] {len(projects)} project(s) registered:")
     for p in projects:
         print(
             f"         - id={p.get('id')}  root={p.get('root_path')}  model={p.get('embedding_model')}"
         )
+    # Decided here, after everything has been said: 1 if any model's assets
+    # are missing (ADR-78's fail-loud posture), 0 otherwise.
+    sys.exit(1 if problems else 0)
 
 
 if __name__ == "__main__":

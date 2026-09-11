@@ -62,11 +62,34 @@ def test_missing_reranker_assets_fails_the_healthcheck(monkeypatch, capsys):
     code, _ = _run(
         monkeypatch,
         {**HEALTHY_EMBEDDER, "reranker_assets": "missing", "reranker_ready": False},
+        projects=[{"id": "p1", "root_path": "/tmp/repo", "embedding_model": "m"}],
     )
     out = _capture(capsys)
     assert code == 1, "reranking is on with no weights cached — must not be green"
     assert "reranker" in out.lower()
     assert "noesis.prefetch" in out
+    # A diagnostic that stops at the first problem is half a diagnostic: the
+    # project listing is the other half of what the operator ran this for, and
+    # it used to be dropped by the exit (issue #52 review round 8).
+    assert "p1" in out
+
+
+def test_a_loaded_reranker_is_not_told_it_will_block_on_a_download(
+    monkeypatch, capsys
+):
+    """Assets gone from the cache while the running process still holds the
+    model: the weights really are missing (a restart WILL re-download), so
+    this is still a failure — but the message must not claim the next search
+    blocks, because the model is resident (issue #52 review round 8)."""
+    code, _ = _run(
+        monkeypatch,
+        {**HEALTHY_EMBEDDER, "reranker_assets": "missing", "reranker_ready": True},
+        projects=[{"id": "p1", "root_path": "/tmp/repo", "embedding_model": "m"}],
+    )
+    out = _capture(capsys)
+    assert code == 1
+    assert "already loaded" in out
+    assert "will block" not in out
 
 
 def test_disabled_reranker_is_silent_and_healthy(monkeypatch, capsys):
@@ -118,10 +141,32 @@ def test_missing_embedder_assets_still_fails(monkeypatch, capsys):
     code, _ = _run(
         monkeypatch,
         {"status": "ok", "assets": "missing", "embedder_ready": False},
+        projects=[{"id": "p1", "root_path": "/tmp/repo", "embedding_model": "m"}],
     )
     out = _capture(capsys)
     assert code == 1
     assert "embedding model assets" in out
+    assert "p1" in out, "the project listing must survive an asset failure"
+
+
+def test_both_models_missing_are_both_reported(monkeypatch, capsys):
+    # Exiting at the first problem told the operator about one download when
+    # two were pending.
+    code, _ = _run(
+        monkeypatch,
+        {
+            "status": "ok",
+            "assets": "missing",
+            "embedder_ready": False,
+            "reranker_assets": "missing",
+            "reranker_ready": False,
+        },
+        projects=[],
+    )
+    out = _capture(capsys)
+    assert code == 1
+    assert "embedding model assets" in out
+    assert "reranker" in out.lower()
 
 
 def test_script_has_no_third_party_imports():
