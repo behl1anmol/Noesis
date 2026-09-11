@@ -25,6 +25,8 @@ import threading
 import time
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from .model_worker import _DeviceGenerationTracker
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,7 +95,7 @@ _LOW = 1  # embed_documents — indexing path
 _SHUTDOWN = 2  # close() sentinel — drains queued jobs first
 
 
-class LocalSTEmbedder:
+class LocalSTEmbedder(_DeviceGenerationTracker):
     """Default local Embedder: CodeRankEmbed via sentence-transformers (M2).
 
     Concurrency model (§3.3): one dedicated single worker thread owns the
@@ -127,8 +129,6 @@ class LocalSTEmbedder:
     ) -> None:
         self._model_id = model_id
         self._dim = dim
-        self._device = device
-        self._resolved_device: str | None = None  # set at model load
         self._batch_size = batch_size
         self._load_model = _load_model or self._default_load
         self._queue: queue.PriorityQueue[
@@ -140,13 +140,9 @@ class LocalSTEmbedder:
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._closed = False
-        # Bumped by set_device (ADR-40): the worker reloads the model when
-        # its loaded generation falls behind.
-        self._generation = 0
-        # (generation, device) for the load currently in flight — written by
-        # the worker loop before it calls the loader, read by _default_load.
-        # Both happen on the worker thread, so the pair cannot be torn.
-        self._load_target: tuple[int, str | None] = (0, device)
+        # set_device/_generation/_load_target/_resolved_device (ADR-40, issue
+        # #61): shared with reranker.py via model_worker._DeviceGenerationTracker.
+        self._init_device_generation(device)
 
     @property
     def model_id(self) -> str:
@@ -178,9 +174,9 @@ class LocalSTEmbedder:
         # is still downloading/constructing, and must not stay truthy if it
         # raises; a caller polling health during either window would wrongly
         # see "ready".
-        # The worker loop's snapshot, not a fresh read — see the note on the
-        # mirror of this line in reranker.py: it is the (generation, device)
-        # pair THIS load is for, and publishing below is conditional on that
+        # The worker loop's snapshot (_snapshot_load_target, issue #61), not a
+        # fresh read: it is the (generation, device) pair THIS load is for,
+        # and _publish_resolved_device below is conditional on that
         # generation still being current, so a `set_device` (ADR-40) landing
         # mid-load is neither overwritten nor charged a second full load.
         generation, device = self._load_target
@@ -198,12 +194,10 @@ class LocalSTEmbedder:
         model = SentenceTransformer(
             self._model_id, trust_remote_code=True, device=resolved
         )
-        with self._lock:
-            if self._generation == generation:
-                self._resolved_device = resolved
-        # The local, not the attribute — see the note in reranker.py's mirror
-        # of this line: a superseded load withholds the attribute and would
-        # log "ready on None" for a load that ran on a real device.
+        self._publish_resolved_device(generation, resolved)
+        # The local, not the attribute: a superseded load withholds the
+        # attribute (above) and would log "ready on None" for a load that in
+        # fact resolved and ran on a real device.
         logger.info(
             "embedding model %s ready on %s took=%.1fs",
             self._model_id,
@@ -223,17 +217,9 @@ class LocalSTEmbedder:
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                # Snapshot the generation AND the device it belongs to in one
-                # locked read, and hand them to the loader (below) instead of
-                # letting it read them again: a `set_device` landing between
-                # the worker's read and a second read inside the loader made
-                # the loader publish under the NEW generation while this loop
-                # recorded the OLD one — so the freshly loaded, already-correct
-                # model was discarded and reloaded on the next job, with health
-                # reporting ready throughout (issue #52 review round 3).
-                with self._lock:
-                    generation = self._generation
-                    self._load_target = (generation, self._device)
+                # See model_worker._DeviceGenerationTracker._snapshot_load_target
+                # (issue #61) for why this must be one locked read, not two.
+                generation = self._snapshot_load_target()
                 if model is None or loaded_generation != generation:
                     model = None  # drop the old model before loading the new
                     model = self._load_model()
@@ -290,18 +276,7 @@ class LocalSTEmbedder:
         the load, with no added cost either way."""
         await asyncio.wrap_future(self._submit(_LOW, lambda model: None))
 
-    def set_device(self, device: str | None) -> None:
-        """Retarget the model's device (dashboard setting, ADR-40); None
-        re-enables auto-detect. Takes effect on the worker's next job via a
-        generation bump — the single worker thread owns the model, so the
-        swap is race-free by construction. In-flight jobs finish on the old
-        device."""
-        with self._lock:
-            if device == self._device:
-                return
-            self._device = device
-            self._generation += 1
-            self._resolved_device = None  # unknown until the reload happens
+    # set_device is inherited from _DeviceGenerationTracker (issue #61).
 
     def close(self) -> None:
         """Drain queued jobs, then stop the worker. Idempotent; optional —

@@ -191,7 +191,7 @@ queries:
     query: "LocalSTEmbedder"
     relevant:
       - path: src/noesis/core/embedder.py
-        anchor: "class LocalSTEmbedder:"
+        anchor: "class LocalSTEmbedder("
 
   - id: symbol-04
     category: symbol
