@@ -133,6 +133,10 @@ class LocalCrossEncoderReranker:
         # Bumped by set_device (ADR-40): the worker reloads the model when
         # its loaded generation falls behind.
         self._generation = 0
+        # (generation, device) for the load currently in flight — written by
+        # the worker loop before it calls the loader, read by _default_load.
+        # Both happen on the worker thread, so the pair cannot be torn.
+        self._load_target: tuple[int, str | None] = (0, device)
 
     @property
     def model_id(self) -> str:
@@ -141,7 +145,10 @@ class LocalCrossEncoderReranker:
     @property
     def resolved_device(self) -> str | None:
         """The device the model loaded on, or None before the first rerank
-        (the worker loads lazily on its first job)."""
+        (the worker loads lazily on its first job). Read by ``/healthz``'s
+        ``reranker_ready`` and ``get_index_status`` (issue #52), so it means
+        "the model is loaded", not "a device was chosen" — it is assigned
+        only after the ``CrossEncoder`` constructor returns."""
         return self._resolved_device
 
     def _default_load(self) -> Any:
@@ -154,7 +161,21 @@ class LocalCrossEncoderReranker:
 
         # Explicit device resolution, not ST's device=None auto-detect, which
         # was seen running this cross-encoder on CPU with a T4 idle (lesson 4).
-        self._resolved_device = resolve_device(self._device)
+        # Kept in a local until the model actually loads (below) — issue #52
+        # makes self._resolved_device the load signal behind /healthz's
+        # reranker_ready, so it must not go truthy while CrossEncoder(...) is
+        # still downloading/constructing (minutes, on ~2.3GB), and must not
+        # stay truthy if it raises. ADR-79 fixed the identical pattern in
+        # embedder.py and explicitly declined to fix it here because nothing
+        # read it then; reading it is exactly what issue #52 adds.
+        # The worker loop's snapshot, not a fresh read: it is the (generation,
+        # device) pair THIS load is for. Publishing `_resolved_device` below is
+        # conditional on that generation still being current — a `set_device`
+        # (ADR-40) landing mid-load must not have its None overwritten by the
+        # superseded load, or the health surface reports ready for a model the
+        # worker is about to drop and reload (issue #52 review).
+        generation, device = self._load_target
+        resolved = resolve_device(device)
         # Frame the load like the embedder: the cross-encoder is ~2.3GB and on
         # a cold cache blocks for minutes with no other output. model_id +
         # device only — no query or chunk text (ADR-25).
@@ -162,14 +183,20 @@ class LocalCrossEncoderReranker:
             "loading reranker model %s on %s "
             "(first run may download weights; can take minutes)",
             self._model_id,
-            self._resolved_device,
+            resolved,
         )
         started = time.perf_counter()
-        model = CrossEncoder(self._model_id, device=self._resolved_device)
+        model = CrossEncoder(self._model_id, device=resolved)
+        with self._lock:
+            if self._generation == generation:
+                self._resolved_device = resolved
+        # The local, not the attribute: a load superseded mid-flight withholds
+        # the attribute (above), and reading it here logged "ready on None"
+        # for a load that in fact resolved and ran on a real device.
         logger.info(
             "reranker model %s ready on %s took=%.1fs",
             self._model_id,
-            self._resolved_device,
+            resolved,
             time.perf_counter() - started,
         )
         return model
@@ -185,7 +212,17 @@ class LocalCrossEncoderReranker:
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                generation = self._generation
+                # Snapshot the generation AND the device it belongs to in one
+                # locked read, and hand them to the loader (below) instead of
+                # letting it read them again: a `set_device` landing between
+                # the worker's read and a second read inside the loader made
+                # the loader publish under the NEW generation while this loop
+                # recorded the OLD one — so the freshly loaded, already-correct
+                # model was discarded and reloaded on the next job, with health
+                # reporting ready throughout (issue #52 review round 3).
+                with self._lock:
+                    generation = self._generation
+                    self._load_target = (generation, self._device)
                 if model is None or loaded_generation != generation:
                     model = None  # drop the old model before loading the new
                     model = self._load_model()

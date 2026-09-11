@@ -18,6 +18,7 @@ The single dataclass every adapter reads:
 | `structural` | `StructuralSettings` (max results, timeout) |
 | `git_fast_path` | git fast-path toggle |
 | `jobs` / `progress` | background index tasks and their live progress |
+| `embedder_warmup` / `reranker_warmup` | the background model warm-up tasks ([ADR-77](../project/decisions.md); the reranker's added by [ADR-87](../project/decisions.md)). `None` when there is nothing to warm — reranking off, or `reranker.preload = true` already loaded it inline. Held on the context so teardown can cancel and await them like any other in-flight work |
 | `watcher` | `WatcherManager`, owned by the lifespan |
 | `config_device_pin` / `config_reranker_device_pin` | config.toml device pins — the dashboard device control defers to them |
 
@@ -36,13 +37,15 @@ flowchart TB
     F --> G["delete_orphan_points sweep\n(refused on empty project table)"]
     G --> H["build reranker if enabled\n(optional preload)"]
     H --> S["build SearchGate\nK threads, K + 4K admitted"]
-    S --> I["AppContext ready"]
+    S --> W["start background warm-ups\nembedder first, reranker behind it"]
+    W --> I["AppContext ready"]
 ```
 
 - **Cache pin first**: without it fastembed defaults to the system tmp dir, which evaporates on reboot and would trigger a runtime re-download — the one thing the offline posture forbids.
 - **Crash recovery in two halves**: `fail_orphaned_runs` clears SQLite rows a dead process left `running`; `delete_orphan_points` clears the Qdrant points one left behind. Startup is the only safe moment for the sweep — no run of this process is in flight, and a project row is always committed before its first point is written, so a co-process mid-indexing can never look like an orphan.
 - **Wipe signature warning**: if `ensure_collection` had to *create* the collection while the state DB already tracks indexed files, the collection was wiped externally — logged loudly; a full reindex self-heals by re-embedding drifted files ([ADR-49](../project/decisions.md)).
 - **Device precedence ([ADR-40](../project/decisions.md))**: a config.toml pin wins (operator config is never second-guessed by UI state), then the dashboard's persisted choice, then auto-detect (`cuda` → `mps` → `cpu`).
+- **Warm-ups are background, and ordered**: the model loads run as fire-and-forget tasks rather than being awaited here ([ADR-77](../project/decisions.md)) — the lifespan has to return before the server answers `initialize`, so a multi-minute cold download awaited inline would look like a server that failed to start. The reranker's warm-up ([ADR-87](../project/decisions.md)) *awaits the embedder's* instead of running beside it: the embedder gates every search, the reranker only rescores hits a search has already produced, so two concurrent cold loads would slow the one on the critical path and, on a small GPU, contend for memory both are claiming — The trade is stated rather than hidden ([ADR-90](../project/decisions.md)): sequencing delays reranker readiness by whatever is left of the embedder's load, so a reranked search arriving in that window waits longer than it would have with both models loading at once. A slow first *search* is worse than a slow first *rerank*, and the reranker is the optional half. `reranker.preload = true` loads inline during startup instead and creates no task at all.
 - **Concurrency resolved before the connections are made**: `K` is derived and logged — with the CPU count and whether it was configured or derived — before any client exists, because a derived value nobody can see is a value nobody can debug. The *same* number then sizes the query pool and the `SearchGate`; they must be 1:1, or a checked-out search waits on a connection no thread is holding, or the reverse.
 
 ## Search concurrency (ADR-83/84)
@@ -90,7 +93,7 @@ Both processes may share one state DB and one Qdrant collection; the owner-stamp
 
 ## Prefetch (`python -m noesis.prefetch`)
 
-The only module whose job is to trigger downloads — deliberately outside `core/`. Fetches: tree-sitter grammars for every canonical language (missing grammar = degraded line-chunk fallback, not fatal), the embedding weights (via the Embedder boundary — one `embed_query` forces the download), the reranker weights (via a `preload`, skippable with `--skip-reranker`), and fastembed's ~100 KB BM25 tokenizer assets. Flags: `--skip-model`, `--model`, `--skip-reranker`, `--reranker-model`. The fastembed cache is anchored to `$XDG_CACHE_HOME/noesis/fastembed` (cwd-independent) so prefetch and every serving process resolve one cache. After prefetch, the service makes zero outbound network calls at runtime.
+The only module whose job is to trigger downloads — deliberately outside `core/`. Fetches: tree-sitter grammars for every canonical language (missing grammar = degraded line-chunk fallback, not fatal), the embedding weights (via the Embedder boundary — one `embed_query` forces the download), the reranker weights (via a `preload`, skippable with `--skip-reranker`), and fastembed's ~100 KB BM25 tokenizer assets. Flags: `--skip-model`, `--model`, `--skip-reranker`, `--reranker-model` — the two model ids default to what `config.toml` names, resolved exactly as the service resolves it ([ADR-88](../project/decisions.md)), so prefetching a pinned model no longer requires repeating it on the command line; a config that is *missing* means the shipped defaults (what a fresh install has), while one that will not parse means the ids are unknown — the model steps are then skipped and the exit is non-zero rather than downloading ~2.9 GB of defaults the service may never load ([ADR-90](../project/decisions.md)); grammars and BM25 need no config and still run. The fastembed cache is anchored to `$XDG_CACHE_HOME/noesis/fastembed` (cwd-independent) so prefetch and every serving process resolve one cache. After prefetch, the service makes zero outbound network calls at runtime. The module also holds the readiness probes the health surfaces report — `model_assets_ready` (a no-network HF-cache check) and `model_readiness`/`reranker_readiness`, which produce the `(assets, ready)` pairs behind `/healthz` and `jobs.index_status`. They are model-neutral by name because both boundaries ask them: the embedder's `SentenceTransformer` and the reranker's `CrossEncoder` resolve the same cache and need the same files. They live here, not at the call sites, so the REST and MCP surfaces cannot drift apart — that duplication had to be unwound once already ([ADR-82](../project/decisions.md)).
 
 ## Logging
 

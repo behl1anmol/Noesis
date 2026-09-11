@@ -11,6 +11,7 @@ import asyncio
 import logging
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -226,3 +227,181 @@ async def test_no_truncation_check_without_tokenizer_surface(caplog):
         await reranker.rerank("q", ["some very long text " * 100])
     reranker.close()
     assert "truncated" not in caplog.text
+
+
+# --- resolved_device is a readiness signal, not a "we picked a device" flag --
+#
+# Issue #52: /healthz's new reranker_ready reads resolved_device, so the same
+# premature-assignment pattern ADR-79 fixed in embedder.py (and explicitly
+# DECLINED to fix here, because nothing read it then) becomes load-bearing the
+# moment this PR wires it up. Both tests below fail against the pre-fix
+# reranker.py, which assigned self._resolved_device before CrossEncoder(...)
+# ran: the mid-flight assertion saw 'cpu' instead of None, and the failed-load
+# assertion saw 'cpu' after an exception that left no model at all.
+
+
+async def test_resolved_device_stays_none_until_model_load_succeeds():
+    """Mirror of tests/test_local_embedder.py's embedder test. Exercises the
+    real ``_default_load`` (the ``_load_model`` seam is deliberately NOT used)
+    with ``CrossEncoder`` and ``resolve_device`` stubbed, so no weights are
+    fetched and no network is touched."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class StubCrossEncoder:
+        def __init__(self, model_id: str, device=None):
+            started.set()
+            assert release.wait(timeout=5.0), "test never released model"
+
+        def predict(self, pairs, batch_size: int):
+            return [0.0 for _ in pairs]
+
+    with (
+        patch("sentence_transformers.CrossEncoder", StubCrossEncoder),
+        patch("noesis.core.compute.resolve_device", return_value="cpu"),
+    ):
+        reranker = LocalCrossEncoderReranker()
+        assert reranker.resolved_device is None
+        pending = asyncio.ensure_future(reranker.rerank("q", ["a"]))
+        assert await asyncio.to_thread(started.wait, 5.0)
+        # Constructor is mid-flight — a ~2.3GB load that can run for minutes.
+        # /healthz must still read this as not-ready.
+        assert reranker.resolved_device is None
+        release.set()
+        await pending
+        assert reranker.resolved_device == "cpu"
+        reranker.close()
+
+
+async def test_resolved_device_stays_none_after_failed_load():
+    """A load that raises (interrupted download, OOM) must leave the reranker
+    reporting not-ready forever, not truthy — pre-fix the assignment ran
+    before the constructor that raised, so /healthz would have reported
+    ``reranker_ready: true`` for a model that never existed."""
+
+    class ExplodingCrossEncoder:
+        def __init__(self, model_id: str, device=None):
+            raise OSError("simulated interrupted download")
+
+    with (
+        patch("sentence_transformers.CrossEncoder", ExplodingCrossEncoder),
+        patch("noesis.core.compute.resolve_device", return_value="cpu"),
+    ):
+        reranker = LocalCrossEncoderReranker()
+        with pytest.raises(OSError, match="simulated interrupted download"):
+            await reranker.rerank("q", ["a"])
+        assert reranker.resolved_device is None
+        reranker.close()
+
+
+async def test_a_superseded_load_does_not_publish_its_device(caplog):
+    """PR review of issue #52: deferring the assignment until after the
+    constructor returns opened a race with ``set_device`` (ADR-40).
+
+    The dashboard can retarget the device while a load is in flight — and with
+    the new startup warm-up that window is now minutes wide on a cold cache.
+    ``set_device`` bumps the generation and clears ``resolved_device``; the
+    finishing OLD-generation load must not write its device back over that,
+    or ``/healthz`` reports ``reranker_ready: true`` for a model the worker is
+    about to throw away and reload.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    caplog.set_level(logging.INFO, logger="noesis.core.reranker")
+
+    class StubCrossEncoder:
+        def __init__(self, model_id: str, device=None):
+            started.set()
+            assert release.wait(timeout=5.0), "test never released model"
+
+        def predict(self, pairs, batch_size: int):
+            return [0.0 for _ in pairs]
+
+    with (
+        patch("sentence_transformers.CrossEncoder", StubCrossEncoder),
+        patch("noesis.core.compute.resolve_device", side_effect=lambda d: d or "cpu"),
+    ):
+        reranker = LocalCrossEncoderReranker()
+        pending = asyncio.ensure_future(reranker.rerank("q", ["a"]))
+        assert await asyncio.to_thread(started.wait, 5.0)
+        # Operator switches device mid-load.
+        reranker.set_device("cuda")
+        assert reranker.resolved_device is None
+        release.set()
+        await pending
+        assert reranker.resolved_device is None, (
+            "a superseded load published its device — health would report ready "
+            "for a model the worker is about to reload"
+        )
+        # The completion log must still name the device the load actually ran
+        # on. Reading the (now correctly empty) attribute instead printed
+        # "ready on None", which reads like a load that resolved nothing.
+        ready_lines = [
+            r.getMessage() for r in caplog.records if "ready on" in r.getMessage()
+        ]
+        assert ready_lines, "no completion log line at all"
+        assert "None" not in ready_lines[-1], ready_lines[-1]
+        assert "cpu" in ready_lines[-1]
+        reranker.close()
+
+
+class _BumpDeviceOnFirstWorkerLock:
+    """Drives a ``set_device`` into the window between the worker loop's
+    generation read and the loader's own — a gap of two adjacent statements,
+    unreachable by timing, so it is driven deterministically: the first time
+    the MODEL WORKER thread takes the lock, switch the device first.
+
+    Wrapping the lock rather than patching a method keeps the production code
+    path intact; ``set_device`` re-enters this wrapper, which passes straight
+    through after the first hit (the real lock is not held at that point, so
+    there is no deadlock)."""
+
+    def __init__(self, real, worker_name: str, bump) -> None:
+        self._real = real
+        self._worker_name = worker_name
+        self._bump = bump
+        self.fired = False
+
+    def __enter__(self):
+        if not self.fired and threading.current_thread().name == self._worker_name:
+            self.fired = True
+            self._bump()
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+
+async def test_a_device_switch_racing_the_load_does_not_cost_a_second_load():
+    """The worker read the generation, then the loader read it AGAIN. A
+    ``set_device`` landing between the two made the loader publish under the
+    NEW generation while the worker recorded the OLD one — so the freshly
+    loaded, already-correct model was thrown away and reloaded from scratch on
+    the very next rerank (minutes, for ~2.3GB), while ``/healthz`` reported
+    ready throughout. One snapshot, taken once by the worker, removes the
+    second read entirely: pre-fix this test sees two loads, post-fix one."""
+    loads: list[str] = []
+
+    class StubCrossEncoder:
+        def __init__(self, model_id: str, device=None):
+            loads.append(device)
+
+        def predict(self, pairs, batch_size: int):
+            return [0.0 for _ in pairs]
+
+    with (
+        patch("sentence_transformers.CrossEncoder", StubCrossEncoder),
+        patch("noesis.core.compute.resolve_device", side_effect=lambda d: d or "cpu"),
+    ):
+        reranker = LocalCrossEncoderReranker()
+        reranker._lock = _BumpDeviceOnFirstWorkerLock(
+            reranker._lock, "noesis-reranker", lambda: reranker.set_device("cuda")
+        )
+        await reranker.rerank("q", ["a"])
+        await reranker.rerank("q", ["a"])
+        assert reranker._lock.fired, "the race was never driven — test is vacuous"
+        assert loads == ["cuda"], (
+            f"expected one load on the switched-to device, got {loads}"
+        )
+        assert reranker.resolved_device == "cuda"
+        reranker.close()

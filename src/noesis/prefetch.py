@@ -20,6 +20,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 # fastembed defaults its cache to the system tmp dir, which evaporates on
 # reboot and would trigger a re-download at runtime. Pin it somewhere
@@ -40,17 +41,51 @@ def default_fastembed_cache() -> str:
     return str(Path(base).expanduser() / "noesis" / "fastembed")
 
 
-def embedder_assets_ready(model_id: str) -> bool:
+def model_assets_ready(model_id: str) -> bool:
     """Best-effort, no-network check: is ``model_id`` fully cached in the
     local HF cache (ADR-78 addendum, issue #47 finding 4, PR #50 review)?
 
-    Requires ``config.json`` AND at least one weight file: a single-file
-    checkpoint (``model.safetensors`` / ``pytorch_model.bin``) or a sharded
-    one's index manifest (``*.index.json``). Checking ``config.json`` alone
-    reported ``ready`` after a download interrupted between metadata and
-    weights — exactly the silent cold-start stall this check exists to
-    surface. Only the pytorch-backend filenames are checked, not the whole
-    repo tree: ``LocalSTEmbedder`` never requests ``backend="onnx"``, so an
+    Asked of BOTH model boundaries (issue #52): the embedder's
+    ``SentenceTransformer`` and the reranker's ``CrossEncoder`` resolve the
+    same HF cache and need the same three kinds of file. Hence the neutral
+    name: it was ``embedder_assets_ready`` while the embedder was the only
+    caller.
+
+    Requires ``config.json``, at least one weight file, AND at least one
+    tokenizer file:
+
+    * weights — a single-file checkpoint (``model.safetensors`` /
+      ``pytorch_model.bin``) or a sharded one's index manifest
+      (``*.index.json``). ``config.json`` alone reported ``ready`` after a
+      download interrupted between metadata and weights (ADR-79).
+    * tokenizer — a file carrying an actual VOCABULARY, taken from each
+      family's own ``vocab_files_names`` rather than guessed: a fast
+      tokenizer's ``tokenizer.json``; sentencepiece's ``sentencepiece.bpe.model``
+      (XLM-R), ``spiece.model`` (T5/ALBERT) or ``tokenizer.model`` (Llama);
+      wordpiece's ``vocab.txt``; or byte-level BPE's ``vocab.json`` AND
+      ``merges.txt``, which is the one family whose vocabulary is two files
+      (``GPT2Tokenizer`` declares both) and so is the one entry checked as a
+      pair. Deliberately NOT ``tokenizer_config.json`` or
+      ``special_tokens_map.json``, which are metadata: they name the tokenizer
+      class and its special tokens and hold no vocabulary, so a cache with
+      only those is the same broken state as no tokenizer at all (issue #52
+      review round 4). Weights without a vocabulary are not
+      a working model, and the failure is quieter than a stall: with only
+      ``config.json`` + ``model.safetensors`` left in a real
+      ``BAAI/bge-reranker-v2-m3`` cache and ``HF_HUB_OFFLINE=1``,
+      ``CrossEncoder(...)`` did not raise — it built an ``XLMRobertaTokenizer``
+      with ``vocab_size`` 5 that tokenized every word to ``<unk>`` and still
+      returned a plausible-looking score (measured, ADR-90). A "ready" that
+      means "will silently rank noise" is worse than one that means "will
+      stall".
+
+    ANY member of a family satisfies it, never a specific filename: the two
+    default models differ (``BAAI/bge-reranker-v2-m3`` ships
+    ``sentencepiece.bpe.model``, ``nomic-ai/CodeRankEmbed`` ships
+    ``vocab.txt``; both ship ``tokenizer.json``), and requiring one spelling
+    would report a false "missing" for the other. Only the pytorch-backend
+    filenames are checked, not the whole repo tree: neither ``LocalSTEmbedder``
+    nor ``LocalCrossEncoderReranker`` requests ``backend="onnx"``, so an
     onnx/openvino variant shipped alongside pytorch weights in the same repo
     must not cause a false "missing".
 
@@ -70,46 +105,169 @@ def embedder_assets_ready(model_id: str) -> bool:
     def cached(filename: str) -> bool:
         return isinstance(try_to_load_from_cache(model_id, filename), str)
 
-    # ``[embedder] model`` is free text and sentence-transformers accepts a
-    # local directory, which is not a hub repo id — the hub call raises
-    # HFValidationError for it. Unguarded, that propagated out of /healthz,
-    # GET /projects/{id}/status and the get_index_status MCP tool, so a
-    # locally-pinned model took down the very surface ADR-78 added to keep
-    # the health check honest. For a real directory the answer is knowable
-    # without the hub at all: the assets ARE that directory. Anything else
-    # malformed falls through to "missing", the fail-safe direction ADR-79
-    # already chose (a false "missing" costs a redundant prefetch; a false
-    # "ready" is the bug).
+    # ``[embedder] model`` (and ``[reranker] model``) is free text, and
+    # sentence-transformers accepts a local directory as readily as a hub repo
+    # id. The filesystem is asked FIRST because that is what the loader itself
+    # does: with an incomplete ``./BAAI/bge-reranker-v2-m3/`` in the working
+    # directory beside a fully cached copy of that hub repo, ``CrossEncoder``
+    # failed on the LOCAL one (measured) — the directory wins.
+    #
+    # Ordering by the exception instead was wrong for a whole class of pins:
+    # ``models/bge-reranker`` is a valid hub repo id AND a relative directory,
+    # so it never reached the fallback and answered "missing" forever while the
+    # model loaded fine from disk — which, now that a missing reranker exits 1
+    # from the plugin healthcheck, is a permanent red whose remedy (run
+    # prefetch) can never clear it (issue #52 review round 8).
+    #
+    # Either way the CONTRACT is the same: config, weights and a vocabulary.
+    # Only the lookup changes. An unparseable id that is also not a directory
+    # falls through to "missing", the fail-safe direction ADR-79 chose: a false
+    # "missing" costs a redundant prefetch, a false "ready" is the bug.
+    # A blank pin is malformed, not "the current directory" — but
+    # ``Path("").is_dir()`` IS True (it means cwd), and ``load_settings``
+    # does not reject an empty ``[embedder]``/``[reranker] model``. Left
+    # unguarded, a fresh install run from inside a model directory (or any
+    # cwd that happens to hold matching filenames) reported "ready" for a pin
+    # that was never actually set — probing the service's cwd instead of
+    # answering "missing" (issue #52 review round 12). An empty repo id is
+    # also rejected by ``huggingface_hub``'s own validation
+    # (``HFValidationError``), so "missing" is the same verdict the hub-lookup
+    # path below would give if this didn't intercept first.
+    if isinstance(model_id, str) and not model_id.strip():
+        return False
     try:
-        if not cached("config.json"):
-            return False
+        # The LITERAL string, deliberately not ``expanduser()``'d: the loaders
+        # test the pin as written, so ``CrossEncoder("~/models/m")`` raises
+        # ``FileNotFoundError: Path ~/models/m not found`` even when that
+        # directory exists and is complete (measured). Expanding here reported
+        # "ready" for a pin that cannot load — a false READY, the one direction
+        # this check must never get wrong (issue #52 review round 11).
+        directory = Path(model_id)
+        if directory.is_dir():
+            return _has_required_files(lambda name: (directory / name).is_file())
+    except (OSError, TypeError):
+        # The pin is unusable, not merely absent: a segment past NAME_MAX
+        # raises OSError(ENAMETOOLONG) from is_dir, and a non-string pin
+        # (`[embedder] model = 123`, which load_settings does not type-check)
+        # raises TypeError from Path() itself — neither of which pathlib
+        # swallows. (RuntimeError sat here for `~nosuchuser/...`, which
+        # expanduser raised; dropping the expansion dropped that source with
+        # it — such a pin is now simply not a directory.) Escaping here means
+        # /healthz, GET /projects/{id}/status and get_index_status all 500 on a
+        # typo'd pin, which is the failure ADR-79's guard exists to prevent
+        # (issue #52 review round 9). "missing" is the answer: nothing readable
+        # is there, and no hub id can be built from it either.
+        return False
+    try:
+        return _has_required_files(cached)
     except HFValidationError:
-        return Path(model_id).expanduser().is_dir()
+        return False
+
+
+def _has_required_files(present: Callable[[str], bool]) -> bool:
+    """:func:`model_assets_ready`'s whole contract — config, weights and a
+    vocabulary — over any "is this file there?" predicate: the HF cache for a
+    hub repo id, plain ``is_file()`` for a local model directory. One
+    implementation so the two cannot promise different contracts (issue #52
+    review rounds 6 and 7: the first cut left the ``config.json`` check
+    outside this helper, and the directory path silently skipped it)."""
+    if not present("config.json"):
+        return False
     weight_files = (
         "model.safetensors",
         "pytorch_model.bin",
         "model.safetensors.index.json",
         "pytorch_model.bin.index.json",
     )
-    return any(cached(f) for f in weight_files)
+    # Each entry is a SELF-SUFFICIENT vocabulary, read off the corresponding
+    # tokenizer class's `vocab_files_names` rather than guessed.
+    # `tokenizer_config.json` and `special_tokens_map.json` are deliberately
+    # absent: they are metadata, and a cache holding them without a vocabulary
+    # loads the silently-broken tokenizer ADR-90 measured.
+    tokenizer_files = (
+        "tokenizer.json",  # fast tokenizers (both default models ship one)
+        "sentencepiece.bpe.model",  # XLM-R, e.g. bge-reranker-v2-m3
+        "spiece.model",  # T5/ALBERT
+        "tokenizer.model",  # Llama/Mistral sentencepiece
+        "vocab.txt",  # wordpiece, e.g. CodeRankEmbed
+    )
+    # Byte-level BPE is the exception: `GPT2Tokenizer.vocab_files_names`
+    # declares vocab.json AND merges.txt, so neither counts alone — the merges
+    # are rules with nothing to apply them to, and the vocab cannot be merged
+    # without them.
+    byte_level_bpe = ("vocab.json", "merges.txt")
+    if not any(present(f) for f in weight_files):
+        return False
+    return any(present(f) for f in tokenizer_files) or all(
+        present(f) for f in byte_level_bpe
+    )
 
 
-async def embedder_readiness(embedder: object) -> tuple[str, bool | str]:
-    """Shared ``(assets, embedder_ready)`` computation behind both
-    ``/healthz`` (ADR rows 78/79) and ``jobs.index_status`` (ADR row 81) —
-    PR #50 round-5 review. Previously pasted verbatim in both call sites:
-    they agreed only because the text was identical and one test compared
-    the two endpoints' output, not because there was one implementation: a
-    future edit to either copy (e.g. a "warming" state, a different ``n/a``
-    rule) had nothing stopping it from landing on one side only. ``embedder``
-    is duck-typed — ``model_id`` required, ``resolved_device`` optional — so
-    this has no dependency on a specific Embedder implementation and stays
-    outside ``core/`` like the rest of this module (module docstring)."""
-    ready = await asyncio.to_thread(embedder_assets_ready, embedder.model_id)
+async def model_readiness(model: object) -> tuple[str, bool | str]:
+    """Shared ``(assets, ready)`` computation behind ``/healthz`` (ADR rows
+    78/79) and ``jobs.index_status`` (ADR row 81) — PR #50 round-5 review.
+    Previously pasted verbatim in both call sites: they agreed only because
+    the text was identical and one test compared the two endpoints' output,
+    not because there was one implementation: a future edit to either copy
+    (e.g. a "warming" state, a different ``n/a`` rule) had nothing stopping it
+    from landing on one side only. *model* is duck-typed — ``model_id``
+    required, ``resolved_device`` optional — so this has no dependency on a
+    specific Embedder or Reranker implementation and stays outside ``core/``
+    like the rest of this module (module docstring).
+
+    ``resolved_device`` is the load signal, not a device-selection record:
+    both boundaries assign it only after the model constructor returns
+    (ADR-79 for the embedder; issue #52 for the reranker, which had the same
+    premature assignment until this signal started reading it). So ``False``
+    here means "assets may be cached, but the model is not loaded yet — the
+    next call pays the load", and ``"n/a"`` means the implementation does not
+    report a device at all (a test double)."""
+    ready = await asyncio.to_thread(model_assets_ready, model.model_id)
     assets = "ready" if ready else "missing"
-    resolved_device = getattr(embedder, "resolved_device", "n/a")
-    embedder_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
-    return assets, embedder_ready
+    resolved_device = getattr(model, "resolved_device", "n/a")
+    model_ready = "n/a" if resolved_device == "n/a" else bool(resolved_device)
+    return assets, model_ready
+
+
+class _UnknownReranker:
+    """Type of :data:`UNKNOWN_RERANKER` — a distinct type, not a bare
+    ``object()``, so the sentinel is legible in a traceback or a repr."""
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return "UNKNOWN_RERANKER"
+
+
+#: "This context does not model a reranker at all" — the value call sites pass
+#: as ``getattr(ctx, "reranker", UNKNOWN_RERANKER)``. Distinct from ``None``,
+#: which is a positive statement that the kill switch is off (issue #52
+#: review): collapsing the two would let the health surfaces answer
+#: ``"disabled"`` for a state they cannot actually see, which is exactly the
+#: trust the sentinel was chosen over an absent key to provide.
+UNKNOWN_RERANKER = _UnknownReranker()
+
+
+async def reranker_readiness(reranker: object | None) -> tuple[str, bool | str]:
+    """``(reranker_assets, reranker_ready)`` for the health surfaces (issue
+    #52). ``None`` is the ``reranker.enabled=false`` kill switch (§3.3, the
+    shipped default), which is a different answer from "enabled but its
+    weights are missing" — reporting ``"missing"`` for a feature nobody turned
+    on would send an operator to fetch 2.3GB they do not need, and omitting
+    the fields entirely would leave a caller unable to tell "off" from "this
+    server does not report it". So the kill switch gets its own value and no
+    HF-cache lookup happens at all.
+
+    :data:`UNKNOWN_RERANKER` is the third case: a duck-typed context (a test
+    or an adapter) that carries no ``reranker`` attribute has not told us the
+    switch is off, so it reports ``"unknown"`` — the value both surfaces
+    already use for "cannot tell".
+
+    Lives here, next to the embedder half, rather than at the two call sites:
+    ADR-82 had to unwind exactly that duplication once already."""
+    if reranker is UNKNOWN_RERANKER:
+        return "unknown", "unknown"
+    if reranker is None:
+        return "disabled", "disabled"
+    return await model_readiness(reranker)
 
 
 def prefetch_grammars() -> list[str]:
@@ -181,29 +339,111 @@ def prefetch_bm25() -> None:
     print(f"bm25 ok: {BM25_MODEL_ID}")
 
 
+def configured_model_ids() -> tuple[str, str] | None:
+    """``(embedder model, reranker model)`` the SERVICE will actually load, or
+    ``None`` if the config cannot be read.
+
+    Read from the same config resolution the service uses (``NOESIS_CONFIG``
+    → ``./config.toml`` → XDG, ADR-44), because prefetching a model nobody
+    loads fixes nothing: with a non-default ``[embedder] model`` or
+    ``[reranker] model``, the hardcoded repo ids this replaces downloaded
+    multi-GB weights the service never opens, while ``/healthz`` and the
+    plugin's ``healthcheck.py`` — whose remedy is literally "run prefetch" —
+    kept reporting ``missing`` (issue #52 review). Run prefetch with the same
+    ``NOESIS_CONFIG`` the service gets, or from the same directory, for the
+    two to agree.
+
+    Reads the model IDS only, deliberately not ``reranker.enabled``: a default
+    config (``enabled = false``) still prefetches the reranker's weights, which
+    is bandwidth for a model the service will not load. That is tracked as
+    issue #58 and was left alone on purpose — unlike a wrong model id it breaks
+    nothing (with reranking off the health fields read ``"disabled"`` and never
+    complain), ``--skip-reranker`` already exists, and changing what a
+    documented install command downloads belongs in its own change (ADR-91).
+
+    A MISSING config is not a failure — ``load_settings`` answers with the
+    shipped defaults, which is exactly right for a fresh install. A config
+    that exists but will not parse is different: it means the operator
+    configured something and we cannot see what, so ``None`` comes back and
+    the caller skips the model downloads rather than fetching ~2.9 GB of
+    defaults the service may never load (ADR-90). The config-independent
+    assets — grammars, BM25 — still come down."""
+    from noesis.core.config import load_settings
+
+    try:
+        cfg = load_settings()
+    except Exception as exc:  # noqa: BLE001 — any config error, same answer
+        print(f"could not read config: {exc}", file=sys.stderr)
+        return None
+    return cfg.embedder.model, cfg.reranker.model
+
+
 def main() -> int:
     os.environ.setdefault(FASTEMBED_CACHE_ENV, default_fastembed_cache())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--skip-model", action="store_true", help="grammars only, no model weights"
     )
-    parser.add_argument("--model", default="nomic-ai/CodeRankEmbed")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="embedding model to fetch (default: whatever config.toml names)",
+    )
     parser.add_argument(
         "--skip-reranker",
         action="store_true",
         help="skip the ~2.3 GB reranker weights (only needed if reranker.enabled)",
     )
-    parser.add_argument("--reranker-model", default="BAAI/bge-reranker-v2-m3")
+    parser.add_argument(
+        "--reranker-model",
+        default=None,
+        help="reranker model to fetch (default: whatever config.toml names)",
+    )
     args = parser.parse_args()
+
+    # Resolved AFTER parsing, and only when a step actually needs an id: the
+    # config was read before argparse ran, so `--help` printed a config-parse
+    # error above the usage text, and `--skip-model` complained about a file it
+    # was never going to consult (issue #52 review round 6). `None` survives
+    # here when the config cannot be read, and the steps below skip.
+    wants_embedder = not args.skip_model and args.model is None
+    wants_reranker = (
+        not (args.skip_model or args.skip_reranker) and args.reranker_model is None
+    )
+    if wants_embedder or wants_reranker:
+        configured = configured_model_ids()
+        if configured is not None:
+            if args.model is None:
+                args.model = configured[0]
+            if args.reranker_model is None:
+                args.reranker_model = configured[1]
 
     failed = prefetch_grammars()
     prefetch_bm25()
+    # An unresolved model id means the config did not parse and no flag named
+    # one. Skipping is the point (see configured_model_ids), but it is a
+    # non-zero exit: the prefetch did not do the job it was asked to do, and a
+    # CI step or an install script must not read that as success.
+    unresolved: list[str] = []
     if not args.skip_model:
-        prefetch_model(args.model)
+        if args.model is None:
+            unresolved.append("--model")
+        else:
+            prefetch_model(args.model)
     if not (args.skip_model or args.skip_reranker):
-        prefetch_reranker(args.reranker_model)
+        if args.reranker_model is None:
+            unresolved.append("--reranker-model")
+        else:
+            prefetch_reranker(args.reranker_model)
     if failed:
         print(f"{len(failed)} grammar(s) failed: {', '.join(failed)}", file=sys.stderr)
+    if unresolved:
+        print(
+            "skipped model weights: the config could not be read, so the model "
+            f"ids are unknown — fix config.toml, or pass {' and '.join(unresolved)}",
+            file=sys.stderr,
+        )
+    if failed or unresolved:
         return 1
     print("prefetch complete")
     return 0

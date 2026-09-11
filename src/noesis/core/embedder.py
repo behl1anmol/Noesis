@@ -143,6 +143,10 @@ class LocalSTEmbedder:
         # Bumped by set_device (ADR-40): the worker reloads the model when
         # its loaded generation falls behind.
         self._generation = 0
+        # (generation, device) for the load currently in flight — written by
+        # the worker loop before it calls the loader, read by _default_load.
+        # Both happen on the worker thread, so the pair cannot be torn.
+        self._load_target: tuple[int, str | None] = (0, device)
 
     @property
     def model_id(self) -> str:
@@ -174,7 +178,13 @@ class LocalSTEmbedder:
         # is still downloading/constructing, and must not stay truthy if it
         # raises; a caller polling health during either window would wrongly
         # see "ready".
-        resolved = resolve_device(self._device)
+        # The worker loop's snapshot, not a fresh read — see the note on the
+        # mirror of this line in reranker.py: it is the (generation, device)
+        # pair THIS load is for, and publishing below is conditional on that
+        # generation still being current, so a `set_device` (ADR-40) landing
+        # mid-load is neither overwritten nor charged a second full load.
+        generation, device = self._load_target
+        resolved = resolve_device(device)
         # Frame the load: on a cold cache this blocks for minutes downloading
         # weights with no other output (the single silent stall M-users read as
         # a hang). model_id + device only — no code or query text (ADR-25).
@@ -188,11 +198,16 @@ class LocalSTEmbedder:
         model = SentenceTransformer(
             self._model_id, trust_remote_code=True, device=resolved
         )
-        self._resolved_device = resolved
+        with self._lock:
+            if self._generation == generation:
+                self._resolved_device = resolved
+        # The local, not the attribute — see the note in reranker.py's mirror
+        # of this line: a superseded load withholds the attribute and would
+        # log "ready on None" for a load that ran on a real device.
         logger.info(
             "embedding model %s ready on %s took=%.1fs",
             self._model_id,
-            self._resolved_device,
+            resolved,
             time.perf_counter() - started,
         )
         return model
@@ -208,7 +223,17 @@ class LocalSTEmbedder:
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                generation = self._generation
+                # Snapshot the generation AND the device it belongs to in one
+                # locked read, and hand them to the loader (below) instead of
+                # letting it read them again: a `set_device` landing between
+                # the worker's read and a second read inside the loader made
+                # the loader publish under the NEW generation while this loop
+                # recorded the OLD one — so the freshly loaded, already-correct
+                # model was discarded and reloaded on the next job, with health
+                # reporting ready throughout (issue #52 review round 3).
+                with self._lock:
+                    generation = self._generation
+                    self._load_target = (generation, self._device)
                 if model is None or loaded_generation != generation:
                     model = None  # drop the old model before loading the new
                     model = self._load_model()

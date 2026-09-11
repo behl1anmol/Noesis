@@ -64,7 +64,7 @@ uv run python -m noesis.prefetch
 |---|---|---|
 | Tree-sitter grammars (all 23 mapped languages) | small | — |
 | BM25 sparse-model assets (`Qdrant/bm25`) | ~100 KB | — |
-| Embedding model (`nomic-ai/CodeRankEmbed`) | ~2 GB | `--skip-model` |
+| Embedding model (`nomic-ai/CodeRankEmbed`) | ~550 MB | `--skip-model` |
 | Reranker (`BAAI/bge-reranker-v2-m3`) | ~2.3 GB | `--skip-reranker` |
 
 The reranker ships **disabled by default** (see [GPU and devices](gpu.md) and the [evaluation results](../internals/evaluation.md) for why). If you never enable it, skip its weights:
@@ -73,7 +73,7 @@ The reranker ships **disabled by default** (see [GPU and devices](gpu.md) and th
 uv run python -m noesis.prefetch --skip-reranker
 ```
 
-Alternative models can be prefetched with `--model` / `--reranker-model` (they must then match your [configuration](../reference/configuration.md)).
+Prefetch reads the model ids from your [configuration](../reference/configuration.md) ([ADR-88](../project/decisions.md)), so a model you pinned there needs no extra flag — `--model` / `--reranker-model` override it. If the config file exists but cannot be parsed, the model steps are skipped and the exit code is non-zero rather than guessing at the defaults ([ADR-90](../project/decisions.md)).
 
 !!! note "Where assets land"
     Model weights go to the Hugging Face cache. BM25 assets are cached under `$XDG_CACHE_HOME/noesis/fastembed` (the `FASTEMBED_CACHE_PATH` environment variable, set automatically by both `prefetch` and the service so runtime never re-downloads). A grammar that fails to download is non-fatal — files in that language fall back to line-based chunking.
@@ -83,7 +83,14 @@ Alternative models can be prefetched with `--model` / `--reranker-model` (they m
 ```bash
 uv run uvicorn noesis.app:app --host 127.0.0.1 --port 8000
 curl http://127.0.0.1:8000/healthz
-# {"status":"ok"}
+# {"status":"ok","assets":"ready","embedder_ready":true,
+#  "reranker_assets":"disabled","reranker_ready":"disabled"}
 ```
+
+`status` only says the process is answering. The readiness fields say whether
+the models are actually usable — `assets` is `"ready"` when the prefetch step
+above cached the weights, and `embedder_ready` turns `true` once the
+background warm-up has loaded them ([ADR-77/78, ADR-87](../project/decisions.md)).
+The reranker pair reads `"disabled"` unless you turned reranking on.
 
 Continue to the [Quickstart](quickstart.md) to index your first project.

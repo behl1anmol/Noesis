@@ -26,7 +26,9 @@ If the service is down when the plugin loads, the `noesis:` tools won't connect 
 that's a service problem, not a query problem. Run `scripts/healthcheck.py`. It also
 reports whether the embedding model's assets are cached — if not, the *first*
 `search_code` call blocks for minutes downloading them instead of the prefetch step
-above having done it up front (issue #47).
+above having done it up front (issue #47). It checks the reranker's ~2.3 GB of
+weights the same way when reranking is switched on, and says nothing about them when
+it is off — the shipped default, in which case the model is never loaded at all.
 
 ---
 

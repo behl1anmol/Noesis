@@ -1,10 +1,14 @@
-"""Opt-in integration test: real CodeRankEmbed, in-memory Qdrant.
+"""Opt-in integration tests: real models, in-memory Qdrant.
 
 Skipped by default (pyproject deselects the ``integration`` marker) so the
 suite stays fast and offline. Run with ``uv run pytest -m integration``.
-This is the automated half of the M2 exit criterion — NL→code returns sane
-spans with the real model; the live ``POST /search`` check against the
-Docker Qdrant is done manually at milestone close.
+The first is the automated half of the M2 exit criterion — NL→code returns
+sane spans with the real model; the live ``POST /search`` check against the
+Docker Qdrant is done manually at milestone close. The second (issue #52)
+holds the cold-start readiness signals to the REAL reranker, since every
+other test in the suite answers them from a stub: it downloads
+``BAAI/bge-reranker-v2-m3`` (~2.3GB) on a cold cache, which is exactly what
+``-m integration`` opts into.
 """
 
 from __future__ import annotations
@@ -63,3 +67,34 @@ async def test_nl_query_returns_sane_spans(tmp_path, embedder):
         f"expected the JWT chunk first, got {hits[0]}"
     )
     assert hits[0]["start_line"] >= 1 and hits[0]["end_line"] >= hits[0]["start_line"]
+
+
+async def test_reranker_readiness_tracks_the_real_model_load():
+    """Issue #52's two signals, against the real cross-encoder.
+
+    Observed when this was written, on a cold HF cache: ``("missing", False)``
+    before the download, ``("ready", True)`` after it, with
+    ``resolved_device == "cpu"``. The ``False`` before ``preload()`` is the
+    whole point of the field — assets alone do not mean the next reranked
+    search is fast, because the ``CrossEncoder`` construction still has to
+    happen.
+    """
+    from noesis.core.reranker import LocalCrossEncoderReranker
+    from noesis.prefetch import model_assets_ready, reranker_readiness
+
+    reranker = LocalCrossEncoderReranker(device="cpu")
+    try:
+        assert reranker.resolved_device is None
+        # Whatever the cache holds, an unloaded model is not ready.
+        _, ready_before = await reranker_readiness(reranker)
+        assert ready_before is False
+
+        await reranker.preload()
+
+        assert reranker.resolved_device == "cpu"
+        assert model_assets_ready(reranker.model_id) is True
+        assert await reranker_readiness(reranker) == ("ready", True)
+        # The kill-switch case needs no model at all.
+        assert await reranker_readiness(None) == ("disabled", "disabled")
+    finally:
+        reranker.close()

@@ -333,9 +333,12 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     fields (issue #47 finding 4, PR #50 round-4 review) — this is the shared
     REST/MCP status shape, so an MCP-only (stdio) caller with no HTTP surface
     to poll can now see the same cold-start warm-up signal a REST caller gets
-    from ``/healthz``. Computed via ``prefetch.embedder_readiness``, the same
-    function ``/healthz`` calls (PR #50 round-5 review) — not a second copy
-    of the readiness logic kept in sync by hand."""
+    from ``/healthz``. ``reranker_assets``/``reranker_ready`` are the same
+    pair for the optional cross-encoder (issue #52), ``"disabled"`` when the
+    ``reranker.enabled`` kill switch is off. Computed via
+    ``prefetch.model_readiness``/``reranker_readiness``, the same functions
+    ``/healthz`` calls (PR #50 round-5 review) — not a second copy of the
+    readiness logic kept in sync by hand."""
     # Index health: what the state DB expects vs what Qdrant actually holds.
     # A mismatch is drift — a vector store that lost data (external collection
     # wipe) while state still reports the files indexed. Surfaced so agents
@@ -362,9 +365,25 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
     # trusting an answer, which is why this rides the shared REST/MCP shape and
     # not just the dashboard.
     unwalkable, quarantined = state.count_unwalkable_dirs(ctx.conn, project_id)
-    from noesis.prefetch import embedder_readiness
+    from noesis.prefetch import UNKNOWN_RERANKER, model_readiness, reranker_readiness
 
-    embedder_assets, embedder_ready = await embedder_readiness(ctx.embedder)
+    # Same two points as ``/healthz``'s copy of this call: gathered because the
+    # probes are independent and nothing is gained by serializing them (the
+    # cost measurement lives on that copy), and ``getattr`` with the sentinel
+    # because this function is called with
+    # hand-built duck-typed contexts (tests, adapters) that carry no reranker
+    # attribute — which must not 500, and must not be reported as "disabled"
+    # either, since nobody said it was off.
+    (
+        (embedder_assets, embedder_ready),
+        (
+            reranker_assets,
+            reranker_ready,
+        ),
+    ) = await asyncio.gather(
+        model_readiness(ctx.embedder),
+        reranker_readiness(getattr(ctx, "reranker", UNKNOWN_RERANKER)),
+    )
     run = state.get_latest_run(ctx.conn, project_id)
     if run is None:
         return {
@@ -384,6 +403,8 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
             "quarantined_dirs": quarantined,
             "embedder_assets": embedder_assets,
             "embedder_ready": embedder_ready,
+            "reranker_assets": reranker_assets,
+            "reranker_ready": reranker_ready,
         }
     return {
         "project_id": project_id,
@@ -402,4 +423,6 @@ async def index_status(ctx: _ContextLike, project_id: str) -> dict[str, Any]:
         "quarantined_dirs": quarantined,
         "embedder_assets": embedder_assets,
         "embedder_ready": embedder_ready,
+        "reranker_assets": reranker_assets,
+        "reranker_ready": reranker_ready,
     }

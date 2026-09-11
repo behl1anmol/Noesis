@@ -91,7 +91,7 @@ def test_healthz(client):
 
 
 async def test_healthz_checks_assets_off_the_event_loop_thread():
-    """PR #50 round-3 review: embedder_assets_ready() does blocking
+    """PR #50 round-3 review: model_assets_ready() does blocking
     filesystem stat calls and must run via asyncio.to_thread — same
     convention runtime.py already uses for delete_orphan_points — instead
     of synchronously inside the event loop, which would stall every other
@@ -111,11 +111,11 @@ async def test_healthz_checks_assets_off_the_event_loop_thread():
     ctx = SimpleNamespace(embedder=FakeEmbedder(dim=8))
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
 
-    with patch("noesis.prefetch.embedder_assets_ready", fake_ready):
+    with patch("noesis.prefetch.model_assets_ready", fake_ready):
         await healthz(request)
 
     assert seen["thread"] != loop_thread, (
-        "embedder_assets_ready ran on the event-loop thread, not a worker "
+        "model_assets_ready ran on the event-loop thread, not a worker "
         "thread — asyncio.to_thread isn't wrapping it"
     )
 
@@ -334,9 +334,7 @@ def _saturate(ctx) -> "tuple[object, threading.Event]":
 
         await gate.run(block)
 
-    loop_thread = threading.Thread(
-        target=lambda: asyncio.run(occupy()), daemon=True
-    )
+    loop_thread = threading.Thread(target=lambda: asyncio.run(occupy()), daemon=True)
     loop_thread.start()
     assert admitted.wait(timeout=5), "the blocking job never started"
     return gate, release
@@ -403,3 +401,129 @@ def test_search_adapter_passes_the_contexts_real_gate(client, monkeypatch):
         f"the REST adapter must pass the context's own gate, got {seen['gate']!r}"
     )
     assert isinstance(seen["gate"], retriever_module.SearchGate)
+
+
+# --- reranker cold-start visibility on /healthz (issue #52) ------------------
+#
+# PR #50 gave the embedder assets/embedder_ready; the reranker does the same
+# cold ~2.3GB load and had neither signal, so an operator running with
+# reranking on could watch /healthz stay green through a multi-minute stall on
+# the first reranked search. Same flat shape as the embedder's fields, and a
+# "disabled" value rather than absent keys — an absent key cannot tell
+# "reranking is off" from "server too old to report it".
+
+
+def test_healthz_reports_reranker_disabled_when_none_is_wired(client):
+    body = client.get("/healthz").json()
+    assert body["reranker_assets"] == "disabled"
+    assert body["reranker_ready"] == "disabled"
+
+
+def test_healthz_reports_reranker_state_when_one_is_wired(client_with_reranker):
+    body = client_with_reranker.get("/healthz").json()
+    # FakeReranker's model id is not a hub repo, and it exposes no
+    # resolved_device — the same "not applicable" pair FakeEmbedder produces.
+    assert body["reranker_assets"] == "missing"
+    assert body["reranker_ready"] == "n/a"
+    # The embedder's own fields must be untouched by the addition.
+    assert body["assets"] == "missing"
+    assert body["embedder_ready"] == "n/a"
+
+
+async def test_healthz_without_a_ctx_reports_unknown_for_both_models():
+    """A bare app with no lifespan wired has no ctx to ask. Every readiness
+    field reads "unknown" — the healthcheck must not raise here, and must not
+    report a reranker as "disabled" when it simply cannot tell."""
+    from types import SimpleNamespace
+
+    from noesis.api.routes import healthz
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    body = await healthz(request)
+    assert body == {
+        "status": "ok",
+        "assets": "unknown",
+        "embedder_ready": "unknown",
+        "reranker_assets": "unknown",
+        "reranker_ready": "unknown",
+    }
+
+
+async def test_healthz_checks_reranker_assets_off_the_event_loop_thread():
+    """Same rule as the embedder's check (PR #50 round 3): the HF-cache probe
+    does blocking filesystem stat calls, and /healthz now runs TWO of them.
+    Both must be off the loop — a second synchronous probe would reintroduce
+    exactly the stall the first one was moved off the loop to avoid."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from noesis.api.routes import healthz
+
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def fake_ready(model_id: str) -> bool:
+        seen[model_id] = threading.get_ident()
+        return True
+
+    ctx = SimpleNamespace(embedder=FakeEmbedder(dim=8), reranker=FakeReranker())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+
+    with patch("noesis.prefetch.model_assets_ready", fake_ready):
+        await healthz(request)
+
+    assert set(seen) == {ctx.embedder.model_id, ctx.reranker.model_id}
+    for model_id, thread in seen.items():
+        assert thread != loop_thread, (
+            f"the cache probe for {model_id} ran on the event-loop thread"
+        )
+
+
+async def test_healthz_reports_unknown_for_a_context_without_a_reranker():
+    """A context that does not model a reranker has not said reranking is
+    off — it has said nothing. `"disabled"` there would be an invented
+    answer (issue #52 review)."""
+    from types import SimpleNamespace
+
+    from noesis.api.routes import healthz
+
+    ctx = SimpleNamespace(embedder=FakeEmbedder(dim=8))  # no `reranker` attribute
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+    body = await healthz(request)
+    assert body["reranker_assets"] == "unknown"
+    assert body["reranker_ready"] == "unknown"
+    # The embedder half is unaffected and still answers for real.
+    assert body["assets"] in ("ready", "missing")
+
+
+async def test_healthz_probes_both_models_concurrently():
+    """The two cache probes are independent, so ``/healthz`` runs them
+    together rather than one after the other. Each is cheap — measured against
+    a real HF cache at ~0.07ms cached and ~0.006ms uncached — so this pins a
+    structural property, not a performance fix, and the docstring says so
+    rather than repeating the ~9ms figure an earlier version of it quoted
+    (that was the one-off ``huggingface_hub`` import amortised over the timing
+    loop, ADR-90).
+
+    The barrier is the assertion: it needs both probes in flight at once to
+    release. Serial probes time it out and the test fails."""
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from noesis.api.routes import healthz
+
+    barrier = threading.Barrier(2, timeout=3.0)
+
+    def fake_ready(model_id: str) -> bool:
+        barrier.wait()
+        return True
+
+    ctx = SimpleNamespace(embedder=FakeEmbedder(dim=8), reranker=FakeReranker())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx)))
+
+    with patch("noesis.prefetch.model_assets_ready", fake_ready):
+        body = await healthz(request)
+
+    assert body["assets"] == "ready"
+    assert body["reranker_assets"] == "ready"

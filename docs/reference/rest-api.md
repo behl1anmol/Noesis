@@ -8,7 +8,7 @@ Two middleware layers guard every request: `TrustedHostMiddleware` (accepts only
 
 | Method | Path | Purpose | Status |
 |---|---|---|---|
-| `GET` | `/healthz` | liveness | 200 |
+| `GET` | `/healthz` | liveness + model readiness | 200 |
 | `POST` | `/projects` | register a folder and start indexing | 202 |
 | `GET` | `/projects` | list registered projects | 200 |
 | `GET` | `/projects/{id}/status` | latest run status (+ drift and coverage fields) | 200 / 404 |
@@ -16,6 +16,19 @@ Two middleware layers guard every request: `TrustedHostMiddleware` (accepts only
 | `GET` | `/runs/{run_id}` | run row, + live `progress` while running | 200 / 404 |
 | `POST` | `/search` | hybrid / dense / sparse search | 200 / 404 / 429 |
 | `POST` | `/structural-search` | AST-pattern search over live files | 200 / 400 / 404 |
+
+### `GET /healthz`
+
+```json
+{"status": "ok", "assets": "ready", "embedder_ready": true,
+ "reranker_assets": "disabled", "reranker_ready": "disabled"}
+```
+
+`status` is unconditional — it says the process is answering, nothing more. The other four are the cold-start signal ([ADR-77/78](../project/decisions.md), extended to the reranker by [ADR-87](../project/decisions.md)) — before them a caller saw green here and then paid a multi-minute silent model download inside its first search.
+
+`assets` and `reranker_assets` are `"ready"` or `"missing"` — are that model's weights cached locally, asked of the HF cache without touching the network. `embedder_ready` and `reranker_ready` are `true` only once the model is actually loaded (each boundary records its resolved device *after* the constructor returns, so this cannot go true mid-load), `false` while it is not, and the string `"n/a"` for an implementation that reports no device (a test double). Cached weights with `ready: false` is the interesting state: the assets are there, but the next call still pays the in-memory load — seconds for the embedder, a ~2.3 GB construction for the reranker.
+
+The reranker pair reads `"disabled"` when `reranker.enabled = false` (the shipped default). A value rather than absent keys, so a client can tell "reranking is off" from "this server doesn't report it", and no operator is sent to fetch 2.3 GB for a feature nobody turned on. All four read `"unknown"` when the app has no runtime context wired (a bare app without the lifespan), and the reranker pair alone reads `"unknown"` when the wired context does not model a reranker at all ([ADR-89](../project/decisions.md)) — a healthcheck reports what it cannot tell rather than guessing or raising.
 
 ### `POST /projects`
 
