@@ -674,3 +674,17 @@ def test_a_hub_repo_id_with_no_such_directory_still_asks_the_cache(
         ),
     ):
         assert model_assets_ready(MODEL_ID) is True
+
+
+def test_an_unusable_path_pin_reports_missing_instead_of_raising():
+    """Round 8 moved the directory check ahead of the hub lookup and left it
+    outside the guard, so two pins escaped as exceptions rather than answers:
+    ``~nosuchuser/model`` (``RuntimeError: Could not determine home
+    directory``) and a path segment past NAME_MAX (``OSError: [Errno 36] File
+    name too long``). Both propagate straight out of ``/healthz``,
+    ``GET /projects/{id}/status`` and ``get_index_status`` — the exact failure
+    ADR-79's guard exists to prevent, and the opposite of this function's
+    stated "anything malformed falls through to missing" contract (issue #52
+    review round 9)."""
+    assert model_assets_ready("~nosuchuser42/model") is False
+    assert model_assets_ready("/tmp/" + "x" * 400) is False

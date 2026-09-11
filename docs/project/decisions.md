@@ -77,5 +77,6 @@ Every design decision in Noesis carries a recorded rationale — the house rule 
 | 89 | **Issue #52 round-2 fixes** | `"unknown"` (not `"disabled"`) for a context that never mentions a reranker; the load-completion log names the device it actually used; the two `/healthz` probes run together (a structural tidy, not a speedup — see ADR-90, which retracts the ~9ms figure this row first quoted) |
 | 90 | **Issue #52 round-3 fixes** | Cached weights without a tokenizer no longer count as `"ready"` (measured: it loads and silently ranks `<unk>`); an unreadable config skips the model downloads instead of guessing; the loader uses the worker's generation snapshot; three claims in rows 87-89 corrected in place |
 | 91 | **Issue #52 round-4/5/6 fixes** | The tokenizer check follows each tokenizer class's own `vocab_files_names` — metadata does not count, byte-level BPE counts only as a `vocab.json` + `merges.txt` pair, and `tokenizer.model` (Llama) is no longer a permanent false "missing"; ADR-90's retraction applied to the copies it missed; prefetch's ~2.3 GB download for a disabled reranker deferred to #58 |
+| 92 | **Issue #52 round-9 fix** | A malformed model pin (`~nosuchuser/...`, an over-long path) answers "missing" instead of 500-ing every health and status surface |
 
 See also the [risk register](risks.md) and [milestones](milestones.md).

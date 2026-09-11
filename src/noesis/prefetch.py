@@ -123,9 +123,20 @@ def model_assets_ready(model_id: str) -> bool:
     # Only the lookup changes. An unparseable id that is also not a directory
     # falls through to "missing", the fail-safe direction ADR-79 chose: a false
     # "missing" costs a redundant prefetch, a false "ready" is the bug.
-    directory = Path(model_id).expanduser()
-    if directory.is_dir():
-        return _has_required_files(lambda name: (directory / name).is_file())
+    try:
+        directory = Path(model_id).expanduser()
+        if directory.is_dir():
+            return _has_required_files(lambda name: (directory / name).is_file())
+    except (OSError, RuntimeError):
+        # The path itself is unusable, not merely absent: `~nosuchuser/model`
+        # raises RuntimeError("Could not determine home directory") from
+        # expanduser, and a segment past NAME_MAX raises OSError(ENAMETOOLONG)
+        # from is_dir — neither of which pathlib swallows. Escaping here means
+        # /healthz, GET /projects/{id}/status and get_index_status all 500 on a
+        # typo'd pin, which is the failure ADR-79's guard exists to prevent
+        # (issue #52 review round 9). "missing" is the answer: nothing readable
+        # is there, and no hub id can be built from it either.
+        return False
     # Not a directory: a hub repo id, or malformed. ``try_to_load_from_cache``
     # raises HFValidationError for the malformed case, which must not escape —
     # it used to propagate out of /healthz, GET /projects/{id}/status and the
@@ -325,6 +336,14 @@ def configured_model_ids() -> tuple[str, str] | None:
     kept reporting ``missing`` (issue #52 review). Run prefetch with the same
     ``NOESIS_CONFIG`` the service gets, or from the same directory, for the
     two to agree.
+
+    Reads the model IDS only, deliberately not ``reranker.enabled``: a default
+    config (``enabled = false``) still prefetches the reranker's weights, which
+    is bandwidth for a model the service will not load. That is tracked as
+    issue #58 and was left alone on purpose — unlike a wrong model id it breaks
+    nothing (with reranking off the health fields read ``"disabled"`` and never
+    complain), ``--skip-reranker`` already exists, and changing what a
+    documented install command downloads belongs in its own change (ADR-91).
 
     A MISSING config is not a failure — ``load_settings`` answers with the
     shipped defaults, which is exactly right for a fresh install. A config
