@@ -127,11 +127,13 @@ def model_assets_ready(model_id: str) -> bool:
         directory = Path(model_id).expanduser()
         if directory.is_dir():
             return _has_required_files(lambda name: (directory / name).is_file())
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, TypeError):
         # The path itself is unusable, not merely absent: `~nosuchuser/model`
         # raises RuntimeError("Could not determine home directory") from
         # expanduser, and a segment past NAME_MAX raises OSError(ENAMETOOLONG)
-        # from is_dir — neither of which pathlib swallows. Escaping here means
+        # from is_dir, and a non-string pin (`[embedder] model = 123`, which
+        # load_settings does not type-check) raises TypeError from Path()
+        # itself — none of which pathlib swallows. Escaping here means
         # /healthz, GET /projects/{id}/status and get_index_status all 500 on a
         # typo'd pin, which is the failure ADR-79's guard exists to prevent
         # (issue #52 review round 9). "missing" is the answer: nothing readable

@@ -74,9 +74,7 @@ def test_missing_reranker_assets_fails_the_healthcheck(monkeypatch, capsys):
     assert "p1" in out
 
 
-def test_a_loaded_reranker_is_not_told_it_will_block_on_a_download(
-    monkeypatch, capsys
-):
+def test_a_loaded_reranker_is_not_told_it_will_block_on_a_download(monkeypatch, capsys):
     """Assets gone from the cache while the running process still holds the
     model: the weights really are missing (a restart WILL re-download), so
     this is still a failure — but the message must not claim the next search
@@ -176,3 +174,17 @@ def test_script_has_no_third_party_imports():
     source = SCRIPT.read_text()
     for banned in ("import httpx", "import requests", "from noesis"):
         assert banned not in source
+
+
+def test_the_printed_remedy_is_a_command_you_can_paste(monkeypatch, capsys):
+    """The reranker hint was appended INSIDE the suggested command, so the
+    line read `uv run python -m noesis.prefetch  (or turn reranking off ...)`
+    — paste that and bash reports a syntax error (issue #52 review round 10).
+    The command line must end at the command."""
+    _run(
+        monkeypatch,
+        {**HEALTHY_EMBEDDER, "reranker_assets": "missing", "reranker_ready": False},
+    )
+    for line in _capture(capsys).splitlines():
+        if "noesis.prefetch" in line:
+            assert line.rstrip().endswith("noesis.prefetch"), line

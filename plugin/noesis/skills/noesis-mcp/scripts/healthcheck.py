@@ -105,13 +105,16 @@ def main() -> None:
                 f"the model is already loaded in the running service, but the "
                 f"cache is empty — a restart re-downloads {size}"
                 if ready is True
-                else f"the next {next_call} will block for minutes "
-                f"downloading {size}"
+                else f"the next {next_call} will block for minutes downloading {size}"
             )
+            # `extra` goes on its own line, never appended to the command:
+            # a hint inside the suggested command makes the line unpasteable
+            # (issue #52 review round 10).
             print(
                 f"  [FAIL] {label} model assets not found in the local cache — "
                 f"{consequence}.\n"
-                f"         Fetch them now: uv run python -m noesis.prefetch{extra}"
+                f"         Fetch them now: uv run python -m noesis.prefetch"
+                f"{extra}"
             )
             return 1
         if assets == "ready":
@@ -131,7 +134,7 @@ def main() -> None:
         payload.get("reranker_ready"),
         "~2.3 GB",
         "reranked search",
-        extra="  (or turn reranking off in config.toml)",
+        extra="\n         (or turn reranking off in config.toml)",
     )
 
     # 2. /projects

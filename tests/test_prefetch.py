@@ -688,3 +688,7 @@ def test_an_unusable_path_pin_reports_missing_instead_of_raising():
     review round 9)."""
     assert model_assets_ready("~nosuchuser42/model") is False
     assert model_assets_ready("/tmp/" + "x" * 400) is False
+    # `[embedder] model` is free text and load_settings does not type-check it,
+    # so a TOML integer reaches here as an int and `Path(123)` raises TypeError
+    # (issue #52 review round 10). Same contract: unusable pin, "missing".
+    assert model_assets_ready(123) is False
