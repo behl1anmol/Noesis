@@ -7,6 +7,7 @@ Same offline harness as test_api.py: FakeEmbedder + in-memory Qdrant.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -63,6 +64,17 @@ async def _wait_done(client: TestClient, run_id: str, timeout: float = 5.0) -> d
             return body
         if asyncio.get_event_loop().time() > deadline:
             raise AssertionError(f"run {run_id} still {body['status']}")
+        await asyncio.sleep(0.02)
+
+
+async def _wait_prefetch_done(client: TestClient, timeout: float = 5.0) -> dict:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        body = client.get("/api/prefetch").json()
+        if body["status"] in ("done", "failed"):
+            return body
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError(f"prefetch job still {body['status']}")
         await asyncio.sleep(0.02)
 
 
@@ -380,3 +392,81 @@ def test_usage_aggregation(client, project_dir):
     assert usage["search_usage"]["total_queries"] == 1
     assert usage["search_usage"]["latency_p50_ms"] is not None
     assert usage["index_health"][0]["file_count"] == 2
+
+
+# -- prefetch dashboard routes (issue #51) -------------------------------------
+#
+# Same offline discipline as the rest of this file: prefetch_grammars/
+# prefetch_bm25/prefetch_model/prefetch_reranker are stubbed so no test ever
+# touches the network — the default suite (`pytest -m "not integration and
+# not golden and not server"`) must stay that way.
+
+
+def _stub_prefetch_steps(monkeypatch, *, bm25=None):
+    import noesis.prefetch as prefetch
+
+    monkeypatch.setattr(prefetch, "prefetch_grammars", lambda: [])
+    monkeypatch.setattr(prefetch, "prefetch_bm25", bm25 or (lambda: None))
+    monkeypatch.setattr(prefetch, "prefetch_model", lambda model_id: None)
+    monkeypatch.setattr(prefetch, "prefetch_reranker", lambda model_id: None)
+    monkeypatch.setattr(
+        prefetch, "configured_model_ids", lambda: ("stub/embedder", "stub/reranker")
+    )
+
+
+def test_prefetch_status_is_idle_before_anything_is_triggered(client):
+    body = client.get("/api/prefetch").json()
+    assert body["status"] == "idle"
+    assert set(body["steps"]) == {"grammars", "bm25", "model", "reranker"}
+    overview = client.get("/api/state").json()
+    assert overview["prefetch"] == body
+
+
+def test_prefetch_start_runs_to_completion_and_is_visible_in_overview(
+    client, monkeypatch
+):
+    _stub_prefetch_steps(monkeypatch)
+
+    resp = client.post("/api/prefetch")
+    assert resp.status_code == 202
+    assert resp.json() == {"status": "accepted"}
+
+    status = asyncio.run(_wait_prefetch_done(client))
+    assert status["status"] == "done"
+    assert status["percent"] == 100.0
+    assert status["steps"]["model"]["detail"] == "stub/embedder"
+
+    overview = client.get("/api/state").json()
+    assert overview["prefetch"]["status"] == "done"
+
+
+def test_prefetch_second_start_while_running_reports_already_running(
+    client, monkeypatch
+):
+    # A real threading.Event, not a race on stub speed: bm25 runs inside
+    # asyncio.to_thread (a real OS thread), so blocking it there holds the
+    # job at "running" deterministically until the test releases it.
+    gate = threading.Event()
+    _stub_prefetch_steps(monkeypatch, bm25=lambda: gate.wait(timeout=5))
+
+    first = client.post("/api/prefetch")
+    second = client.post("/api/prefetch")
+    assert first.json() == {"status": "accepted"}
+    assert second.json() == {"status": "already_running"}
+
+    gate.set()
+    status = asyncio.run(_wait_prefetch_done(client))
+    assert status["status"] == "done"
+
+
+def test_prefetch_cross_origin_start_rejected(client):
+    resp = client.post("/api/prefetch", headers={"Origin": "http://evil.com"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "cross-origin request rejected"
+
+
+def test_prefetch_same_origin_start_still_works(client, monkeypatch):
+    _stub_prefetch_steps(monkeypatch)
+    resp = client.post("/api/prefetch", headers={"Origin": "http://127.0.0.1:8000"})
+    assert resp.status_code == 202
+    asyncio.run(_wait_prefetch_done(client))

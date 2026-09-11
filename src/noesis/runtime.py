@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from sqlite3 import Connection
+from typing import Any
 
 from qdrant_client import QdrantClient
 
@@ -99,6 +100,19 @@ class AppContext:
     # to warm — reranking disabled, or ``reranker.preload=true`` already
     # loaded the model inline during startup.
     reranker_warmup: asyncio.Task | None = None
+    # Issue #51: the dashboard's single "Download models" background job.
+    # None until first triggered from GET/POST /api/prefetch; then the
+    # in-memory step-by-step status noesis.prefetch.job_status/start_job
+    # read and mutate. Not ctx.jobs/ctx.progress (those two are keyed by
+    # index run_id, one entry per project run) — this is process-wide, not
+    # per-project, matching how there is exactly one "Download models"
+    # button rather than one per project.
+    prefetch_job: dict[str, Any] | None = None
+    # The task running the job above, tracked the same way as
+    # embedder_warmup/reranker_warmup so close_runtime_context can
+    # cancel/await it at teardown instead of leaving a download running
+    # against resources that are about to close.
+    prefetch_task: asyncio.Task | None = None
 
 
 async def build_runtime_context(cfg: Settings) -> AppContext:
@@ -153,8 +167,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
         query_connections, cfg.qdrant.query_queue_depth
     )
     log.info(
-        "search concurrency: %d query connections, queue depth %d "
-        "(cpus=%d, %s)",
+        "search concurrency: %d query connections, queue depth %d (cpus=%d, %s)",
         query_connections,
         query_queue_depth,
         available_cpus(),
@@ -165,8 +178,7 @@ async def build_runtime_context(cfg: Settings) -> AppContext:
     # A silent hang here (Qdrant down/unreachable) is a common false "bug"
     # report — name what we're waiting on before the blocking round-trips.
     log.info(
-        "connecting to Qdrant at %s (%d query + 1 index + 1 admin connections, "
-        "ADR-83)",
+        "connecting to Qdrant at %s (%d query + 1 index + 1 admin connections, ADR-83)",
         cfg.qdrant.url,
         query_connections,
     )
@@ -327,7 +339,7 @@ async def close_runtime_context(ctx: AppContext) -> None:
 
     log = logging.getLogger(__name__)
     tasks = [t for t in ctx.jobs.values() if not t.done()]
-    for warmup in (ctx.embedder_warmup, ctx.reranker_warmup):
+    for warmup in (ctx.embedder_warmup, ctx.reranker_warmup, ctx.prefetch_task):
         if warmup is not None and not warmup.done():
             tasks.append(warmup)
     for task in tasks:

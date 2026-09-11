@@ -174,6 +174,38 @@
       b.classList.toggle("active", b.dataset.device === (d.config_pin || d.setting)));
   }
 
+  /* ---- model prefetch (issue #51) ------------------------------------------ */
+
+  const PREFETCH_CHIP_STATUS = { pending: "idle", skipped: "idle", running: "running", done: "done", failed: "failed" };
+
+  function applyPrefetch(pf) {
+    if (!pf || !("status" in pf)) return;
+    const btn = $("[data-prefetch-btn]");
+    if (btn && !btn.classList.contains("busy")) {
+      btn.disabled = pf.status === "running";
+      btn.textContent = pf.status === "running" ? "Downloading…" : "Download models";
+    }
+    $$("[data-f=\"prefetch-steps\"] [data-step]").forEach((el) => {
+      const step = (pf.steps || {})[el.dataset.step];
+      if (!step) return;
+      el.className = "chip chip-" + (PREFETCH_CHIP_STATUS[step.status] || "idle");
+      el.title = step.detail || "";
+    });
+    const prog = $("[data-f=\"prefetch-progress\"]");
+    if (prog) {
+      prog.hidden = pf.status === "idle";
+      const bar = $("[data-f=\"bar\"]", prog);
+      if (bar) {
+        if (pf.percent == null) { bar.classList.add("indet"); bar.style.width = "100%"; }
+        else { bar.classList.remove("indet"); bar.style.width = Math.min(100, pf.percent) + "%"; }
+      }
+      const pct = $("[data-f=\"pct\"]", prog);
+      if (pct) pct.textContent = pf.percent != null ? Math.round(pf.percent) + "%" : "";
+      const err = $("[data-f=\"prefetch-error\"]", prog);
+      if (err) err.textContent = pf.error || "";
+    }
+  }
+
   /* ---- project-page tables ------------------------------------------------ */
 
   function cell(row, cls, text) {
@@ -293,8 +325,10 @@
         (o.projects || []).forEach(applyProject);
         applyTotals(o.totals || {});
         applyDevice(o.device);
+        applyPrefetch(o.prefetch);
         renderAges();
-        schedule(o.totals.running > 0 || (o.projects || []).some((p) => p.progress));
+        schedule(o.totals.running > 0 || (o.projects || []).some((p) => p.progress)
+          || (o.prefetch && o.prefetch.status === "running"));
       } else if (PAGE === "project") {
         const res = await fetch("/api/projects/" + encodeURIComponent(PID) + "/state");
         if (!res.ok) { schedule(false); return; }
@@ -319,6 +353,23 @@
   /* ---- actions ------------------------------------------------------------ */
 
   document.addEventListener("click", async (e) => {
+    const prefetchBtn = e.target.closest("button[data-prefetch-btn]");
+    if (prefetchBtn && !prefetchBtn.disabled) {
+      prefetchBtn.disabled = true;
+      prefetchBtn.classList.add("busy");
+      prefetchBtn.textContent = "Downloading…";
+      try {
+        const r = await post("/api/prefetch");
+        toast(r && r.status === "already_running" ? "Download already in progress" : "Model download started", "ok");
+        schedule(true);
+      } catch (err) {
+        toast(err.message);
+        prefetchBtn.disabled = false;
+      }
+      prefetchBtn.classList.remove("busy");
+      return;
+    }
+
     const pill = e.target.closest("button[data-device]");
     if (pill && !pill.disabled) {
       try {
@@ -837,7 +888,8 @@
   }
 
   if (PAGE === "index" || PAGE === "project") {
-    const busyNow = $$('[data-f="progress"]').some((el) => !el.hidden);
+    const prefetchBusy = $('[data-prefetch-btn]') && $('[data-prefetch-btn]').disabled;
+    const busyNow = $$('[data-f="progress"]').some((el) => !el.hidden) || !!prefetchBusy;
     schedule(busyNow);
     // keep relative times fresh between polls
     setInterval(renderTimes, 30000);

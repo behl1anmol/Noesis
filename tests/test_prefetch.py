@@ -10,6 +10,8 @@ claim in its name to be about the embedder.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -740,3 +742,205 @@ def test_an_empty_pin_does_not_probe_the_working_directory(tmp_path, monkeypatch
 
     assert model_assets_ready("") is False
     assert model_assets_ready("   ") is False
+
+
+# --- dashboard "Download models" background job (issue #51) ------------------
+#
+# job_status/start_job/_run_job sequence the SAME four functions main() calls
+# (prefetch_grammars, prefetch_bm25, prefetch_model, prefetch_reranker), so
+# these tests stub exactly those four — never the network itself — mirroring
+# _patched_main's approach above. ctx is a bare SimpleNamespace: both
+# functions duck-type it (getattr/setattr), same as model_readiness/
+# reranker_readiness above.
+
+
+def _stub_prefetch_steps(
+    monkeypatch,
+    *,
+    grammars=None,
+    bm25=None,
+    model=None,
+    reranker=None,
+    configured=("stub/embedder", "stub/reranker"),
+):
+    import noesis.prefetch as prefetch
+
+    monkeypatch.setattr(prefetch, "prefetch_grammars", grammars or (lambda: []))
+    monkeypatch.setattr(prefetch, "prefetch_bm25", bm25 or (lambda: None))
+    monkeypatch.setattr(prefetch, "prefetch_model", model or (lambda model_id: None))
+    monkeypatch.setattr(
+        prefetch, "prefetch_reranker", reranker or (lambda model_id: None)
+    )
+    monkeypatch.setattr(prefetch, "configured_model_ids", lambda: configured)
+
+
+async def test_job_status_is_idle_shape_with_no_job_ever_run():
+    from noesis.prefetch import PREFETCH_STEPS, job_status
+
+    status = job_status(SimpleNamespace())
+    assert status["status"] == "idle"
+    assert status["percent"] is None
+    assert status["error"] is None
+    assert set(status["steps"]) == set(PREFETCH_STEPS)
+    assert all(
+        s == {"status": "pending", "detail": None} for s in status["steps"].values()
+    )
+
+
+async def test_start_job_runs_every_step_to_done(monkeypatch):
+    from noesis.prefetch import job_status, start_job
+
+    _stub_prefetch_steps(monkeypatch)
+    ctx = SimpleNamespace()
+    accepted = start_job(ctx)
+    assert accepted == {"status": "accepted"}
+    await asyncio.wait_for(ctx.prefetch_task, timeout=2)
+
+    status = job_status(ctx)
+    assert status["status"] == "done"
+    assert status["percent"] == 100.0
+    assert status["error"] is None
+    assert {name: s["status"] for name, s in status["steps"].items()} == {
+        "grammars": "done",
+        "bm25": "done",
+        "model": "done",
+        "reranker": "done",
+    }
+    assert status["steps"]["model"]["detail"] == "stub/embedder"
+    assert status["steps"]["reranker"]["detail"] == "stub/reranker"
+
+
+async def test_second_start_while_running_reports_already_running_and_launches_nothing(
+    monkeypatch,
+):
+    from noesis.prefetch import start_job
+
+    calls: list[str] = []
+    _stub_prefetch_steps(monkeypatch, grammars=lambda: calls.append("grammars") or [])
+    ctx = SimpleNamespace()
+
+    # No await happens between these two calls, so the first job's task
+    # cannot have run yet (asyncio never runs a freshly created task until
+    # its creator yields) — the second call is guaranteed to observe
+    # "running", not a race against how fast the stubs happen to finish.
+    first = start_job(ctx)
+    second = start_job(ctx)
+    assert first == {"status": "accepted"}
+    assert second == {"status": "already_running"}
+
+    await asyncio.wait_for(ctx.prefetch_task, timeout=2)
+    assert calls == ["grammars"]  # only the first launch's task ever ran
+
+
+async def test_a_failed_step_stops_the_remaining_steps_and_marks_the_job_failed(
+    monkeypatch,
+):
+    from noesis.prefetch import job_status, start_job
+
+    def boom():
+        raise RuntimeError("network unreachable")
+
+    _stub_prefetch_steps(monkeypatch, bm25=boom)
+    ctx = SimpleNamespace()
+    start_job(ctx)
+    await asyncio.wait_for(ctx.prefetch_task, timeout=2)
+
+    status = job_status(ctx)
+    assert status["status"] == "failed"
+    assert status["error"] == "network unreachable"
+    steps = status["steps"]
+    assert steps["grammars"]["status"] == "done"
+    assert steps["bm25"]["status"] == "failed"
+    assert steps["bm25"]["detail"] == "network unreachable"
+    # Never attempted — the point of stopping at the first hard failure
+    # (module docstring): a broken network fails every later step the same
+    # way, so trying them only burns more time before reporting it.
+    assert steps["model"]["status"] == "pending"
+    assert steps["reranker"]["status"] == "pending"
+    assert status["percent"] == 25.0  # 1 of 4 applicable steps finished done
+
+
+async def test_grammar_failures_are_non_fatal_and_recorded_in_detail(monkeypatch):
+    from noesis.prefetch import job_status, start_job
+
+    _stub_prefetch_steps(monkeypatch, grammars=lambda: ["go", "rust"])
+    ctx = SimpleNamespace()
+    start_job(ctx)
+    await asyncio.wait_for(ctx.prefetch_task, timeout=2)
+
+    status = job_status(ctx)
+    assert status["status"] == "done"  # a degraded grammar does not fail the job
+    grammars = status["steps"]["grammars"]
+    assert grammars["status"] == "done"
+    assert grammars["detail"] == "2 grammar(s) failed: go, rust"
+    assert status["steps"]["bm25"]["status"] == "done"  # the run continued
+
+
+async def test_an_unreadable_config_skips_model_and_reranker_steps(monkeypatch):
+    from noesis.prefetch import job_status, start_job
+
+    _stub_prefetch_steps(monkeypatch, configured=None)
+    ctx = SimpleNamespace()
+    start_job(ctx)
+    await asyncio.wait_for(ctx.prefetch_task, timeout=2)
+
+    status = job_status(ctx)
+    assert status["status"] == "done"
+    steps = status["steps"]
+    assert steps["grammars"]["status"] == "done"
+    assert steps["bm25"]["status"] == "done"
+    assert steps["model"]["status"] == "skipped"
+    assert steps["model"]["detail"] == "config.toml could not be read"
+    assert steps["reranker"]["status"] == "skipped"
+    # Skipped steps count toward neither the numerator nor the denominator —
+    # both applicable (non-skipped) steps finished, so this is a clean 100%,
+    # not a report that half the job is missing.
+    assert status["percent"] == 100.0
+
+
+async def test_a_cancelled_job_is_marked_failed_not_left_running_forever(monkeypatch):
+    """Code-review finding: ``_run_job``'s ``except Exception`` never sees
+    ``asyncio.CancelledError`` (a direct ``BaseException`` subclass since
+    Python 3.8), so a job cancelled at teardown (``close_runtime_context``,
+    e.g. server shutdown mid-download) left ``status`` stuck ``"running"``
+    forever — ``finished_at`` got stamped by the ``finally`` block but
+    ``status``/``error`` never did, an internally inconsistent state no
+    poller could ever resolve. Mirrors ``indexer.execute_run``'s own
+    ``except BaseException`` handling for the identical scenario ("must
+    also mark the run failed, or it would sit 'running' forever")."""
+    from noesis.prefetch import job_status, start_job
+
+    gate = threading.Event()
+    _stub_prefetch_steps(monkeypatch, grammars=lambda: gate.wait(timeout=5) and [])
+
+    ctx = SimpleNamespace()
+    start_job(ctx)
+    task = ctx.prefetch_task
+
+    # Let the task actually start and reach the blocking grammars step
+    # before cancelling: a task cancelled before it has run even once has
+    # CancelledError thrown before its body — and this function's own
+    # try/except — ever executes at all (a coroutine .throw()n before its
+    # first .send() raises at the call site without running any of the
+    # coroutine's code), which is a different, uninteresting case from the
+    # one under test here: a task cancelled while genuinely in-flight, the
+    # real close_runtime_context/shutdown scenario.
+    deadline = asyncio.get_event_loop().time() + 2
+    while job_status(ctx)["steps"]["grammars"]["status"] != "running":
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError("job never reached the grammars step")
+        await asyncio.sleep(0.01)
+
+    # Cancellation is only DELIVERED once the blocked thread's call returns
+    # (asyncio.to_thread cannot interrupt a running thread) — release it
+    # after requesting cancellation so the coroutine actually resumes and
+    # gets the chance to (mis)handle CancelledError.
+    task.cancel()
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    status = job_status(ctx)
+    assert status["status"] == "failed"
+    assert status["finished_at"] is not None
+    assert status["steps"]["grammars"]["status"] == "failed"

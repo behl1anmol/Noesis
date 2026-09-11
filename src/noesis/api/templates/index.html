@@ -57,6 +57,41 @@
     </div>
   </section>
 
+  {# ---- Model assets / prefetch (ADR-42 sibling — issue #51) -------------- #}
+  {% set pf = overview.prefetch %}
+  <section class="section panel fade" style="animation-delay: 80ms">
+    <div class="section-head" style="margin-bottom: 6px">
+      <h2>Model assets</h2>
+      <button type="button" class="btn" data-prefetch-btn
+              {% if pf.status == 'running' %}disabled{% endif %}>
+        {{ 'Downloading…' if pf.status == 'running' else 'Download models' }}
+      </button>
+    </div>
+    <p class="muted" style="font-size: 12.5px; margin: 0 0 8px">
+      Fetches tree-sitter grammars, the BM25 tokenizer assets, and the configured
+      embedding/reranker model weights — the same one-time download
+      <code>uv run python -m noesis.prefetch</code> does from a terminal, run from
+      here instead.
+    </p>
+    <div class="pills" data-f="prefetch-steps">
+      {% for name in ('grammars', 'bm25', 'model', 'reranker') %}
+        {% set st = pf.steps[name].status %}
+        <span class="chip chip-{{ 'idle' if st in ('pending', 'skipped') else st }}"
+              data-step="{{ name }}" title="{{ pf.steps[name].detail or '' }}">{{ name }}</span>
+      {% endfor %}
+    </div>
+    <div class="progress" data-f="prefetch-progress" {% if pf.status == 'idle' %}hidden{% endif %}>
+      <div class="progress-track">
+        <div class="progress-fill{{ ' indet' if pf.percent is none else '' }}" data-f="bar"
+             style="width: {{ (pf.percent if pf.percent is not none else 100) | round(1) }}%"></div>
+      </div>
+      <div class="progress-meta">
+        <span data-f="pct">{% if pf.percent is not none %}{{ pf.percent | round | int }}%{% endif %}</span>
+        <span data-f="prefetch-error" class="err-text">{{ pf.error or '' }}</span>
+      </div>
+    </div>
+  </section>
+
   <section class="section">
     <div class="section-head fade" style="animation-delay: 100ms; display:flex; align-items:center; justify-content:space-between">
       <h2>Projects</h2>
